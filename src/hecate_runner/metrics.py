@@ -305,3 +305,47 @@ class MetricsStore:
                 }
             )
         return sorted(rows, key=lambda row: (row["source"], row["stage"]))
+
+    def summary(self, *, days: int = 7) -> dict[str, Any]:
+        """Aggregate high-level operational statistics over the past N days."""
+        aggregates = self.aggregate(days=days)
+        completed_cycles = sum(a.get("cycles", 0) for a in aggregates if a.get("stage") == "cycle")
+        if completed_cycles == 0 and aggregates:
+            completed_cycles = max(a.get("cycles", 0) for a in aggregates)
+
+        total_cost_usd = sum(a.get("estimated_cost_usd", 0.0) or 0.0 for a in aggregates)
+        total_llm_calls = sum(a.get("llm_calls", 0) or 0 for a in aggregates)
+        total_input_tokens = sum(a.get("input_tokens", 0) or 0 for a in aggregates)
+        total_output_tokens = sum(a.get("output_tokens", 0) or 0 for a in aggregates)
+
+        stages: dict[str, dict[str, Any]] = {}
+        active_sources: set[str] = set()
+        for a in aggregates:
+            st = a.get("stage")
+            src = a.get("source")
+            if src:
+                active_sources.add(str(src))
+            if not st or st == "cycle":
+                continue
+            stage_entry = stages.setdefault(
+                str(st),
+                {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+            )
+            stage_entry["calls"] += a.get("llm_calls", 0) or 0
+            stage_entry["input_tokens"] += a.get("input_tokens", 0) or 0
+            stage_entry["output_tokens"] += a.get("output_tokens", 0) or 0
+            stage_entry["cost_usd"] += a.get("estimated_cost_usd", 0.0) or 0.0
+
+        return {
+            "completed_cycles": completed_cycles,
+            "hunts_completed": completed_cycles,
+            "sigma_rules_produced": 0,
+            "total_cost_usd": total_cost_usd,
+            "spend_today_usd": total_cost_usd,
+            "daily_budget_usd": 20.0,
+            "total_llm_calls": total_llm_calls,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "active_sources": sorted(active_sources),
+            "stages": stages,
+        }

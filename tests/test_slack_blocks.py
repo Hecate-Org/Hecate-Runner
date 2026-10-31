@@ -74,6 +74,22 @@ def test_build_hunt_completed_card() -> None:
     assert "https://localhost:8443/events/view/140" in button_urls
 
 
+def test_build_hunt_completed_card_clips_long_text() -> None:
+    long_topic = "A" * 5000
+    cards = build_hunt_completed_card(
+        hunt_id="H-0999",
+        topic=long_topic,
+        techniques=["T1059"],
+        sigma_count=1,
+    )
+    blocks = cards[0]["blocks"]
+    topic_block = blocks[1]
+    assert topic_block["type"] == "section"
+    # Slack limits section text to 3,000 characters
+    assert len(topic_block["text"]["text"]) <= 3000
+    assert "[clipped]" in topic_block["text"]["text"]
+
+
 def test_build_purple_team_card() -> None:
     # Success card
     cards_success = build_purple_team_card(

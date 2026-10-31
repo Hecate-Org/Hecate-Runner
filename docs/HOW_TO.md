@@ -23,9 +23,9 @@ Hecate uses [uv](https://docs.astral.sh/uv/) for lightning-fast, reproducible de
 ```bash
 mkdir -p ~/betas && cd ~/betas
 
-git clone https://github.com/BrizoSec/Hecate-Core.git
-git clone https://github.com/BrizoSec/Hecate-Runner.git
-git clone https://github.com/BrizoSec/Hecate-Content.git Hecate-Workspace
+git clone https://github.com/Hecate-Org/Hecate-Core.git
+git clone https://github.com/Hecate-Org/Hecate-Runner.git
+git clone https://github.com/Hecate-Org/Hecate-Public.git Hecate-Workspace
 ```
 
 ### 1.2 Initialize Virtual Environments & Install Dependencies

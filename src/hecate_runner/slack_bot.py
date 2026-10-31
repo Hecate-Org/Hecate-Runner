@@ -509,18 +509,84 @@ class SlackBotService:
                 respond(text=finish_msg)
                 return
 
+            if subcmd == "tune":
+                if len(tokens) < 3:
+                    respond(
+                        text=(
+                            "⚠️ *Usage:* `/hecate tune <hunt_id> <instruction>`\n"
+                            "• Example: `/hecate tune H-0868 exclude svchost.exe with parent services.exe`\n"
+                            "• Example: `/hecate tune H-0868 filter path C:\\Program Files\\AdminTools`"
+                        )
+                    )
+                    return
+
+                hunt_id = tokens[1].upper()
+                instruction = " ".join(tokens[2:])
+                from hecate_runner.rule_tuner import RuleTuner
+
+                tuner = RuleTuner(self.settings.hecate_workspace)
+                tune_res = tuner.tune_hunt_rule(hunt_id, instruction)
+                if tune_res.ok:
+                    purple_res = replay_hunt_purple_team(self.settings.hecate_workspace, hunt_id)
+                    fidelity = purple_res.get("fidelity", "100%") if purple_res.get("ok") else "N/A"
+                    passed = purple_res.get("passed_rules", 0) if purple_res.get("ok") else 0
+                    total = purple_res.get("total_rules", 0) if purple_res.get("ok") else 0
+                    purple_summary = f"{passed}/{total} rules passed ({fidelity} fidelity)"
+
+                    gh_summary = ""
+                    if self.settings.github_publishing_enabled:
+                        try:
+                            from hecate_runner.github_publisher import enqueue_hunt, sync_outbox
+
+                            enqueue_hunt(self.settings, hunt_id)
+                            pub_results = sync_outbox(self.settings)
+                            for pr in pub_results:
+                                if pr.hunt_id == hunt_id:
+                                    if pr.pr_url:
+                                        gh_summary = f"\n• *GitHub Pull Request:* <{pr.pr_url}|PR #{pr.pr_number}> updated (`{pr.digest[:8]}`)"
+                                    else:
+                                        gh_summary = f"\n• *GitHub Outbox:* Enqueued revision (`{pr.digest[:8]}`)"
+                                    break
+                        except Exception as gh_err:
+                            log.warning("Failed to sync GitHub PR for %s: %s", hunt_id, gh_err)
+                            gh_summary = f"\n• *GitHub PR Sync:* Warning: {gh_err}"
+
+                    targets_str = ", ".join(f"`{t}`" for t in tune_res.transpiled_targets) or "None"
+                    msg = (
+                        f"🛠️ *Sigma Rule Tuned & Autonomous Validation Completed for `{hunt_id}`*\n"
+                        f"• *Analyst Instruction:* _{instruction}_\n"
+                        f"• *Action Taken:* {tune_res.action_summary}\n"
+                        f"• *Updated Telemetry Targets:* {targets_str}\n"
+                        f"• *Purple-Team Validation:* {purple_summary}"
+                        f"{gh_summary}\n\n"
+                        f"```diff\n{tune_res.diff}\n```"
+                    )
+                else:
+                    msg = f"❌ *Rule tuning failed for `{hunt_id}`:* {tune_res.error}"
+
+                respond(text=msg)
+                return
+
             respond(
                 text=f"❓ Unknown command `/hecate {subcmd}`. Type `/hecate help` for available commands."
             )
+
+        @self._app.event("app_mention")
+        def handle_app_mention(body: dict[str, Any], say: Any, client: Any = None) -> None:
+            handle_thread_message(body, say, client=client)
 
         @self._app.event("message")
         def handle_thread_message(body: dict[str, Any], say: Any, client: Any = None) -> None:
             event = body.get("event", {})
             if event.get("subtype") or event.get("bot_id"):
                 return
+            is_mention = event.get("type") == "app_mention"
             thread_ts = event.get("thread_ts")
             if not thread_ts:
-                return
+                if is_mention:
+                    thread_ts = event.get("ts")
+                else:
+                    return
 
             text = str(event.get("text") or "").strip()
             if not text:
@@ -550,6 +616,15 @@ class SlackBotService:
                     log.debug("Thread parent lookup failed: %s", c_err)
 
             if not hunt_id:
+                if is_mention:
+                    say(
+                        text=(
+                            "⚠️ *Could not identify hunt ID for tuning.* "
+                            "Please specify the hunt ID (e.g. `@hecate tune H-0700 exclude svchost.exe with parent services.exe`) "
+                            "or reply in an active hunt notification thread."
+                        ),
+                        thread_ts=thread_ts,
+                    )
                 return
 
             log.info("Conversational HITL rule tuning for %s from %s: '%s'", hunt_id, user_id, text)
@@ -559,12 +634,40 @@ class SlackBotService:
             res = tuner.tune_hunt_rule(hunt_id, text)
 
             if res.ok:
+                purple_res = replay_hunt_purple_team(self.settings.hecate_workspace, hunt_id)
+                fidelity = purple_res.get("fidelity", "100%") if purple_res.get("ok") else "N/A"
+                passed = purple_res.get("passed_rules", 0) if purple_res.get("ok") else 0
+                total = purple_res.get("total_rules", 0) if purple_res.get("ok") else 0
+                purple_summary = f"{passed}/{total} rules passed ({fidelity} fidelity)"
+
+                gh_summary = ""
+                if self.settings.github_publishing_enabled:
+                    try:
+                        from hecate_runner.github_publisher import enqueue_hunt, sync_outbox
+
+                        enqueue_hunt(self.settings, hunt_id)
+                        pub_results = sync_outbox(self.settings)
+                        for pr in pub_results:
+                            if pr.hunt_id == hunt_id:
+                                if pr.pr_url:
+                                    gh_summary = f"\n• *GitHub Pull Request:* <{pr.pr_url}|PR #{pr.pr_number}> updated (`{pr.digest[:8]}`)"
+                                else:
+                                    gh_summary = f"\n• *GitHub Outbox:* Enqueued revision (`{pr.digest[:8]}`)"
+                                break
+                    except Exception as gh_err:
+                        log.warning(
+                            "Failed to sync GitHub PR for %s after tuning: %s", hunt_id, gh_err
+                        )
+                        gh_summary = f"\n• *GitHub PR Sync:* Warning: {gh_err}"
+
                 targets_str = ", ".join(f"`{t}`" for t in res.transpiled_targets) or "None"
                 msg = (
                     f"🛠️ *Sigma Rule Tuned & Re-Transpiled for `{hunt_id}`*\n"
                     f"• *Analyst Instruction:* _{text}_\n"
                     f"• *Action Taken:* {res.action_summary}\n"
-                    f"• *Updated Telemetry Targets:* {targets_str}\n\n"
+                    f"• *Updated Telemetry Targets:* {targets_str}\n"
+                    f"• *Purple-Team Validation:* {purple_summary}"
+                    f"{gh_summary}\n\n"
                     f"```diff\n{res.diff}\n```"
                 )
             else:

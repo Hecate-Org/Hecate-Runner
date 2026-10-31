@@ -178,7 +178,7 @@ class DetectionVerifier:
             notes.append(
                 f"Received {len(events_to_evaluate)} telemetry event(s) for rule evaluation."
             )
-        if backend == "lab_process":
+        if backend in {"lab_process", "lab_fusion"}:
             notes.append(
                 "Independent Linux lab process sensor; local Sigma evaluation, no SIEM alert verification."
             )

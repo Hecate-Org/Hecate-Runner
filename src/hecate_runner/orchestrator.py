@@ -29,7 +29,7 @@ from hecate_agent.core.hunt_ids import hunt_id_lock, next_hunt_id
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.config import Settings
 from hecate_runner.context_metrics import measure_tokens
-from hecate_runner.cti import ATTACK_TECHNIQUE_LINE, CTIItem, CTIProvider, get_provider
+from hecate_runner.cti import CTIItem, CTIProvider, get_provider
 from hecate_runner.cti_triage import source_quality_verdict, triage
 from hecate_runner.github_publisher import enqueue_hunt, sync_outbox
 from hecate_runner.hecate_client import HecateClient, HecateError, HypothesisResult
@@ -42,696 +42,39 @@ from hecate_runner.indicator_sweep import build_indicator_sweep, parse_indicator
 from hecate_runner.metrics import CycleMetrics, LLMUsage, MetricsStore
 from hecate_runner.misp_publisher import enqueue_misp_hunt, sync_misp_outbox
 from hecate_runner.notifications import notify_draft_created
+from hecate_runner.orchestrator_derivations import (
+    _MAX_SKIPS_PER_CYCLE,
+    _NO_OBSERVABLES,
+    _RULE_IOC_RE,
+    _fill_empty_source_slot,
+    _indicator_only_source,
+    _merge_indicator_record,
+    attributed_actor,
+    derive_data_sources,
+    derive_research_topic,
+    has_narrative,
+    is_actionable,
+    merge_techniques,
+    platform_consistent_data_sources,
+    platforms_named_in,
+    substantive_observables,
+)
+from hecate_runner.orchestrator_derivations import (
+    platforms_evidenced_in as platforms_evidenced_in,
+)
+from hecate_runner.orchestrator_derivations import (
+    research_tradecraft_text as research_tradecraft_text,
+)
+from hecate_runner.orchestrator_ttp import resolve_ttps
+from hecate_runner.orchestrator_validation import (
+    run_bas_validation,
+    run_purple_team_validation,
+)
 from hecate_runner.parked_store import park, prune_parked
 from hecate_runner.state import OrchestratorState
 from hecate_runner.trail import CycleTrail, clip, counts, listing
 
 log = logging.getLogger(__name__)
-
-# MITRE technique IDs embedded in raw CTI text, e.g. "T1003.001" or "T1053.005".
-_TECHNIQUE_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
-
-# `hecate-agent research new --topic` expects a short label, not a raw CTI paragraph.
-_TOPIC_MAX_LEN = 100
-
-# A technique whose ATT&CK platform list is this broad (of the ~10 platforms
-# ATT&CK currently defines) doesn't meaningfully scope a hunt -- e.g. T1078
-# "Valid Accounts" and T1098 "Account Manipulation" both list all 10. Left
-# in the union unconditionally, one such technique in a hypothesis's
-# technique list (alongside genuinely narrow ones, e.g. a Windows-only
-# technique) was enough to make `platform` list every ATT&CK platform verbatim
-# regardless of what the CTI actually described -- 37% of one drafting batch.
-# See `_resolve_ttps`.
-_NON_SCOPING_PLATFORM_THRESHOLD = 8
-
-#: The indicator-sweep hypothesis template is "Indicators published in
-#: [source] appear in [telemetry] on [target]". A model that leaves [source]
-#: empty yields "published in  appear" -- which reaches the draft twice, as
-#: the frontmatter title and as the Hypothesis Statement, and reads like a
-#: truncation bug rather than a missing value. The CTI item's own title is
-#: exactly the value that belongs in that slot, so fill it here rather than
-#: hoping the model stops omitting it.
-#: Platform names ATT&CK uses, keyed by how a hypothesis is likely to spell
-#: them. Used to scope a draft's platform list by what the hypothesis actually
-#: claims: a union across every technique the CTI asserted returned
-#: ESXi/Linux/macOS/Network Devices/Windows for a hypothesis whose own text
-#: said "compromised Windows systems" and whose ABLE Location said "Windows
-#: domain-joined endpoints".
-_PLATFORM_MENTIONS: dict[str, str] = {
-    "windows": "Windows",
-    "linux": "Linux",
-    "macos": "macOS",
-    "mac os": "macOS",
-    "esxi": "ESXi",
-    "network device": "Network Devices",
-    "network devices": "Network Devices",
-    "container": "Containers",
-    "containers": "Containers",
-    "kubernetes": "Containers",
-    "docker": "Containers",
-    "k8s": "Containers",
-    "identity provider": "Identity Provider",
-    "entra id": "Identity Provider",
-    "entra": "Identity Provider",
-    "azure ad": "Identity Provider",
-    "okta": "Identity Provider",
-    "office suite": "Office Suite",
-    "office 365": "Office Suite",
-    "m365": "Office Suite",
-    "saas": "SaaS",
-    "iaas": "IaaS",
-    "aws": "IaaS",
-    "azure": "IaaS",
-    "gcp": "IaaS",
-    "cloud": "IaaS",
-    "android": "Android",
-    "ios": "iOS",
-    "mobile": "Mobile",
-}
-
-#: Artifacts that exist on one platform only, read from the *intel* (never the
-#: hypothesis) when the hypothesis names no platform. DarkMe's pulse never says
-#: "Windows", but it describes PIF executables, MSI installers and COM objects;
-#: without these the draft was scoped to every platform its techniques run on,
-#: ESXi and SaaS included. Each entry must be unambiguous: "bash" and "cron"
-#: run on both Linux and macOS, so they are absent.
-_PLATFORM_ARTIFACTS: dict[str, str] = {
-    "powershell": "Windows",
-    "msiexec": "Windows",
-    "msi": "Windows",
-    "rundll32": "Windows",
-    "regsvr32": "Windows",
-    "mshta": "Windows",
-    "wmic": "Windows",
-    "lsass": "Windows",
-    "exe": "Windows",
-    "dll": "Windows",
-    "pif": "Windows",
-    "lnk": "Windows",
-    "hta": "Windows",
-    "docx": "Windows",
-    "doc": "Windows",
-    "wscript": "Windows",
-    "cscript": "Windows",
-    "schtasks": "Windows",
-    "launchdaemon": "macOS",
-    "launchagent": "macOS",
-    "applescript": "macOS",
-    "osascript": "macOS",
-    "gatekeeper": "macOS",
-    "elf": "Linux",
-    "systemd": "Linux",
-    "auditd": "Linux",
-    "nsenter": "Containers",
-    "kubectl": "Containers",
-    "containerd": "Containers",
-    "cloudtrail": "IaaS",
-    "assumerole": "IaaS",
-    "oauth": "Identity Provider",
-    "apk": "Android",
-    "dex": "Android",
-    "aab": "Android",
-    "dalvik": "Android",
-    "ipa": "iOS",
-}
-
-#: Telemetry a technique implies, by ID prefix so sub-techniques inherit. Uses
-#: the same four category names the research document and hypothesis agent
-#: already speak, so a derived source and a model-proposed one are comparable.
-_TECHNIQUE_DATA_SOURCES: dict[str, tuple[str, ...]] = {
-    "T1059": ("process_execution",),
-    "T1106": ("process_execution",),
-    "T1204": ("process_execution",),
-    "T1140": ("process_execution",),
-    "T1620": ("process_execution",),
-    "T1027": ("process_execution", "file_operations"),
-    "T1005": ("file_operations", "process_execution"),
-    "T1083": ("file_operations", "process_execution"),
-    "T1070": ("file_operations",),
-    "T1574": ("file_operations",),
-    "T1105": ("network_connections", "file_operations"),
-    "T1041": ("network_connections",),
-    "T1071": ("network_connections",),
-    "T1090": ("network_connections",),
-    "T1547": ("registry_events",),
-    "T1543": ("registry_events", "process_execution"),
-    "T1112": ("registry_events",),
-}
-
-#: Indicator type -> telemetry that could match it. Covers both providers'
-#: spellings (MISP's "ip-dst", OTX's "IPv4"); lookups lowercase the type.
-_INDICATOR_DATA_SOURCES: dict[str, tuple[str, ...]] = {
-    "ip-dst": ("network_connections",),
-    "ip-src": ("network_connections",),
-    "ipv4": ("network_connections",),
-    "ipv6": ("network_connections",),
-    "domain": ("network_connections",),
-    "hostname": ("network_connections",),
-    "url": ("network_connections",),
-    "uri": ("network_connections",),
-    "filename": ("file_operations", "process_execution"),
-    "filepath": ("file_operations",),
-    "md5": ("file_operations",),
-    "sha1": ("file_operations",),
-    "sha256": ("file_operations",),
-    "filehash-md5": ("file_operations",),
-    "filehash-sha1": ("file_operations",),
-    "filehash-sha256": ("file_operations",),
-    "regkey": ("registry_events",),
-    "mutex": ("process_execution",),
-}
-
-
-def merge_techniques(cti_techniques: list[str], hypothesis_techniques: list[str]) -> list[str]:
-    """Combine what the CTI asserted with what the hypothesis reasoned about.
-
-    The hypothesis agent returns the two or three techniques it wrote prose
-    around, and generalises sub-techniques while doing it -- a source event
-    naming T1059.003 (Windows Command Shell) reached the draft as bare T1059.
-    That is a real loss: T1059.003 is Windows-only, T1059 spans five
-    platforms, so the imprecision propagates straight into the platform list.
-
-    The CTI's list leads because it is the asserted evidence; the
-    hypothesis's own additions follow. A bare parent is dropped when a
-    sub-technique of it is present, so T1059 + T1059.003 collapses to the
-    specific one rather than carrying both.
-    """
-    merged: list[str] = []
-    for technique in [*cti_techniques, *hypothesis_techniques]:
-        normalised = str(technique).upper().strip()
-        if normalised and normalised not in merged:
-            merged.append(normalised)
-
-    parents_with_children = {t.split(".", 1)[0] for t in merged if "." in t}
-    return [t for t in merged if "." in t or t not in parents_with_children]
-
-
-_TRADECRAFT_SECTION_RE = re.compile(
-    r"^## 2\. Adversary Tradecraft.*?$(.*?)(?=^## \d+\.|\Z)", re.MULTILINE | re.DOTALL
-)
-
-
-def research_tradecraft_text(research_doc: str) -> str:
-    """The research document's Adversary Tradecraft section.
-
-    What the retrieved sources said adversaries did. The rest of the document
-    is model speculation -- gaps, focus areas, telemetry -- whose wording must
-    not be able to put a technique on a hunt.
-    """
-    match = _TRADECRAFT_SECTION_RE.search(research_doc or "")
-    return match.group(1) if match else ""
-
-
-#: A markdown link or a bare URL. Research lists the pages its web search
-#: returned, and their titles are not the intel: R-0012's list carried a
-#: Kubernetes article and a Linux rule link, which scoped a Windows DLL
-#: hijacking hunt to Linux and Containers too.
-_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)|https?://\S+")
-
-
-def platforms_evidenced_in(*texts: str) -> list[str]:
-    """Platforms the intel names outright or implies by a platform-only artifact.
-
-    Links and URLs are ignored: they cite where something was read, not where
-    the activity happened. Attacker-side passages in actor-material reports
-    (e.g. operator's workstation or toolkit files) are ignored.
-    """
-    from hecate_agent.core.technique_evidence import (
-        actor_material_report,
-        attacker_side,
-        sentences,
-    )
-
-    clean_texts: list[str] = []
-    for t in texts:
-        if not t:
-            continue
-        cleaned = _LINK_RE.sub(" ", t)
-        if actor_material_report(cleaned):
-            observed_sentences = [
-                s for s in sentences(cleaned) if not attacker_side(s.lower(), actor_material=True)
-            ]
-            clean_texts.append(" ".join(observed_sentences))
-        else:
-            clean_texts.append(cleaned)
-
-    named = platforms_named_in(*clean_texts)
-    haystack = " ".join(clean_texts).lower()
-    for artifact, platform in _PLATFORM_ARTIFACTS.items():
-        if platform not in named and re.search(r"\b" + re.escape(artifact) + r"\b", haystack):
-            named.append(platform)
-    return named
-
-
-def platforms_named_in(*texts: str) -> list[str]:
-    """Platforms a hypothesis explicitly claims, in ATT&CK's spelling."""
-    haystack = " ".join(t for t in texts if t).lower()
-    named: list[str] = []
-    for mention, platform in _PLATFORM_MENTIONS.items():
-        pattern = r"\b" + re.escape(mention) + r"\b"
-        if re.search(pattern, haystack) and platform not in named:
-            named.append(platform)
-    return named
-
-
-def derive_data_sources(techniques: list[str], indicator_types: list[str]) -> list[str]:
-    """Telemetry this hunt needs, from its techniques and indicator types.
-
-    Deterministic, and independent of both the model's vocabulary and the
-    environment profile. The hypothesis agent's own list is kept and merged
-    with this -- it was reaching the draft as `["process_execution"]` alone
-    for a hunt whose CTI carried two C2 hostnames, four IPs and nine URLs.
-    """
-    found: list[str] = []
-    for technique in techniques or []:
-        normalised = str(technique).upper().strip()
-        for prefix, sources in _TECHNIQUE_DATA_SOURCES.items():
-            if normalised.startswith(prefix):
-                found.extend(s for s in sources if s not in found)
-    for indicator_type in indicator_types or []:
-        for source in _INDICATOR_DATA_SOURCES.get(str(indicator_type).lower().strip(), ()):
-            if source not in found:
-                found.append(source)
-    return found
-
-
-#: Telemetry that only exists on a given platform. The hypothesis agent
-#: proposes its own data_sources list and nothing checked it against the
-#: platform the techniques actually resolved to, so a macOS hunt shipped asking
-#: for `registry_events` -- telemetry macOS does not have. A reviewer scoping
-#: that hunt has to notice and discard it, and an automated consumer cannot.
-_PLATFORM_ONLY_DATA_SOURCES: dict[str, frozenset[str]] = {
-    "registry_events": frozenset({"windows"}),
-}
-#: Data sources only a host sensor produces. A hunt scoped only to appliances
-#: (sigma_generator.appliance_only) cannot use them: H-0830's NetScaler draft
-#: listed process_execution and file_operations.
-_HOST_SENSOR_DATA_SOURCES = frozenset(
-    {"process_execution", "file_operations", "registry_events", "endpoint_data", "windows_logs"}
-)
-_NETWORK_DATA_SOURCES = frozenset({"network_connections", "network_logs"})
-
-
-#: Telemetry category names the model returns as if they were observations.
-#: A draft came back with "What Suspicious Looks Like" reading "Process
-#: execution / Network connections / File operations" -- the data source list
-#: retitled, which tells a reviewer nothing about what to look for and reads
-#: as if the section had been filled in.
-_DATA_SOURCE_RESTATEMENTS = frozenset(
-    {
-        "process execution",
-        "process executions",
-        "process creation",
-        "file operations",
-        "file operation",
-        "file events",
-        "network connections",
-        "network connection",
-        "network traffic",
-        "registry events",
-        "registry event",
-        "dns queries",
-        "dns query",
-        "authentication events",
-    }
-)
-
-
-#: Template values the model writes in place of an observation. H-0018 listed
-#: `C:\path\to\malware.ps1`, `C:\path\to\rat.exe` and
-#: `http://maliciousdomain.com/malware.bin` as what suspicious looks like; they
-#: read as indicators, and the Sigma step, which is handed the observables,
-#: wrote the first into a rule.
-_PLACEHOLDER_OBSERVABLE_RE = re.compile(
-    r"[\\/]path[\\/]to[\\/]"
-    r"|\b(?:malicious-?domain|your-?domain|attacker-?domain)\b"
-    r"|\bexample\.(?:com|org|net|test)\b"
-    r"|(?:^|[\\/\s])(?:malware|malicious|rat|evil|badfile|payload)\.(?:exe|dll|ps1|bin|sh|bat|vbs|js|msi)\b"
-    r"|<[a-z][a-z _-]*>",
-    re.IGNORECASE,
-)
-
-
-_NO_OBSERVABLES = "[none proposed - human to populate]"
-
-
-#: Values in a rule that are indicators, not behaviour: IPv4 addresses and MD5/SHA-1/SHA-256 hashes.
-_RULE_IOC_RE = re.compile(
-    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-f]{64}\b|\b[0-9a-f]{40}\b|\b[0-9a-f]{32}\b"
-)
-
-
-def _merge_indicator_record(records: list[Any], rec: Any) -> bool:
-    """Deduplicate an indicator record into records.
-
-    If records already has an entry for rec.value, update existing status/role/ports
-    if rec has more information, but do NOT add a duplicate unreviewed record that
-    could override a historical/target classification.
-    """
-    rec_val = str(getattr(rec, "value", "")).strip().lower()
-    for existing in records:
-        if str(getattr(existing, "value", "")).strip().lower() == rec_val:
-            if (
-                getattr(existing, "status", "unknown") == "unknown"
-                and getattr(rec, "status", "unknown") != "unknown"
-            ):
-                existing.status = rec.status
-            if (
-                getattr(existing, "role", "unknown") == "unknown"
-                and getattr(rec, "role", "unknown") != "unknown"
-            ):
-                existing.role = rec.role
-            if hasattr(rec, "ports") and rec.ports:
-                existing_ports = set(getattr(existing, "ports", []) or [])
-                existing.ports = sorted(existing_ports | set(rec.ports))
-            return False
-    records.append(rec)
-    return True
-
-
-def substantive_observables(observables: list[str]) -> list[str]:
-    """Drop "observables" that restate the telemetry category or are templates.
-
-    Kept deliberately narrow: an entry is dropped only when the whole string is
-    a bare category name, or it contains a template value. "Process execution
-    of an unsigned binary from /tmp" describes something a hunter can look for
-    and stays.
-    """
-    kept: list[str] = []
-    for observable in observables:
-        text = str(observable).strip()
-        normalised = text.lower().rstrip(".").replace("_", " ")
-        if normalised in _DATA_SOURCE_RESTATEMENTS:
-            continue
-        if _PLACEHOLDER_OBSERVABLE_RE.search(text):
-            continue
-        if text:
-            kept.append(text)
-    return kept
-
-
-def platform_consistent_data_sources(data_sources: list[str], platforms: list[str]) -> list[str]:
-    """Drop telemetry that cannot exist on any of this hunt's platforms.
-
-    Only drops when the platform list is non-empty and unambiguous about it.
-    An empty platform list means scope is unknown, not that everything is
-    excluded, so nothing is removed there -- the draft is a starting point for
-    a human, and silently narrowing telemetry on no evidence is worse than
-    leaving a source a reviewer can strike out.
-    """
-    if not platforms:
-        return data_sources
-    known = {str(p).strip().lower() for p in platforms if str(p).strip()}
-    if not known:
-        return data_sources
-
-    from hecate_agent.agents.llm.sigma_generator import appliance_only
-
-    appliance = appliance_only(platforms)
-    kept: list[str] = []
-    for source in data_sources:
-        name = str(source).strip().lower()
-        required = _PLATFORM_ONLY_DATA_SOURCES.get(name)
-        if required is not None and not (known & required):
-            continue
-        if appliance and name in _HOST_SENSOR_DATA_SOURCES:
-            continue
-        kept.append(source)
-    if appliance and not any(str(s).strip().lower() in _NETWORK_DATA_SOURCES for s in kept):
-        # An appliance's own access and system logs, and what the network sees.
-        kept.append("network_logs")
-    return kept
-
-
-_EMPTY_SOURCE_SLOT = re.compile(r"(published in)\s{2,}(appear)", re.IGNORECASE)
-
-
-def _fill_empty_source_slot(hypothesis: str, source_title: str | None) -> str:
-    """Repair an indicator-sweep hypothesis whose [source] slot came back empty."""
-    if not _EMPTY_SOURCE_SLOT.search(hypothesis):
-        return hypothesis
-    source = (source_title or "").strip() or "the source feed"
-    return _EMPTY_SOURCE_SLOT.sub(lambda m: f"{m.group(1)} {source} {m.group(2)}", hypothesis)
-
-
-# ATT&CK's own STIX data uses the literal platform value "PRE" for
-# Reconnaissance/Resource-Development techniques (e.g. T1598 "Phishing for
-# Information") that happen before the adversary has a foothold on any
-# actual system -- there's no OS/environment to name yet. Surfaced verbatim,
-# a hunt file's `platform: ["PRE"]` reads as a parsing bug or an unknown
-# abbreviation, not what it actually means, to a human who has to scope a
-# query against it. Translated at the same point _resolve_ttps already
-# builds the platform list, not hardcoded as a special case in the template.
-_PLATFORM_LABELS = {"PRE": "Pre-Compromise (reconnaissance/targeting -- not endpoint/OS-specific)"}
-
-
-def derive_research_topic(cti_content: str, title: str | None = None) -> tuple[str, str | None]:
-    """Best-effort (topic, technique) pair from a raw CTI blob.
-
-    No NLP here on purpose — this only has to be good enough to seed the
-    research agent's web searches; the research + hypothesis steps do the
-    actual analysis.
-
-    ``title`` should be the provider's clean, single-field title (e.g.
-    RSS entry title, OTX pulse name, MISP event info) when the caller has
-    one. Preferred over flattening/truncating ``cti_content`` -- that blob
-    is "RSS: <title>\\nSource: <feed>\\nTags: ...\\nSummary: ...\\nLink:
-    ...", and truncating *that whole string* at a fixed char count landed
-    mid-"Source:"/"Summary:" label whenever the title alone was long,
-    producing both a garbled `topic` field and a research doc contaminated
-    with docs about "Source" website features whose name got the title
-    pulled from the title alone. Falls back to the old flatten+truncate
-    behavior only when no clean title is available.
-
-    Known accepted limitation: for a title from a recurring series (e.g. a
-    vendor's weekly "This Week in Cybersecurity"-style digest, republished
-    under a near-identical title every week), the bare title alone doesn't
-    disambiguate *which* edition the CTI item actually is -- the resulting
-    ``topic`` can cause the research skills' web search (see
-    search_system_internals/search_adversary_tradecraft in hecate's
-    web_search.py) to ground against a *different* edition of the same
-    series than the one this CTI item is actually about, since none of
-    ``cti_content``'s more specific/disambiguating text (a summary
-    mentioning the edition's actual stories) reaches the search query --
-    only this function's ``topic`` return value does. Observed case: CTI
-    title "The Good, the Bad and the Ugly in Cybersecurity - Week 32
-    (2026)" (real content: a Snowflake breach plea, "Mythos 5", and
-    ChainDrop's npm worm) produced a research doc grounded on a different
-    week's edition entirely (CISO Assistant, "khunt", "The Com" takedown).
-    Left unfixed for now: the actual hunt hypothesis stayed accurate in
-    every observed case regardless, because hypothesis-generator weighs
-    the raw CTI text over the research doc's synthesis when they diverge
-    -- only the research doc itself (not the hunt) ends up describing the
-    wrong content. Revisit if a bad research grounding ever does end up
-    steering a hunt wrong, not just looking wrong on its own.
-    """
-    technique_match = _TECHNIQUE_RE.search(cti_content)
-    technique = technique_match.group(0) if technique_match else None
-
-    topic = (title or " ".join(cti_content.split())).strip()
-    if len(topic) > _TOPIC_MAX_LEN:
-        truncated = topic[:_TOPIC_MAX_LEN]
-        # Prefer cutting on a word boundary so we don't hand the agent a
-        # half-word topic.
-        if " " in truncated:
-            truncated = truncated.rsplit(" ", 1)[0]
-        topic = truncated
-    return topic or "Untitled CTI", technique
-
-
-_ATTRIBUTION_RE = re.compile(r"^\s*Adversary/Attribution:\s*(.+?)\s*$", re.MULTILINE)
-_NO_ATTRIBUTION = frozenset({"unknown", "none", "n/a", "unattributed", "-"})
-
-
-def attributed_actor(cti_content: str) -> str:
-    """The actor the intel's own attribution line names, or "".
-
-    OTX pulses carry an ``Adversary/Attribution:`` line, and the hypothesis
-    model left the ABLE Actor cell empty even when it named TraderTraitor
-    (H-0007) or Water Hydra (H-0012). The publisher's attribution is the
-    source's claim, not an inference, so it fills the cell only when the
-    model offered nothing.
-    """
-    match = _ATTRIBUTION_RE.search(cti_content)
-    if not match:
-        return ""
-    value = match.group(1).strip()
-    return "" if value.lower() in _NO_ATTRIBUTION else value
-
-
-_NARRATIVE_HEADER_RE = re.compile(
-    r"(?im)^#{1,4}\s+.*(summary|analysis|tradecraft|context|background|lifecycle|overview|threat|technical|details|behavior|activity|intrusion|campaign|investigation|findings|execution|kill\s*chain|detection)"
-)
-
-_IOC_LINE_RE = re.compile(
-    r"^[-*]?\s*([0-9a-f]{32,64}|\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|https?://\S+)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _has_substantive_prose(text: str, min_words: int = 40) -> bool:
-    """True if text contains multi-word prose sentences beyond metadata fields and bare IOCs."""
-    prose_words = 0
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(("```", "http://", "https://")):
-            continue
-        if re.match(r"^[A-Za-z0-9 _/-]{1,30}:\s", line) and not (
-            line.startswith("Description:") or line.startswith("Summary:")
-        ):
-            continue
-        if re.match(r"^(attributes|indicators)\s*\(\d+", line, re.IGNORECASE):
-            continue
-        if _IOC_LINE_RE.match(line):
-            continue
-        words = [
-            w for w in line.split() if len(w) > 1 and not w.startswith(("http://", "https://"))
-        ]
-        if len(words) >= 3:
-            prose_words += len(words)
-            if prose_words >= min_words:
-                return True
-    return False
-
-
-def has_narrative(cti_content: str) -> bool:
-    """Whether ``cti_content`` carries substance beyond a bare indicator dump.
-
-    All three CTI providers build their blurb around a "does this item have
-    a human-written description" branch: RSS's ``_entry_to_blurb`` appends a
-    ``Summary:`` line only when the entry has one, OTX's ``_pulse_to_blurb``
-    appends a ``Description:`` line only when the pulse has one, and MISP's
-    ``_event_to_blurb`` has no narrative field to append at all -- a MISP
-    event carries a title (``info``) and structured metadata, not prose.
-
-    An explicit ``MITRE ATT&CK Techniques:`` line counts too, and all three
-    providers emit it under that same label. It is not prose, but the
-    question this gates is not "is there prose" -- it is "is there anything
-    here besides an IOC dump and a title." A stated technique list is an
-    analyst asserting observed behavior, which is the strongest form of that
-    evidence available short of prose, and it is precisely what a bulk
-    indicator dump cannot produce: ThreatFox-style events carry no galaxy
-    cluster, so they reach no such line.
-
-    Without this, every MISP event failed the check no matter how well
-    curated -- classified as an indicator sweep, routed past research, and
-    rendered with ``techniques: []`` even though the event had just handed
-    us fifteen technique IDs. That silently cancelled out the galaxy filter
-    and org allowlist, whose whole purpose is selecting ATT&CK-mapped events.
-
-    Gates two things, both failing the same way for the same reason -- a
-    bare IOC-count blurb gives each step nothing real to work from, and both
-    fill the gap from background knowledge rather than leaving it empty:
-
-    - Web search during research. Tavily has nothing of substance to match,
-      so it grounds on whatever else shares the topic's generic/templated
-      title -- observed fabricating malware family names ("PureRAT and
-      Overlord RAT") that propagated into the hunt file, unlike the
-      recurring-digest-title case in `derive_research_topic` where the hunt
-      stayed accurate because the CTI still had real text to fall back on.
-    - Hypothesis generation. The agent's default template obliges the model
-      to name a behavior, so against a list of domains it invented one --
-      "phishing emails" as the delivery vector, "stolen credentials ...
-      lateral movement" as follow-on activity, plus an unsupported ATT&CK
-      technique. See `HecateClient.hypothesis_generator`'s indicators_only.
-    """
-    return (
-        "Description:" in cti_content
-        or "Summary:" in cti_content
-        or ATTACK_TECHNIQUE_LINE in cti_content
-        or bool(_NARRATIVE_HEADER_RE.search(cti_content))
-        or _has_substantive_prose(cti_content)
-    )
-
-
-def _indicator_only_source(item: CTIItem) -> bool:
-    """Whether provider metadata says this item contains sample/IOC facts only.
-
-    Some integrations synthesize readable summaries from hashes, malware
-    family names and file types. That generated prose must not turn catalog
-    metadata into a behavioral report.
-    """
-    return bool(item.metadata.get("indicator_only")) or item.metadata.get("evidence_profile") in {
-        "sample_metadata",
-        "indicator_only",
-    }
-
-
-#: How many non-actionable items one cycle may walk past before giving up.
-#: A feed of nothing but vendor blog posts should cost a single cycle, not an
-#: unbounded walk through the archive.
-_MAX_SKIPS_PER_CYCLE = 5
-
-
-#: Field prefixes the providers emit. Everything a blurb says about itself
-#: rather than about the threat.
-_BLURB_FIELD_PREFIXES = (
-    "RSS:",
-    "OTX Pulse:",
-    "MISP Event:",
-    "Source:",
-    "Link:",
-    "Tags:",
-    "Org:",
-    "TLP:",
-    "Threat Level:",
-    "Adversary/Attribution:",
-    "References:",
-    "Indicators (",
-    "Key indicators:",
-    ATTACK_TECHNIQUE_LINE,
-)
-
-
-def _carries_free_text(cti_content: str) -> bool:
-    """Whether anything here is prose rather than a provider metadata field.
-
-    This is what separates "the blurb had no narrative field" from "there is
-    no narrative". The file queue takes free-form text a human wrote --
-    "APT actor X observed dumping LSASS via comsvcs.dll" -- which carries no
-    `Summary:` marker and would otherwise read as empty.
-    """
-    for line in cti_content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Indented lines continue the field above them (values under
-        # "Key indicators:").
-        if line[:1].isspace():
-            continue
-        if stripped.startswith(_BLURB_FIELD_PREFIXES):
-            continue
-        return True
-    return False
-
-
-def is_actionable(cti_content: str) -> bool:
-    """Whether there is anything here to build a hunt from.
-
-    Three ways to qualify, and an item needs only one: a narrative field a
-    hypothesis can be grounded in, a parseable indicator inventory a sweep can
-    be built from, or free-form prose that is not provider metadata.
-
-    The third clause is load-bearing. ``has_narrative`` recognises the
-    *markers* provider blurbs use, so its absence is not evidence that no
-    narrative exists -- and treating it as such discarded the file queue's
-    hand-written CTI outright when this gate was first written.
-
-    What is left over is the case this exists for: a blurb that is nothing but
-    its own metadata. H-0630 was four lines -- title, source, tags, link --
-    off a vendor marketing post, and became "Indicators published in Teaching
-    AI to Reason Through Detection Triage appear in telemetry", a sweep for
-    indicators that do not exist.
-
-    This is a floor, not a quality bar. It does not ask whether the prose is
-    *about* a specific threat; a conference write-up passes. That is the
-    harder half of C4 and is deliberately still open.
-    """
-    return (
-        has_narrative(cti_content)
-        or bool(parse_indicator_inventory(cti_content))
-        or _carries_free_text(cti_content)
-    )
 
 
 @dataclass
@@ -750,6 +93,7 @@ class RunResult:
     def ok(self) -> bool:
         return self.outcome in {
             "draft_created",
+            "incremental_enrichment",
             "dry_run",
             "no_cti",
             "no_actionable_cti",
@@ -914,7 +258,6 @@ class Orchestrator:
         - Feed tags on OTX pulses with no mention, name, or behavior in the
           intel are dropped as unevidenced.
         """
-        import re
 
         from hecate_agent.core.technique_evidence import (
             TechniqueEvidence,
@@ -1766,7 +1109,6 @@ class Orchestrator:
             covered_titles.add(title.lower())
 
         # Extract unmapped file path candidates from gaps and artifacts
-        import re
 
         primary_text = self._primary_evidence_text(item)
         file_path_candidates: set[str] = set()
@@ -2232,179 +1574,7 @@ class Orchestrator:
         out_dir: Path,
         item: CTIItem,
     ) -> None:
-        """Replay drafted rules against events synthesised from the source's artifacts.
-
-        See hecate_runner.purple_team: a replay of what the report names, not
-        emulation, and a rule counts as validated only when it matches its own
-        log source's events and none of the benign sample.
-        """
-        if not rules:
-            return
-
-        try:
-            from hecate_agent.core.sigma_self_tuner import SigmaSelfTuner
-        except ImportError as exc:
-            log.warning("Purple-team replay unavailable: %s", exc)
-            return
-
-        from hecate_runner.purple_team import BENIGN_SAMPLE, replay_events, replay_rule
-
-        started = self.trail.elapsed
-        tuner = SigmaSelfTuner(max_iterations=3)
-        artifacts = self._source_evidence.artifacts if self._source_evidence is not None else []
-        cti_text = self._primary_evidence_text(item)
-
-        # Collect all scoped MITRE ATT&CK techniques
-        techniques: list[str] = []
-        for e in self._technique_evidence or []:
-            tid = str(e.get("technique_id") or "").strip().upper()
-            if tid and tid not in techniques:
-                techniques.append(tid)
-
-        meta_techs = item.metadata.get("techniques") or item.metadata.get("mitre_attack") or []
-        if isinstance(meta_techs, list):
-            for t in meta_techs:
-                clean = str(t).strip().upper()
-                if clean and clean not in techniques:
-                    techniques.append(clean)
-
-        for rule in rules:
-            r_techs = rule.get("techniques") or []
-            if isinstance(r_techs, str):
-                r_techs = [r_techs]
-            for rt in r_techs:
-                clean = str(rt).strip().upper()
-                if clean and clean not in techniques:
-                    techniques.append(clean)
-            ryaml = str(rule.get("rule_yaml", ""))
-            for tag_m in re.findall(r"attack\.(t\d{4}(?:\.\d{3})?)", ryaml, re.IGNORECASE):
-                upper_m = tag_m.upper()
-                if upper_m not in techniques:
-                    techniques.append(upper_m)
-
-        enable_atomic = getattr(self.settings, "purple_team_atomic_emulation", True)
-        platforms = getattr(req, "platforms", None)
-        events = replay_events(
-            self._indicator_records,
-            artifacts,
-            cti_text=cti_text,
-            techniques=techniques,
-            enable_atomic=enable_atomic,
-            platforms=platforms,
-            http_requests=item.metadata.get("http_requests"),
-        )
-
-        req.purple_team_atomic_techniques = techniques if enable_atomic else []
-        atomic_test_details: list[dict[str, str]] = []
-        if enable_atomic and techniques:
-            try:
-                from hecate_agent.api import get_atomic_tests
-
-                for tid in techniques:
-                    for t in get_atomic_tests(tid, platforms=platforms):
-                        atomic_test_details.append(
-                            {
-                                "technique_id": tid,
-                                "test_id": t.get("test_id", ""),
-                                "name": t.get("name", ""),
-                                "command": t.get("command", ""),
-                            }
-                        )
-            except Exception:
-                pass
-        req.purple_team_atomic_tests = atomic_test_details
-
-        replayed = validated = tuned = baseline_matches = 0
-        for rule in rules:
-            rule_yaml = str(rule.get("rule_yaml", "")).strip()
-            if not rule_yaml:
-                continue
-            outcome = replay_rule(
-                rule_yaml,
-                events.get(str(rule.get("logsource_category", "")), []),
-                BENIGN_SAMPLE,
-                tuner,
-                emulated_techniques=techniques if enable_atomic else None,
-                atomic_tests=[t["test_id"] for t in atomic_test_details] if enable_atomic else None,
-            )
-            rule["purple_team"] = outcome.to_dict()
-            if outcome.status == "no_replay_events":
-                continue
-            replayed += 1
-            validated += outcome.validated
-            baseline_matches += outcome.status == "baseline_match"
-            if outcome.tuned:
-                tuned += 1
-                rule["rule_yaml"] = outcome.final_rule
-            path = Path(str(rule.get("path") or ""))
-            if path.is_file() and (outcome.tuned or outcome.validated):
-                text = outcome.final_rule.rstrip() + "\n"
-                if outcome.validated:
-                    text += "x_hecate_purple_team_validated: true\n"
-                if outcome.tuned:
-                    text += "x_hecate_tuned: true\n"
-                path.write_text(text, encoding="utf-8")
-                try:
-                    from hecate_agent.api import transpile_sigma_rule
-
-                    trans_queries = transpile_sigma_rule(text)
-                    for t_res in trans_queries.values():
-                        if getattr(t_res, "success", False) and getattr(t_res, "query", None):
-                            path.with_suffix(t_res.file_extension).write_text(
-                                t_res.query.strip() + "\n", encoding="utf-8"
-                            )
-                except Exception:
-                    pass
-
-        req.purple_team_rules_evaluated = replayed
-        req.purple_team_rules_validated = validated
-        req.purple_team_rules_tuned = tuned
-        req.purple_team_telemetry_count = sum(len(v) for v in events.values())
-
-        emulation_desc = (
-            f" ({len(techniques)} technique(s) dynamically emulated via Atomic Red Team)"
-            if (enable_atomic and techniques)
-            else " source-artifact"
-        )
-        self.trail.step(
-            "purple_team",
-            f"replayed %d of %d rule(s) against %d{emulation_desc} event(s) in %.0fs: "
-            "%d validated, %d matched the benign sample, %d tuned, %d with nothing to replay",
-            replayed,
-            len(rules),
-            req.purple_team_telemetry_count,
-            self.trail.elapsed - started,
-            validated,
-            baseline_matches,
-            tuned,
-            len(rules) - replayed,
-        )
-
-        try:
-            from hecate_runner.notifications import notify_purple_team
-
-            tech_list = getattr(req, "attack_techniques", []) or []
-            tech_label = (
-                ", ".join(techniques[:3])
-                if techniques
-                else (str(tech_list[0]) if tech_list else "Adversary TTPs")
-            )
-            summary_msg = (
-                f"{validated} of {replayed} evaluated rules validated "
-                f"({baseline_matches} baseline matches, {tuned} tuned) "
-                f"against {req.purple_team_telemetry_count} telemetry events"
-                f"{' (Atomic Red Team dynamic emulation enabled)' if enable_atomic and techniques else ''}."
-            )
-            notify_purple_team(
-                self.settings,
-                hunt_id=req.hunt_id,
-                technique=tech_label,
-                success=validated > 0,
-                telemetry_count=req.purple_team_telemetry_count,
-                summary=summary_msg,
-            )
-        except Exception as exc:
-            log.warning("Purple-team Slack notification failed (%s)", exc)
+        return run_purple_team_validation(self, req, rules, out_dir, item)
 
     def _run_bas_validation(
         self,
@@ -2413,158 +1583,7 @@ class Orchestrator:
         out_dir: Path,
         item: CTIItem,
     ) -> None:
-        """Execute closed-loop live adversary emulation & breach simulation (BAS) validation.
-
-        Targets lab/staging environments via MITRE CALDERA, Stratus Red Team, or Mock,
-        and verifies telemetry arrival and detection rule triggering via DetectionVerifier.
-        """
-        from hecate_runner.bas import (
-            DetonationRequest,
-            DetonationTarget,
-            get_bas_provider,
-            normalize_platform,
-        )
-        from hecate_runner.bas.verifier import DetectionVerifier
-
-        started = self.trail.elapsed
-        provider_name = getattr(self.settings, "bas_mode", "mock")
-        if provider_name != "mock":
-            from hecate_runner.bas.approved import select_approved_rule
-            from hecate_runner.bas.runtime import run_approved_validation, skipped_bas
-
-            reason = ""
-            selection = None
-            if not self.settings.bas_auto_execute_live:
-                reason = "Unattended live BAS is disabled; manual validation remains available."
-            elif provider_name != "caldera":
-                reason = "Unattended BAS is supported only for reviewed Linux CALDERA procedures."
-            elif not {p.strip().lower() for p in req.platforms} & {"linux"}:
-                reason = "No approved lab platform for this hunt (Linux lab only)."
-            else:
-                selection = select_approved_rule(
-                    rules, req.hypothesis.techniques, self.settings.bas_auto_techniques
-                )
-                if selection is None:
-                    reason = "No approved procedure exercises this hunt's Linux rule predicates."
-            if reason:
-                req.bas_verification = skipped_bas(self.settings, req.hunt_id, reason)
-            else:
-                assert selection is not None
-                procedure, rule_yaml = selection
-                req.bas_verification = run_approved_validation(
-                    self.settings, req.hunt_id, procedure, rule_yaml
-                )
-            result = req.bas_verification
-            self.trail.step(
-                "bas",
-                "%s for %s: %s; telemetry=%s, rule match=%s",
-                result["status"],
-                req.hunt_id,
-                result.get("reason") or "local sensor Sigma verification",
-                result.get("telemetry_arrived", False),
-                result.get("rule_triggered", False),
-            )
-            return
-
-        if not rules:
-            return
-        try:
-            provider = get_bas_provider(provider_name, self.settings)
-        except Exception as exc:
-            log.warning("BAS provider initialization failed (%s): %s", provider_name, exc)
-            return
-
-        if provider.name != "mock" and not self.settings.bas_auto_execute_live:
-            log.info("Skipping unattended live BAS; manual bas-detonate remains available.")
-            return
-
-        # Determine target technique(s) from hypothesis or rules
-        technique = ""
-        if req.hypothesis.techniques:
-            technique = req.hypothesis.techniques[0]
-        elif rules:
-            rule_techs = rules[0].get("techniques") or []
-            if rule_techs:
-                technique = rule_techs[0]
-
-        if not technique:
-            log.debug("No ATT&CK technique identified for BAS validation on %s", req.hunt_id)
-            return
-
-        # Determine target environment, platform, host, and cloud account
-        platforms_lower = {p.strip().lower() for p in req.platforms if p.strip()}
-        is_cloud = any(
-            p in ("cloud", "aws", "gcp", "azure", "k8s", "iaas") for p in platforms_lower
-        )
-        target_platform = (
-            "aws" if is_cloud else (next(iter(platforms_lower)) if platforms_lower else "linux")
-        )
-        norm_platform = normalize_platform(target_platform)
-
-        allowed_hosts = getattr(self.settings, "bas_allowed_hosts", [])
-        allowed_accounts = getattr(self.settings, "bas_allowed_accounts", [])
-
-        # Pick a platform-appropriate host from settings or allowlist
-        if norm_platform == "windows":
-            target_host = getattr(self.settings, "bas_windows_host", "") or (
-                next((h for h in allowed_hosts if "win" in h.lower()), None)
-                or (allowed_hosts[0] if allowed_hosts else "lab-agent-01")
-            )
-        elif norm_platform == "linux":
-            target_host = getattr(self.settings, "bas_linux_host", "") or (
-                next((h for h in allowed_hosts if "win" not in h.lower()), None)
-                or (allowed_hosts[0] if allowed_hosts else "lab-agent-01")
-            )
-        else:
-            target_host = allowed_hosts[0] if allowed_hosts else "lab-agent-01"
-
-        target_account = allowed_accounts[0] if (allowed_accounts and is_cloud) else None
-
-        target = DetonationTarget(
-            environment="lab",
-            platform=norm_platform,
-            host=target_host if not is_cloud else None,
-            cloud_account=target_account if is_cloud else None,
-        )
-
-        det_req = DetonationRequest(
-            hunt_id=req.hunt_id,
-            technique_id=technique,
-            platform=norm_platform,
-            target=target,
-            timeout_sec=60,
-        )
-
-        rule_yaml = rules[0].get("rule_yaml", "")
-
-        try:
-            det_result = provider.detonate(det_req)
-            verifier = DetectionVerifier()
-            ver_result = verifier.verify_detonation(
-                detonation=det_result,
-                rule_yaml=rule_yaml,
-            )
-            ver_dict = ver_result.to_dict()
-            ver_dict["duration_seconds"] = det_result.duration_seconds
-            req.bas_verification = ver_dict
-
-            self.trail.step(
-                "bas",
-                "validated %s against %s (%s on %s) in %.0fs: status=%s, telemetry=%s, detection=%s (%d hits)",
-                technique,
-                provider_name.upper(),
-                target.environment,
-                target.host or target.cloud_account or "local",
-                self.trail.elapsed - started,
-                ver_result.status.value,
-                "yes" if ver_result.telemetry_arrived else "no",
-                "yes" if ver_result.rule_triggered else "no",
-                ver_result.matched_events_count,
-            )
-            log.info("BAS validation completed for %s: %s", req.hunt_id, ver_result.summary())
-        except Exception as exc:
-            log.warning("BAS validation failed for %s (%s)", req.hunt_id, exc)
-            self.trail.step("bas", "failed for %s: %s", technique, exc)
+        return run_bas_validation(self, req, rules, out_dir, item)
 
     def _resolve_ttps(
         self,
@@ -2576,245 +1595,16 @@ class Orchestrator:
         asserted: list[str] | None = None,
         specimen: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Derive real tactics/platforms for a hypothesis's techniques.
-
-        ``specimen`` is the platforms the specimen's own evidence shows
-        (hecate_agent.core.platform_evidence). When set it outranks the
-        hypothesis: H-0618's Location said "Linux and Windows workstations"
-        for a Windows-only chain, and the hunt was scoped to both.
-
-        ``intel_text`` (the CTI and linked primary report) scopes the hunt when
-        the hypothesis names no platform: what the intel names or implies
-        outranks the union of everywhere the techniques could run.
-
-        ``asserted`` are the protected techniques the CTI itself listed; they
-        may add any platform they run on. The rest of ``protected`` were
-        matched in the intel's wording, and add only platforms the intel names
-        or implies. Omitted, every protected technique counts as asserted.
-
-        ``protected`` are techniques the intelligence itself supports -- ones
-        the CTI asserted or whose names its wording uses. The hypothesis's
-        platform claim can drop a technique the *model* chose, never one of
-        these; when one runs on a platform the hypothesis did not name, that
-        platform is added instead.
-
-        Looks each technique up against live ATT&CK data instead of
-        hardcoding a fixed tactic/platform onto every draft regardless of
-        what the CTI actually described. Order-preserving de-dup across
-        techniques; a technique that fails to resolve (unknown ID, STIX
-        unavailable) just contributes nothing rather than raising.
-
-        Platforms from a near-universal technique (see
-        `_NON_SCOPING_PLATFORM_THRESHOLD`) are excluded from the union: they
-        carry no scoping signal and, unioned in, silently swamp genuinely
-        narrow techniques also present on the same hypothesis. Tactics
-        aren't filtered the same way -- a technique's tactic (e.g.
-        "persistence") stays meaningful and low-cardinality even when its
-        platform list is broad. If every resolved technique happens to be
-        broad, `platforms` comes back empty and stays empty in the draft's
-        frontmatter -- an honest gap signal rather than a fabricated
-        full-platform list.
-        """
-        tactics: list[str] = []
-        platforms: list[str] = []
-        for technique_id in techniques:
-            meta = self.hecate.lookup_technique(
-                technique_id, timeout_sec=self.settings.llm_timeout_sec
-            )
-            # Record what the matrix said so the grounding audit can call out
-            # an invented ID without paying for these subprocess lookups twice.
-            if facts is not None:
-                facts[technique_id.upper()] = TechniqueFact(
-                    valid=meta.found,
-                    superseded_by=(meta.superseded_from and meta.technique_id) or "",
-                    names=tuple(n for n in (meta.name, meta.parent_name) if n),
-                    # Relabelled to the frontmatter vocabulary so the audit can
-                    # compare them against the hunt's own platform list. A
-                    # near-universal technique records nothing: it carries no
-                    # scoping signal, so it must not be able to contradict one.
-                    platforms=(
-                        ()
-                        if len(meta.platforms) >= _NON_SCOPING_PLATFORM_THRESHOLD
-                        else tuple(_PLATFORM_LABELS.get(pf, pf) for pf in meta.platforms)
-                    ),
-                )
-                if meta.superseded_from and meta.technique_id:
-                    facts[meta.technique_id.upper()] = TechniqueFact(
-                        valid=True,
-                        superseded_by="",
-                        names=tuple(n for n in (meta.name, meta.parent_name) if n),
-                        platforms=(
-                            ()
-                            if len(meta.platforms) >= _NON_SCOPING_PLATFORM_THRESHOLD
-                            else tuple(_PLATFORM_LABELS.get(pf, pf) for pf in meta.platforms)
-                        ),
-                    )
-            if (
-                meta.superseded_from
-                and asserted is not None
-                and meta.superseded_from.upper() in {t.upper() for t in asserted}
-                and meta.technique_id.upper() not in {t.upper() for t in asserted}
-            ):
-                asserted.append(meta.technique_id)
-            for tactic in meta.tactics:
-                if tactic not in tactics:
-                    tactics.append(tactic)
-            if len(meta.platforms) >= _NON_SCOPING_PLATFORM_THRESHOLD:
-                continue
-            for platform in meta.platforms:
-                platform = _PLATFORM_LABELS.get(platform, platform)
-                if platform not in platforms:
-                    platforms.append(platform)
-
-        # A hypothesis that names its platforms outranks the union. Unioning
-        # across every technique the CTI asserted is right for "where could
-        # this technique occur" and wrong for "where does this hunt look":
-        # it returned five platforms for a hypothesis whose own sentence said
-        # "compromised Windows systems". Normally only narrows -- a claimed
-        # platform that a source-asserted technique contradicts is ignored.
-        claimed = platforms_named_in(scope_text)
-        claimant = "the hypothesis"
-        self._platform_dropped = set()
-        shielded = {t.upper() for t in (protected or [])}
-
-        # Enforce platform inheritance: Containers inherit Linux OS primitives
-        if "Containers" in claimed and "Linux" not in claimed:
-            claimed.append("Linux")
-            self.trail.step(
-                "scope", "Containers scope automatically inherits Linux platform telemetry"
-            )
-
-        if specimen and "Containers" in specimen and "Linux" not in specimen:
-            specimen.append("Linux")
-
-        self.trail.step(
-            "scope",
-            "techniques run on %s; hypothesis names %s",
-            listing(platforms, "no narrow platform"),
-            listing(claimed),
+        return resolve_ttps(
+            self,
+            techniques,
+            scope_text=scope_text,
+            facts=facts,
+            protected=protected,
+            intel_text=intel_text,
+            asserted=asserted,
+            specimen=specimen,
         )
-        if specimen:
-            unsupported = [p for p in claimed if p not in specimen]
-            if unsupported:
-                self.trail.step(
-                    "scope",
-                    "hypothesis names %s; the specimen's evidence shows only %s: not scoping to %s",
-                    listing(claimed),
-                    listing(specimen),
-                    listing(unsupported),
-                )
-            kept = [p for p in claimed if p in specimen]
-            if not kept:
-                claimant = "the specimen's evidence"
-            claimed = kept or list(specimen)
-        # A hypothesis sentence often names no platform at all ("Adversaries
-        # use phishing campaigns to deliver VB6 malware"), and the union of
-        # everywhere its techniques run is then nearly every platform ATT&CK
-        # has. The intel usually says, or shows by its artifacts, where the
-        # activity happened.
-        if not claimed and intel_text:
-            claimed = platforms_evidenced_in(intel_text)
-            claimant = "the intel"
-            if claimed:
-                self.trail.step("scope", "intel names or implies %s", listing(claimed))
-        if claimed:
-            scoped = [p for p in platforms if p in claimed]
-            # If the resolved techniques have ZERO overlap with what was claimed
-            # (e.g. LLM suggested T1207 Windows for a macOS hunt), the technique
-            # is hallucinated. The claimed text is the source of truth.
-            final_platforms = scoped if scoped else claimed
-            if "Containers" in claimed and "Containers" not in final_platforms:
-                final_platforms.append("Containers")
-            if "Containers" in final_platforms and "Linux" not in final_platforms:
-                final_platforms.append("Linux")
-            if not scoped:
-                self.trail.step(
-                    "scope",
-                    "no overlap: trusting %s (%s) over the techniques",
-                    claimant,
-                    listing(claimed),
-                )
-            elif scoped != platforms:
-                self.trail.step("scope", "narrowed to what %s names: %s", claimant, listing(scoped))
-
-            # Evidence-backed techniques first: they widen the platform list
-            # rather than being dropped. H-0014's CTI said "PowerShell-based
-            # collection and staging"; the hypothesis said "Linux servers";
-            # T1059.001 was dropped and the hunt shipped with no techniques.
-            #
-            # A wording match widens only onto platforms the intel itself
-            # names or implies. Matches are loose: H-0018 (a Teams vishing
-            # campaign on Windows) matched T1546.005 Trap on a research source
-            # title, and it added Linux and macOS. T1059.001 still widens
-            # H-0014, since "PowerShell" is itself evidence of Windows.
-            by_cti = shielded if asserted is None else {t.upper() for t in asserted}
-            evidenced = platforms_evidenced_in(intel_text)
-            if facts is not None:
-                for tech_id, fact in facts.items():
-                    if tech_id.split(".")[0] not in shielded and tech_id not in shielded:
-                        continue
-                    missing = [p for p in fact.platforms if p not in final_platforms]
-                    if not fact.platforms or len(missing) != len(fact.platforms):
-                        continue
-                    if specimen and not any(p in specimen for p in missing):
-                        self.trail.step(
-                            "scope",
-                            "not widening for %s: the specimen's evidence shows only %s",
-                            tech_id,
-                            listing(specimen),
-                        )
-                        continue
-                    if specimen:
-                        missing = [p for p in missing if p in specimen]
-                    if tech_id not in by_cti and tech_id.split(".")[0] not in by_cti:
-                        missing = [p for p in missing if p in evidenced]
-                        if not missing:
-                            self.trail.step(
-                                "scope",
-                                "not widening for %s: matched in the wording, but the intel "
-                                "names none of %s",
-                                tech_id,
-                                listing(fact.platforms),
-                            )
-                            continue
-                    final_platforms = [*final_platforms, *missing]
-                    self.trail.step(
-                        "scope",
-                        "keeping %s (the intel names it): adding %s to the platforms",
-                        tech_id,
-                        listing(missing),
-                    )
-
-            # Mark any technique that strongly contradicts our final platforms
-            # so it is stripped from the payload and doesn't pollute the Sigma
-            # generator. Never one the CTI itself asserted: H-0830's scope went
-            # wrong (Identity Provider for a NetScaler report) and this loop then
-            # dropped all 17 source techniques, leaving the hunt unmapped and the
-            # Sigma stage drafting from "techniques none". `fact.valid` is left
-            # alone: it means "exists in ATT&CK", and setting it here made the
-            # grounding audit report T1190 as "no such technique".
-            if facts is not None:
-                for tech_id, fact in facts.items():
-                    if fact.platforms and not any(p in final_platforms for p in fact.platforms):
-                        if tech_id in by_cti or tech_id.split(".")[0] in by_cti:
-                            self.trail.step(
-                                "scope",
-                                "keeping %s: the CTI asserts it, though it runs only on %s",
-                                tech_id,
-                                listing(fact.platforms),
-                            )
-                            continue
-                        self._platform_dropped.add(tech_id)
-                        self.trail.step(
-                            "scope",
-                            "%s only runs on %s: dropping it",
-                            tech_id,
-                            listing(fact.platforms),
-                        )
-
-            return tactics, final_platforms
-
-        return tactics, platforms
 
     def _advance_past(self, item: CTIItem) -> bool:
         """Acknowledge an item so the cursor moves; False if it could not.
@@ -2839,7 +1629,6 @@ class Orchestrator:
         which every draft writes, so no separate index has to be kept in step.
         """
         import datetime
-        import re
 
         url = item.source_url.strip()
         needle = f"]({url})" if url else None
@@ -2926,7 +1715,10 @@ class Orchestrator:
                 else:
                     earlier = (
                         self._drafted_from_same_source(item)
-                        if self.settings.cti_triage == "park"
+                        if (
+                            self.settings.cti_triage == "park"
+                            and not self.settings.campaign_clustering_enabled
+                        )
                         else None
                     )
                     if earlier is None:
@@ -3010,6 +1802,56 @@ class Orchestrator:
 
         log.info("Picked up CTI item from %s (%d chars)", item.source, len(item.content))
         self.metrics.set_source(item.source, item.identifier)
+
+        # Campaign Clustering & Incremental Enrichment
+        if self.settings.campaign_clustering_enabled:
+            from hecate_runner.correlation import IncrementalEnricher, ThreatEntityCorrelator
+
+            correlator = ThreatEntityCorrelator(self.settings.hunts_root)
+            match = correlator.correlate(
+                item, threshold=self.settings.correlation_confidence_threshold
+            )
+            if match is not None:
+                if dry_run:
+                    return RunResult(
+                        outcome="dry_run",
+                        hunt_id=match.hunt_id,
+                        draft_path=match.hunt_path,
+                        detail=f"Would enrich {match.hunt_id} via {match.match_type}",
+                        parked_count=parked_count,
+                    )
+                log.info(
+                    "Correlated CTI item from %s with existing hunt %s via %s (%s, confidence %.2f)",
+                    item.source,
+                    match.hunt_id,
+                    match.match_type,
+                    ", ".join(match.matched_entities),
+                    match.confidence,
+                )
+                self.trail.step(
+                    "correlation",
+                    "matched %s via %s (%s, confidence %.2f); performing incremental enrichment",
+                    match.hunt_id,
+                    match.match_type,
+                    ", ".join(match.matched_entities),
+                    match.confidence,
+                )
+                enrichment = IncrementalEnricher.enrich(item, match, self.settings.hecate_workspace)
+                self.trail.step(
+                    "enrichment",
+                    "enriched %s: +%d indicator(s), +%d rule(s)",
+                    match.hunt_id,
+                    enrichment.new_indicators_count,
+                    enrichment.new_rules_count,
+                )
+                self._advance_past(item)
+                return RunResult(
+                    outcome="incremental_enrichment",
+                    hunt_id=match.hunt_id,
+                    draft_path=match.hunt_path,
+                    detail=enrichment.details,
+                    parked_count=parked_count,
+                )
 
         is_sweep = item.metadata.get("processing_track") != "deep" and (
             bool(parse_indicator_inventory(item.content))

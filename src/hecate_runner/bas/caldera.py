@@ -216,6 +216,19 @@ class CalderaConnector(BASProvider):
         # exactly the explicitly selected endpoint. Never silently fan out.
         if request.platform != request.target.platform:
             raise SafetyViolationError("Request and target platforms disagree.")
+
+        # Fail closed on unreviewed procedures before performing agent/ability network queries
+        is_lab = request.target.environment == "lab"
+        procedure = None
+        if is_lab or request.params.get("approved_only"):
+            from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+            procedure = APPROVED_PROCEDURES.get(request.technique_id)
+            if not procedure or request.platform != "linux":
+                raise SafetyViolationError(
+                    f"CALDERA lab execution requires a pinned, reviewed Linux procedure (unreviewed: {request.technique_id})."
+                )
+
         client = self._get_client()
         agents_resp = client.get("/api/v2/agents")
         if agents_resp.status_code == 404:
@@ -239,7 +252,8 @@ class CalderaConnector(BASProvider):
             )
 
         # 3. Resolve ability ID
-        ability_id = request.ability_id
+        ability_id = request.ability_id or (procedure.ability_id if procedure else None)
+
         if not ability_id:
             abilities = self.lookup_technique(request.technique_id, platform=request.platform)
             if not abilities:
@@ -260,13 +274,13 @@ class CalderaConnector(BASProvider):
                 )
             ability_id = abilities[0]
 
-        if request.params.get("approved_only"):
-            from hecate_runner.bas.approved import APPROVED_PROCEDURES, validate_approved_ability
+        if is_lab or request.params.get("approved_only"):
+            from hecate_runner.bas.approved import validate_approved_ability
 
-            procedure = APPROVED_PROCEDURES.get(request.technique_id)
-            if not procedure or request.platform != "linux" or ability_id != procedure.ability_id:
+            assert procedure is not None
+            if ability_id != procedure.ability_id:
                 raise SafetyViolationError(
-                    "Unattended BAS requires a pinned, reviewed Linux procedure."
+                    f"CALDERA lab execution requires a pinned, reviewed Linux procedure (unreviewed: {request.technique_id})."
                 )
             response = client.get("/api/v2/abilities")
             if response.status_code == 404:

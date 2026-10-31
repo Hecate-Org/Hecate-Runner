@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import logging
-import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -149,34 +148,13 @@ class HecateClient:
             raise HecateError("hecate_agent Python package not found.")
 
     def _with_context(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        original_cwd = os.getcwd()
-        original_env = os.environ.copy()
         try:
-            os.chdir(self.workspace)
-            # 1. Load the workspace's .env so we pick up HECATE_LLM_MODEL, etc.
-            # Cache it to avoid excessive disk I/O when called in loops.
-            if self._workspace_env is None:
-                from dotenv import dotenv_values
-
-                self._workspace_env = dotenv_values(self.workspace / ".env")
-
-            for k, v in self._workspace_env.items():
-                if v is not None:
-                    os.environ[k] = v
-
-            # 2. Apply runner overrides on top
-            os.environ.update(self.env_overrides)
-
             return func(*args, **kwargs)
         except Exception as exc:
             log.exception(f"Hecate API call failed: {exc}")
             metadata = getattr(exc, "metadata", {})
             usage = LLMUsage.from_metadata(metadata) if isinstance(metadata, dict) else None
             raise HecateError(f"Hecate API error: {exc}", usage=usage) from exc
-        finally:
-            os.chdir(original_cwd)
-            os.environ.clear()
-            os.environ.update(original_env)
 
     def source_evidence(self, url: str) -> Any:
         """Verified artifacts from the report at ``url`` (hecate_agent.core.source_evidence).
@@ -311,11 +289,16 @@ class HecateClient:
 
         generate_with_metrics = getattr(api, "generate_sigma_with_metrics", None)
         if generate_with_metrics is not None:
+            kwargs: dict[str, Any] = {
+                "payload": payload,
+                "out_dir": out_dir,
+                "hunt_id": payload.get("hunt_id"),
+            }
+            if "workspace" in inspect.signature(generate_with_metrics).parameters:
+                kwargs["workspace"] = self.workspace
             output, files, metadata = self._with_context(
                 generate_with_metrics,
-                payload=payload,
-                out_dir=out_dir,
-                hunt_id=payload.get("hunt_id"),
+                **kwargs,
             )
             usage = LLMUsage.from_metadata(metadata)
             # Core interleaves each Sigma file with native query files. Only

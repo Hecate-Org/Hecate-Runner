@@ -451,3 +451,97 @@ def test_advance_all_ignores_empty_identifiers() -> None:
     cursor.advance_all(FEED_A, ["real-id", "", "real-id"])
 
     assert cursor.seen_ids[FEED_A] == ["real-id"]
+
+
+def test_etag_caching_and_304_not_modified(tmp_path: Path) -> None:
+    """Feeds caching etag/last-modified send conditional headers and handle 304."""
+    headers_seen: list[dict[str, str]] = []
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        headers_seen.append(dict(request.headers))
+        if request.headers.get("if-none-match") == '"hash123"':
+            return httpx.Response(304)
+        return httpx.Response(
+            200,
+            text=_rss_xml(
+                [_entry(title="Cached Article", link="https://feed-a.example.com/cached")]
+            ),
+            headers={
+                "content-type": "application/rss+xml",
+                "etag": '"hash123"',
+                "last-modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    cache_file = tmp_path / "custom_rss_cache.json"
+    provider = RssProvider(
+        feed_urls=[FEED_A],
+        cursor_file=tmp_path / "cursor.json",
+        cache_file=cache_file,
+        client=client,
+    )
+
+    # First fetch: 200 OK, saves to cache
+    item1 = provider.next_item()
+    assert item1 is not None
+    assert item1.title == "Cached Article"
+    assert call_count == 1
+    assert cache_file.exists()
+
+    # Second fetch on new provider using the same cache file
+    client2 = httpx.Client(transport=httpx.MockTransport(handler))
+    provider2 = RssProvider(
+        feed_urls=[FEED_A],
+        cursor_file=tmp_path / "cursor.json",  # not acknowledged yet
+        cache_file=cache_file,
+        client=client2,
+    )
+    item2 = provider2.next_item()
+    assert item2 is not None
+    assert item2.title == "Cached Article"
+    assert call_count == 2
+    # Verify conditional headers were sent
+    assert headers_seen[1].get("if-none-match") == '"hash123"'
+    assert headers_seen[1].get("if-modified-since") == "Wed, 21 Oct 2026 07:28:00 GMT"
+
+
+def test_concurrent_feed_fetching(tmp_path: Path) -> None:
+    """Multiple feeds are fetched concurrently."""
+    import time
+
+    feed_urls = [f"https://feed-{i}.example.com/rss/" for i in range(4)]
+    fetch_times: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        time.sleep(0.05)  # simulate brief network delay
+        fetch_times.append(time.time())
+        idx = feed_urls.index(url)
+        return httpx.Response(
+            200,
+            text=_rss_xml(
+                [_entry(title=f"Article {idx}", link=f"https://feed-{idx}.example.com/item")]
+            ),
+            headers={"content-type": "application/rss+xml"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = RssProvider(
+        feed_urls=feed_urls,
+        cursor_file=tmp_path / "cursor.json",
+        client=client,
+        max_workers=4,
+    )
+
+    start = time.time()
+    item = provider.next_item()
+    elapsed = time.time() - start
+
+    assert item is not None
+    # 4 feeds with 0.05s delay each:
+    # Serially: >= 0.20s. Concurrently: < 0.15s
+    assert elapsed < 0.18

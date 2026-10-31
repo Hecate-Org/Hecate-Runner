@@ -18,7 +18,7 @@ The platform is partitioned into three distinct repositories with decoupled resp
 
 ```mermaid
 flowchart TD
-    subgraph Repo1["Hecate-Core (BrizoSec/Hecate-Core)"]
+    subgraph Repo1["Hecate-Core (Hecate-Org/Hecate-Core)"]
         direction TB
         C_API["API Layer (hecate_agent.api)"]
         C_AGENTS["Agentic Reasoning Engine<br/>Hypothesis & Research Agents"]
@@ -28,18 +28,18 @@ flowchart TD
         C_CLI["hecate-agent CLI & TUI Monitor"]
     end
 
-    subgraph Repo2["Hecate-Runner (BrizoSec/Hecate-Runner)"]
+    subgraph Repo2["Hecate-Runner (Hecate-Org/Hecate-Runner)"]
         direction TB
         R_DAEMON["Perpetual Daemon Service<br/>(hecate-runner-daemon.service)"]
         R_CTI["20+ Multi-Feed CTI Ingestion Engine"]
         R_QUEUE["Dual-Track Priority Queue Scheduler"]
-        R_PURPLE["Purple Team Emulation Harness"]
+        R_PURPLE["Purple Team & BAS Emulation"]
         R_REVIEW["Automated Reviewer & Self-Remediation"]
         R_PUB["GitHub Outbox PR Publisher"]
         R_SLACK["Interactive Slack Bot & ChatOps"]
     end
 
-    subgraph Repo3["Hecate-Workspace (BrizoSec/Hecate-Content)"]
+    subgraph Repo3["Hecate-Workspace (Hecate-Org/Hecate-Public)"]
         direction TB
         W_HUNTS["hunts/ (LOCK Pattern Documents)"]
         W_QUERIES["queries/ (Transpiled SIEM Queries)"]
@@ -59,7 +59,7 @@ flowchart TD
 |---|---|---|---|
 | **[`Hecate-Core`](file:///home/chemch/betas/Hecate-Core)** | `hecate_agent` | Core detection reasoning library, prompt engine, MITRE ATT&CK grounding, Sigma generator, and pySigma transpiler. | `hecate-agent` CLI, agent modules, prompt templates, evaluation harness. |
 | **[`Hecate-Runner`](file:///home/chemch/betas/Hecate-Runner)** | `hecate_runner` | Autonomous orchestrator, perpetual daemon, 20+ CTI intake feeds, purple-team adversary emulation, reviewer auto-remediation, GitHub publisher, Slack bot. | `hecate-runner` CLI, daemon service, CTI pollers, emulation runners, PR publisher. |
-| **[`Hecate-Workspace`](file:///home/chemch/betas/Hecate-Workspace)** | *(Content Repo)* | Central version-controlled detection engineering repository (`BrizoSec/Hecate-Content`). | `hunts/` (LOCK markdown), `queries/` (Sigma & SIEM queries), `research/` dossiers, `promotion-policy.yaml`. |
+| **[`Hecate-Workspace`](file:///home/chemch/betas/Hecate-Workspace)** | *(Content Repo)* | Central version-controlled detection engineering repository (`Hecate-Org/Hecate-Public` / `Hecate-Content`). | `hunts/` (LOCK markdown), `queries/` (Sigma & SIEM queries), `research/` dossiers, `promotion-policy.yaml`. |
 
 ---
 
@@ -75,7 +75,7 @@ sequenceDiagram
     participant Core as Hecate-Core Agent API
     participant Purple as Purple Team Emulation
     participant Reviewer as Sigma Reviewer Engine
-    participant GitHub as GitHub (BrizoSec/Hecate-Content)
+    participant GitHub as GitHub (Hecate-Org/Hecate-Public)
     participant Slack as Slack Alert & ChatOps
 
     Feeds->>Runner: Raw CTI Item (RSS, OTX, MISP, KEV, etc.)

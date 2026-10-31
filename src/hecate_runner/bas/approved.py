@@ -7,6 +7,8 @@ ability and inspect its executable content before allowing it to run.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -22,15 +24,35 @@ class ApprovedProcedure:
     command: str
     observed_argv: tuple[str, ...] = ()
     managed: bool = False
+    cleanup_command: str = ""
+    cleanup_observed_argv: tuple[str, ...] = ()
+    expected_files: tuple[str, ...] = ()
 
     @property
     def argv(self) -> tuple[str, ...]:
         return self.observed_argv or tuple(shlex.split(self.command))
 
 
-def _managed(technique: str, command: str, observed: tuple[str, ...] = ()) -> ApprovedProcedure:
-    identity = str(uuid5(NAMESPACE_URL, f"https://hecate.local/bas/{technique}/v1/{command}"))
-    return ApprovedProcedure(technique, identity, command, observed, True)
+def _managed(
+    technique: str,
+    command: str,
+    observed: tuple[str, ...] = (),
+    cleanup_command: str = "",
+    cleanup_observed: tuple[str, ...] = (),
+    expected_files: tuple[str, ...] = (),
+) -> ApprovedProcedure:
+    key = f"{command}:{cleanup_command}" if cleanup_command else command
+    identity = str(uuid5(NAMESPACE_URL, f"https://hecate.local/bas/{technique}/v1/{key}"))
+    return ApprovedProcedure(
+        technique,
+        identity,
+        command,
+        observed,
+        True,
+        cleanup_command,
+        cleanup_observed,
+        expected_files,
+    )
 
 
 APPROVED_PROCEDURES = {
@@ -44,22 +66,75 @@ APPROVED_PROCEDURES = {
     "T1124": _managed("T1124", 'date -u +"%Y-%m-%dT%H:%M:%SZ"'),
     "T1059.004": _managed("T1059.004", "sh -c 'printf hecate-bas-shell-probe'"),
     "T1140": _managed("T1140", "printf 'aGVjYXRlLWJhcy1wcm9iZQ==' | base64 -d", ("base64", "-d")),
+    "T1070.004": _managed(
+        "T1070.004",
+        "sh -c 'touch /tmp/hecate-t1070-canary.tmp && rm -f /tmp/hecate-t1070-canary.tmp'",
+        ("rm", "-f", "/tmp/hecate-t1070-canary.tmp"),
+        cleanup_command="rm -f /tmp/hecate-t1070-canary.tmp",
+        cleanup_observed=("rm", "-f", "/tmp/hecate-t1070-canary.tmp"),
+        expected_files=("/tmp/hecate-t1070-canary.tmp",),
+    ),
+    "T1027": _managed(
+        "T1027",
+        "sh -c 'printf aGVjYXRlLWJhcw== | base64 -d > /tmp/hecate-t1027.tmp'",
+        ("base64", "-d"),
+        cleanup_command="rm -f /tmp/hecate-t1027.tmp",
+        cleanup_observed=("rm", "-f", "/tmp/hecate-t1027.tmp"),
+        expected_files=("/tmp/hecate-t1027.tmp",),
+    ),
+    "T1005": _managed(
+        "T1005",
+        "sh -c 'uname -a > /tmp/hecate-t1005.tmp'",
+        ("uname", "-a"),
+        cleanup_command="rm -f /tmp/hecate-t1005.tmp",
+        cleanup_observed=("rm", "-f", "/tmp/hecate-t1005.tmp"),
+        expected_files=("/tmp/hecate-t1005.tmp",),
+    ),
 }
+
+
+def catalog_digest() -> str:
+    """Return a deterministic SHA-256 digest of the approved procedure catalog."""
+    hasher = hashlib.sha256()
+    for tech_id in sorted(APPROVED_PROCEDURES):
+        proc = APPROVED_PROCEDURES[tech_id]
+        payload = json.dumps(
+            {
+                "technique_id": proc.technique_id,
+                "ability_id": proc.ability_id,
+                "command": proc.command,
+                "observed_argv": list(proc.observed_argv),
+                "managed": proc.managed,
+                "cleanup_command": proc.cleanup_command,
+                "expected_files": list(proc.expected_files),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        hasher.update(payload)
+        hasher.update(b"\0")
+    return hasher.hexdigest()
 
 
 def ability_definition(procedure: ApprovedProcedure) -> dict[str, Any]:
     """Exact fixed content for a Hecate-managed ability; no CTI inputs."""
     if APPROVED_PROCEDURES.get(procedure.technique_id) != procedure or not procedure.managed:
         raise SafetyViolationError("Only catalog-managed abilities can be installed.")
+    exec_config: dict[str, Any] = {"command": procedure.command, "timeout": 10}
+    if procedure.cleanup_command:
+        exec_config["cleanup"] = [procedure.cleanup_command]
     return {
         "id": procedure.ability_id,
         "name": f"Hecate isolated lab {procedure.technique_id}",
         "description": "Pinned non-destructive Linux lab procedure; local sensor verification.",
-        "tactic": {"T1059.004": "execution", "T1140": "stealth"}.get(
-            procedure.technique_id, "discovery"
-        ),
+        "tactic": {
+            "T1059.004": "execution",
+            "T1140": "stealth",
+            "T1070.004": "defense-evasion",
+            "T1027": "defense-evasion",
+            "T1005": "collection",
+        }.get(procedure.technique_id, "discovery"),
         "technique": {"attack_id": procedure.technique_id, "name": procedure.technique_id},
-        "platforms": {"linux": {"sh": {"command": procedure.command, "timeout": 10}}},
+        "platforms": {"linux": {"sh": exec_config}},
     }
 
 
@@ -76,13 +151,23 @@ def validate_approved_ability(ability: dict[str, Any], procedure: ApprovedProced
     if len(executors) != 1:
         raise SafetyViolationError("Approved ability requires exactly one Linux executor.")
     executor = executors[0]
+
+    # Validate cleanup
+    cleanup = executor.get("cleanup")
+    if procedure.cleanup_command:
+        expected = [procedure.cleanup_command]
+        actual = [cleanup] if isinstance(cleanup, str) else list(cleanup or [])
+        if actual != expected:
+            raise SafetyViolationError("Approved CALDERA cleanup command altered or missing.")
+    elif cleanup:
+        raise SafetyViolationError("Unapproved cleanup command present on ability.")
+
     if (
         executor.get("name") != "sh"
         or executor.get("command") != procedure.command
         or any(
             executor.get(key)
             for key in (
-                "cleanup",
                 "payloads",
                 "uploads",
                 "variations",
