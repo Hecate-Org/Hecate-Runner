@@ -25,6 +25,7 @@ CANONICAL_FIELDS: dict[str, str] = {
     "image": "Image",
     "commandline": "CommandLine",
     "user": "User",
+    "parent": "ParentImage",
     "parentimage": "ParentImage",
     "parentcommandline": "ParentCommandLine",
     "currentdirectory": "CurrentDirectory",
@@ -38,6 +39,10 @@ CANONICAL_FIELDS: dict[str, str] = {
     "eventid": "EventID",
     "provider_name": "Provider_Name",
     "queryname": "QueryName",
+    "path": "Image",
+    "filepath": "Image",
+    "directory": "Image",
+    "folder": "Image",
 }
 
 
@@ -143,6 +148,15 @@ class RuleTuner:
 
         Returns (updated_yaml, action_summary).
         """
+        try:
+            from hecate_agent.core.sigma_self_tuner import SigmaSelfTuner
+
+            tuner = SigmaSelfTuner()
+            res = tuner.tune_rule(original_yaml, instruction)
+            return str(res[0]), str(res[1])
+        except Exception as exc:
+            log.debug("SigmaSelfTuner delegation failed (%s); using fallback tuner", exc)
+
         try:
             rule_dict = yaml.safe_load(original_yaml)
             if not isinstance(rule_dict, dict):

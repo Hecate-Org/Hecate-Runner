@@ -12,6 +12,7 @@ from hecate_runner.bas.controller import CONTROLLER_STATE_PATHS, validate_contro
 
 def controller_config():
     return {
+        "Image": "sha256:325249d44a93a2e0c9fa09200e1467760d4a2b548c4e74ea1e0593c9fcb1ccd3",
         "State": {"Running": True},
         "Config": {"User": "10001:10001", "Labels": {"hecate.role": "caldera-controller"}},
         "HostConfig": {
@@ -65,3 +66,10 @@ def test_root_or_host_bind_mounts_are_refused():
         mutate(candidate)
         with pytest.raises(SafetyViolationError):
             validate_controller(candidate)
+
+
+def test_unapproved_controller_image_is_refused():
+    controller = controller_config()
+    controller["Image"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    with pytest.raises(SafetyViolationError, match="image identity is not approved"):
+        validate_controller(controller)

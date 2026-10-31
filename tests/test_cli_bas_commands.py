@@ -97,3 +97,84 @@ detection:
     assert fm["bas_provider"] == "mock"
     assert fm["bas_status"] == "verified_true_positive"
     assert fm["bas_detection_triggered"] is True
+
+
+def test_cli_bas_reset_clears_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hecate_runner.bas.lifecycle import LabLease
+
+    lease = LabLease(
+        lease_path=tmp_path / "lab.lease",
+        quarantine_path=tmp_path / "lab.quarantine",
+        lock_path=tmp_path / "lab.lock",
+    )
+    lease.quarantine("Unconfirmed remote cleanup", hunt_id="H-0001")
+    assert lease.is_quarantined()
+
+    monkeypatch.setattr("hecate_runner.bas.lifecycle.LabLease", lambda *args, **kwargs: lease)
+    monkeypatch.setattr("hecate_runner.cli.Settings", lambda: Settings(hecate_workspace=tmp_path))
+
+    result = runner.invoke(app, ["bas-reset", "--note", "CLI audit test"])
+    assert result.exit_code == 0
+    assert "BAS Lab Reset & Audit Complete" in result.output
+    assert "Cleared prior quarantine" in result.output
+    assert not lease.is_quarantined()
+
+
+def test_cli_bas_detonate_caldera_refuses_unreviewed_in_lab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "hecate_runner.cli.Settings",
+        lambda: Settings(bas_enabled=True, bas_allowed_hosts=["lab-host"]),
+    )
+    result = runner.invoke(
+        app,
+        ["bas-detonate", "T1003", "--provider", "caldera", "--env", "lab", "--host", "lab-host"],
+    )
+    assert result.exit_code == 1
+    assert "reviewed Linux procedure" in result.output
+
+
+def test_cli_bas_detonate_caldera_refuses_quarantined_lab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hecate_runner.bas.lifecycle import LabLease
+
+    lease = LabLease(
+        lease_path=tmp_path / "lab.lease",
+        quarantine_path=tmp_path / "lab.quarantine",
+        lock_path=tmp_path / "lab.lock",
+    )
+    lease.quarantine("Test quarantine", hunt_id="H-0001")
+
+    monkeypatch.setattr("hecate_runner.bas.lifecycle.LabLease", lambda *args, **kwargs: lease)
+    monkeypatch.setattr(
+        "hecate_runner.cli.Settings",
+        lambda: Settings(
+            bas_enabled=True, bas_allowed_hosts=["lab-host"], hecate_workspace=tmp_path
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["bas-detonate", "T1033", "--provider", "caldera", "--env", "lab", "--host", "lab-host"],
+    )
+    assert result.exit_code == 1
+    assert "quarantined" in result.output
+
+
+def test_cli_bas_reset_reports_purged_tmpfs_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "hecate_runner.bas.lifecycle.reset_lab",
+        lambda *args, **kwargs: {
+            "status": "clean",
+            "lingering_processes_found": [],
+            "lingering_files_found": ["/tmp/hecate-canary.tmp"],
+            "files_purged": ["/tmp/hecate-canary.tmp"],
+            "prior_quarantine": None,
+        },
+    )
+    result = runner.invoke(app, ["bas-reset"])
+    assert result.exit_code == 0
+    assert "Lingering tmpfs files purged:" in result.output
+    assert "/tmp/hecate-canary.tmp" in result.output

@@ -251,6 +251,20 @@ class Settings(BaseSettings):
         description="Days after which parked CTI items are automatically deleted. 0 to disable.",
     )
 
+    # --- Campaign Clustering & Incremental Hunt Updates -----------------------
+    campaign_clustering_enabled: bool = Field(
+        default=False,
+        alias="HECATE_CAMPAIGN_CLUSTERING_ENABLED",
+        description="Correlate incoming CTI with existing hunts in Hecate-Workspace and incrementally enrich them.",
+    )
+    correlation_confidence_threshold: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        alias="HECATE_CORRELATION_CONFIDENCE_THRESHOLD",
+        description="Minimum confidence score required to cluster incoming CTI into an existing hunt.",
+    )
+
     # --- SIEM & EDR Live Query Deployment (Pillar 2, Milestone 4) -------------
     siem_deploy_enabled: bool = Field(
         default=False,
@@ -279,10 +293,10 @@ class Settings(BaseSettings):
         alias="HECATE_BAS_AUTO_TECHNIQUES",
         description="Explicit subset of the reviewed, fixed Linux lab procedure catalog.",
     )
-    bas_telemetry: Literal["none", "lab_process"] = Field(
+    bas_telemetry: Literal["none", "lab_process", "lab_fusion"] = Field(
         default="none",
         alias="HECATE_BAS_TELEMETRY",
-        description="Independent local process sensor used for live lab verification.",
+        description="Independent local process or fused multi-category sensor used for live lab verification.",
     )
     bas_sensor_container: str = Field(
         default="hecate-bas-agent",

@@ -57,9 +57,9 @@ dev = [
 hecate-runner = "hecate_runner.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/BrizoSec/Hecate-Runner"
-Repository = "https://github.com/BrizoSec/Hecate-Runner"
-Issues = "https://github.com/BrizoSec/Hecate-Runner/issues"
+Homepage = "https://github.com/Hecate-Org/Hecate-Runner"
+Repository = "https://github.com/Hecate-Org/Hecate-Runner"
+Issues = "https://github.com/Hecate-Org/Hecate-Runner/issues"
 
 [build-system]
 requires = ["hatchling"]

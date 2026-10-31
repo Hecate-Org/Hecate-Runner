@@ -300,3 +300,58 @@ def test_slash_command_hunt(tmp_path: Path):
         assert "Ad-hoc Hunt Initiated" in respond_mock.call_args_list[0][1]["text"]
         # Second call is completion result
         assert "Ad-hoc Hunt Completed: `H-0999`" in respond_mock.call_args_list[1][1]["text"]
+
+
+def test_hecate_command_tune(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    query_dir = workspace / "queries" / "H-0950"
+    query_dir.mkdir(parents=True)
+    rule_file = query_dir / "proc.yml"
+    rule_file.write_text(
+        """title: Test Rule
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\\cmd.exe'
+    condition: selection
+""",
+        encoding="utf-8",
+    )
+
+    settings = Settings(hecate_workspace=workspace)
+    mock_app = App(token="xoxb-fake", signing_secret="fake", token_verification_enabled=False)
+    service = SlackBotService(settings=settings, app=mock_app)
+    assert service.app is mock_app
+    cmd_listener = _get_command_listener(mock_app, "/hecate")
+
+    ack_mock = MagicMock()
+    respond_mock = MagicMock()
+
+    # 1. Missing args
+    cmd_listener.ack_function(
+        ack=ack_mock,
+        body={"command": "/hecate", "text": "tune H-0950", "user_id": "U123", "channel_id": "C123"},
+        respond=respond_mock,
+    )
+    assert "Usage" in respond_mock.call_args[1]["text"]
+
+    # 2. Valid tuning command
+    ack_mock.reset_mock()
+    respond_mock.reset_mock()
+    cmd_listener.ack_function(
+        ack=ack_mock,
+        body={
+            "command": "/hecate",
+            "text": "tune H-0950 exclude svchost.exe with parent services.exe",
+            "user_id": "U123",
+            "channel_id": "C123",
+        },
+        respond=respond_mock,
+    )
+    assert ack_mock.called
+    assert respond_mock.called
+    text = respond_mock.call_args[1]["text"]
+    assert "Sigma Rule Tuned & Autonomous Validation Completed for `H-0950`" in text
+    assert "filter_svchost_services" in text
+    assert "Purple-Team Validation:" in text

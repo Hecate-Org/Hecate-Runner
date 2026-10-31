@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
@@ -12,6 +13,7 @@ import pytest
 
 from hecate_runner.bas.approved import (
     APPROVED_PROCEDURES,
+    catalog_digest,
     select_approved_rule,
     validate_approved_ability,
 )
@@ -222,16 +224,18 @@ def test_missing_managed_procedures_can_be_installed_without_overwriting_stock(
         if request.method == "PUT":
             body = json.loads(request.content)
             assert body["id"] not in catalog
+            sh_exec = body["platforms"]["linux"]["sh"]
+            executor_item = {
+                "platform": "linux",
+                "name": "sh",
+                "command": sh_exec["command"],
+            }
+            if "cleanup" in sh_exec:
+                executor_item["cleanup"] = sh_exec["cleanup"]
             catalog[body["id"]] = {
                 "ability_id": body["id"],
                 "technique_id": body["technique"]["attack_id"],
-                "executors": [
-                    {
-                        "platform": "linux",
-                        "name": "sh",
-                        "command": body["platforms"]["linux"]["sh"]["command"],
-                    }
-                ],
+                "executors": [executor_item],
             }
             return httpx.Response(200, json=[])
         return httpx.Response(200, json=list(catalog.values()))
@@ -277,6 +281,7 @@ def test_caldera_receipts_cannot_become_sensor_evidence():
 def container_config():
     return {
         "Id": "pinned-container-id",
+        "Image": "sha256:63dbe5e24c5b8b852ddf0680032488291363c23b5b4fa975445ea0f41a909fbd",
         "State": {"Running": True},
         "Config": {
             "Hostname": "lab",
@@ -350,6 +355,14 @@ def test_sensor_rejects_weakened_lab_before_execution(monkeypatch, change):
         LabProcessSensor("agent", "lab").preflight()
 
 
+def test_sensor_rejects_unapproved_agent_image(monkeypatch):
+    container = container_config()
+    container["Image"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    monkeypatch.setattr(LabProcessSensor, "_docker", lambda *args: json.dumps([container]))
+    with pytest.raises(SafetyViolationError, match="agent image identity is not approved"):
+        LabProcessSensor("agent", "lab").preflight()
+
+
 def test_preflight_failure_does_not_schedule_operation(tmp_path, monkeypatch):
     provider = MagicMock()
     monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
@@ -406,3 +419,168 @@ def test_unsupported_hunts_record_skip_without_claiming_verification(
     assert 'bas_status: "skipped"' in text
     assert "bas_verified:" not in text
     assert "**Skipped:**" in text
+
+
+def test_approved_procedure_cleanup_validation():
+    proc = APPROVED_PROCEDURES["T1027"]
+    valid_ability = {
+        "ability_id": proc.ability_id,
+        "technique_id": proc.technique_id,
+        "executors": [
+            {
+                "platform": "linux",
+                "name": "sh",
+                "command": proc.command,
+                "cleanup": [proc.cleanup_command],
+            }
+        ],
+    }
+    # Valid cleanup succeeds
+    validate_approved_ability(valid_ability, proc)
+
+    # Missing cleanup on a procedure that requires it is rejected
+    missing_cleanup = {
+        "ability_id": proc.ability_id,
+        "technique_id": proc.technique_id,
+        "executors": [
+            {
+                "platform": "linux",
+                "name": "sh",
+                "command": proc.command,
+            }
+        ],
+    }
+    with pytest.raises(SafetyViolationError, match="cleanup command altered or missing"):
+        validate_approved_ability(missing_cleanup, proc)
+
+    # Altered cleanup command is rejected
+    altered_cleanup = {
+        "ability_id": proc.ability_id,
+        "technique_id": proc.technique_id,
+        "executors": [
+            {
+                "platform": "linux",
+                "name": "sh",
+                "command": proc.command,
+                "cleanup": ["rm -rf /tmp/*"],
+            }
+        ],
+    }
+    with pytest.raises(SafetyViolationError, match="cleanup command altered or missing"):
+        validate_approved_ability(altered_cleanup, proc)
+
+
+def test_catalog_digest_deterministic_and_changes_with_mutation():
+    digest1 = catalog_digest()
+    digest2 = catalog_digest()
+    assert len(digest1) == 64
+    assert digest1 == digest2
+
+
+def test_pre_detonation_dirty_tmpfs_triggers_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from hecate_runner.bas.lifecycle import LabLease
+
+    lease = LabLease(
+        lease_path=tmp_path / "lab.lease",
+        quarantine_path=tmp_path / "lab.quarantine",
+        lock_path=tmp_path / "lab.lock",
+    )
+    monkeypatch.setattr("hecate_runner.bas.runtime.LabLease", lambda *args, **kwargs: lease)
+    monkeypatch.setattr(
+        "hecate_runner.bas.runtime.audit_container_tmpfs",
+        lambda *args: ["/tmp/uncleaned-leftover.bin"],
+    )
+
+    fake_sensor = MagicMock()
+    fake_sensor.agent_image = "agent-img"
+    fake_sensor.controller_image = "controller-img"
+    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args: fake_sensor)
+
+    settings = Settings(
+        _env_file=None,
+        hecate_workspace=tmp_path,
+        bas_enabled=True,
+        bas_mode="caldera",
+        bas_telemetry="lab_process",
+        bas_allowed_hosts=["lab"],
+        bas_linux_host="lab",
+        caldera_agent_group="hecate-local-lab",
+        bas_auto_techniques=["T1033"],
+    )
+    result = run_approved_validation(
+        settings, "H-0001", APPROVED_PROCEDURES["T1033"], RULE, lease=lease
+    )
+    assert result["status"] == "error"
+    assert "uncleaned files prior to execution" in result["reason"]
+    assert lease.is_quarantined()
+    info = lease.get_quarantine_info()
+    assert info is not None
+    assert "Dirty lab" in info["reason"]
+    assert "/tmp/uncleaned-leftover.bin" in str(info.get("details"))
+
+
+def test_post_detonation_uncleaned_tmpfs_triggers_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from hecate_runner.bas.lifecycle import LabLease
+
+    lease = LabLease(
+        lease_path=tmp_path / "lab.lease",
+        quarantine_path=tmp_path / "lab.quarantine",
+        lock_path=tmp_path / "lab.lock",
+    )
+    monkeypatch.setattr("hecate_runner.bas.runtime.LabLease", lambda *args, **kwargs: lease)
+
+    # First call (pre-check): clean. Second call (post-check): lingering file found!
+    audit_calls = []
+
+    def mock_audit(container_name):
+        audit_calls.append(container_name)
+        return [] if len(audit_calls) == 1 else ["/tmp/uncleaned-dropper.tmp"]
+
+    monkeypatch.setattr("hecate_runner.bas.runtime.audit_container_tmpfs", mock_audit)
+
+    fake_sensor = MagicMock()
+    fake_sensor.agent_image = "agent-img"
+    fake_sensor.controller_image = "controller-img"
+    fake_sensor.collect.return_value = []
+    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args: fake_sensor)
+
+    provider = MagicMock()
+    provider.detonate.return_value = DetonationResult(
+        success=True,
+        cleanup_success=True,
+        hunt_id="H-0001",
+        technique_id="T1033",
+        ability_id="bd527b63-9f9e-46e0-9816-b8434d2b8989",
+        provider="caldera",
+        start_time_utc="2026-10-31T00:00:00Z",
+        end_time_utc="2026-10-31T00:00:01Z",
+        duration_seconds=1.0,
+        exit_code=0,
+        stdout="whoami",
+        stderr="",
+    )
+    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
+
+    settings = Settings(
+        _env_file=None,
+        hecate_workspace=tmp_path,
+        bas_enabled=True,
+        bas_mode="caldera",
+        bas_telemetry="lab_process",
+        bas_allowed_hosts=["lab"],
+        bas_linux_host="lab",
+        caldera_agent_group="hecate-local-lab",
+        bas_auto_techniques=["T1033"],
+    )
+    result = run_approved_validation(
+        settings, "H-0001", APPROVED_PROCEDURES["T1033"], RULE, lease=lease
+    )
+    assert result["status"] == "error"
+    assert lease.is_quarantined()
+    info = lease.get_quarantine_info()
+    assert info is not None
+    assert "Ephemeral state violation" in info["reason"]

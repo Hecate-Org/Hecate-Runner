@@ -55,10 +55,12 @@ considered.
 
 from __future__ import annotations
 
+import concurrent.futures
 import html
 import json
 import logging
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -73,7 +75,7 @@ from hecate_runner.cti.base import ATTACK_TECHNIQUE_LINE, CTIItem, CTIProvider, 
 
 log = logging.getLogger(__name__)
 
-REQUEST_USER_AGENT = "hecate-runner-cti-poller/1.0 (+https://github.com/BrizoSec/hecate-runner)"
+REQUEST_USER_AGENT = "hecate-runner-cti-poller/1.0 (+https://github.com/Hecate-Org/Hecate-Runner)"
 
 # Same pattern used in orchestrator.derive_research_topic — kept separate
 # rather than imported to avoid a cti/ -> orchestrator dependency cycle.
@@ -152,6 +154,13 @@ class RssCursorState:
             del ids[: len(ids) - _MAX_SEEN_IDS_PER_FEED]
 
 
+@dataclass
+class RssHttpCacheEntry:
+    etag: str | None = None
+    last_modified: str | None = None
+    content: str = ""
+
+
 class RssProvider(CTIProvider):
     """CTI provider backed by a configured list of security research RSS/Atom feeds."""
 
@@ -164,6 +173,8 @@ class RssProvider(CTIProvider):
         max_entry_age_days: int = 14,
         request_timeout_sec: float = 15.0,
         client: httpx.Client | None = None,
+        cache_file: Path | None = None,
+        max_workers: int = 8,
     ):
         if not feed_urls:
             raise RssError("At least one feed URL is required to use the rss CTI provider")
@@ -171,6 +182,10 @@ class RssProvider(CTIProvider):
         self.cursor_file = cursor_file
         self.max_entry_age_days = max_entry_age_days
         self.request_timeout_sec = request_timeout_sec
+        self.cache_file = cache_file or (cursor_file.parent / f"{cursor_file.name}.http_cache.json")
+        self.max_workers = max_workers
+        self._cache_lock = threading.Lock()
+        self._http_cache: dict[str, RssHttpCacheEntry] = self._load_http_cache()
         self._client = client or httpx.Client(
             timeout=request_timeout_sec,
             headers={"User-Agent": REQUEST_USER_AGENT},
@@ -182,6 +197,39 @@ class RssProvider(CTIProvider):
         if self._owns_client:
             self._client.close()
 
+    def _load_http_cache(self) -> dict[str, RssHttpCacheEntry]:
+        if not self.cache_file.exists():
+            return {}
+        try:
+            data = json.loads(self.cache_file.read_text(encoding="utf-8"))
+            cache = {}
+            for url, val in data.items():
+                if isinstance(val, dict):
+                    cache[url] = RssHttpCacheEntry(
+                        etag=val.get("etag"),
+                        last_modified=val.get("last_modified"),
+                        content=val.get("content", ""),
+                    )
+            return cache
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("RSS HTTP cache %s unreadable (%s); starting fresh", self.cache_file, exc)
+            return {}
+
+    def _save_http_cache(self) -> None:
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            serializable = {
+                url: {
+                    "etag": entry.etag,
+                    "last_modified": entry.last_modified,
+                    "content": entry.content,
+                }
+                for url, entry in self._http_cache.items()
+            }
+            atomic_write_text(self.cache_file, json.dumps(serializable, indent=2))
+        except OSError as exc:
+            log.warning("Failed to save RSS HTTP cache %s: %s", self.cache_file, exc)
+
     # --- CTIProvider interface -----------------------------------------------
 
     def next_item(self) -> CTIItem | None:
@@ -189,11 +237,25 @@ class RssProvider(CTIProvider):
         cutoff = datetime.now(UTC) - timedelta(days=self.max_entry_age_days)
 
         candidates: list[tuple[str, dict[str, Any]]] = []
-        for feed_url in self.feed_urls:
+
+        def _fetch_safely(feed_url: str) -> tuple[str, list[dict[str, Any]] | None, str | None]:
             try:
                 entries = self._fetch_entries(feed_url)
+                return feed_url, entries, None
             except RssError as exc:
-                log.warning("Skipping feed %s (%s)", feed_url, exc)
+                return feed_url, None, str(exc)
+
+        # Concurrently fetch feeds
+        workers = min(len(self.feed_urls), self.max_workers)
+        if len(self.feed_urls) <= 1:
+            results = [_fetch_safely(url) for url in self.feed_urls]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(executor.map(_fetch_safely, self.feed_urls))
+
+        for feed_url, entries, error in results:
+            if error is not None or entries is None:
+                log.warning("Skipping feed %s (%s)", feed_url, error)
                 continue
 
             for entry in entries:
@@ -241,10 +303,28 @@ class RssProvider(CTIProvider):
     # --- Internal --------------------------------------------------------------
 
     def _fetch_entries(self, feed_url: str) -> list[dict[str, Any]]:
+        headers: dict[str, str] = {}
+        with self._cache_lock:
+            cached = self._http_cache.get(feed_url)
+        if cached:
+            if cached.etag:
+                headers["If-None-Match"] = cached.etag
+            if cached.last_modified:
+                headers["If-Modified-Since"] = cached.last_modified
+
         try:
-            resp = self._client.get(feed_url)
+            resp = self._client.get(feed_url, headers=headers)
         except httpx.RequestError as exc:
             raise RssError(f"request failed: {exc}") from exc
+
+        if resp.status_code == 304:
+            if cached and cached.content:
+                parsed = feedparser.parse(cached.content)
+                return list(parsed.entries)
+            try:
+                resp = self._client.get(feed_url)
+            except httpx.RequestError as exc:
+                raise RssError(f"request failed: {exc}") from exc
 
         if resp.status_code != 200:
             raise RssError(f"HTTP {resp.status_code}")
@@ -252,6 +332,17 @@ class RssProvider(CTIProvider):
         parsed = feedparser.parse(resp.content)
         if parsed.bozo and not parsed.entries:
             raise RssError(f"unparseable feed: {parsed.get('bozo_exception', 'unknown error')}")
+
+        etag = resp.headers.get("etag")
+        last_modified = resp.headers.get("last-modified")
+        if etag or last_modified:
+            with self._cache_lock:
+                self._http_cache[feed_url] = RssHttpCacheEntry(
+                    etag=etag,
+                    last_modified=last_modified,
+                    content=resp.text,
+                )
+                self._save_http_cache()
 
         return list(parsed.entries)
 
@@ -288,7 +379,9 @@ _FALLBACK_DATE_FORMATS = (
 
 
 def _entry_published(entry: dict[str, Any]) -> datetime | None:
-    parsed_time = entry.get("published_parsed") or entry.get("updated_parsed")
+    parsed_time = (
+        entry["published_parsed"] if "published_parsed" in entry else entry.get("updated_parsed")
+    )
     if parsed_time:
         try:
             # Indexed rather than `datetime(*parsed_time[:6], tzinfo=UTC)`: feedparser

@@ -7,6 +7,9 @@ from typing import Any
 from hecate_runner.bas.base import SafetyViolationError
 
 CONTROLLER_USER = "10001:10001"
+APPROVED_CONTROLLER_IMAGES = {
+    "sha256:325249d44a93a2e0c9fa09200e1467760d4a2b548c4e74ea1e0593c9fcb1ccd3",
+}
 CONTROLLER_STATE_PATHS = {
     "conf": "/usr/src/app/conf",
     "data": "/usr/src/app/data",
@@ -19,8 +22,14 @@ CONTROLLER_STATE_PATHS = {
 }
 
 
-def validate_controller(container: dict[str, Any]) -> None:
+def validate_controller(container: dict[str, Any], approved_images: set[str] | None = None) -> None:
     """Fail closed if the local controller loses its reviewed runtime profile."""
+    valid_images = approved_images if approved_images is not None else APPROVED_CONTROLLER_IMAGES
+    image_id = container.get("Image", "")
+    if image_id not in valid_images:
+        raise SafetyViolationError(
+            f"CALDERA controller image identity is not approved (got {image_id!r})."
+        )
     config = container.get("Config") or {}
     host = container.get("HostConfig") or {}
     mounts = container.get("Mounts") or []

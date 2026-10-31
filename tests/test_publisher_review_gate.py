@@ -17,6 +17,7 @@ from hecate_runner.github_publisher import (
     outbox_for,
 )
 from hecate_runner.promotion_policy import load_policy
+from hecate_runner.public_review import approve_public_review, prepare_public_review
 
 
 def _bundle_workspace(tmp_path: Path, *, unsupported: bool) -> Settings:
@@ -134,8 +135,24 @@ def _public_settings(tmp_path: Path) -> Settings:
     return settings
 
 
-def test_public_policy_uses_destination_config_and_a_fresh_queue(tmp_path: Path) -> None:
+def _approved_public_settings(tmp_path: Path) -> Settings:
     settings = _public_settings(tmp_path)
+    files, _ = _snapshot_bundle(settings, "H-9001")
+    request = prepare_public_review(settings, files)
+    approve_public_review(
+        settings,
+        files,
+        expected_digest=request["digest"],
+        reviewer="test-reviewer",
+        rights_note="Original synthetic fixtures approved for test-only publication.",
+        privacy_checked=True,
+        redistribution_checked=True,
+    )
+    return settings
+
+
+def test_public_policy_uses_destination_config_and_a_fresh_queue(tmp_path: Path) -> None:
+    settings = _approved_public_settings(tmp_path)
     old_settings = settings.model_copy(
         update={"github_publishing_outbox_path": None, "github_publishing_policy_path": None}
     )
@@ -199,7 +216,7 @@ def test_public_policy_rejects_private_only_risk_actions(tmp_path: Path, change:
 def test_retargeted_or_restricted_outbox_never_reaches_github(
     tmp_path: Path, monkeypatch, mismatch: str
 ) -> None:
-    settings = _public_settings(tmp_path)
+    settings = _approved_public_settings(tmp_path)
     if mismatch == "visibility":
         private = settings.model_copy(update={"github_publishing_policy_path": None})
         enqueue_hunt(private, "H-9001")
@@ -224,7 +241,7 @@ def test_retargeted_or_restricted_outbox_never_reaches_github(
 def test_public_publisher_creates_an_isolated_pr_without_direct_merge(
     tmp_path: Path, monkeypatch
 ) -> None:
-    settings = _public_settings(tmp_path)
+    settings = _approved_public_settings(tmp_path)
     enqueue_hunt(settings, "H-9001")
     row = outbox_for(settings).claim_due()
     client = object.__new__(GitHubAppClient)

@@ -29,6 +29,11 @@ import jwt
 from hecate_runner.config import Settings
 from hecate_runner.hunt_audit import parse_hunt_file
 from hecate_runner.promotion_policy import _TLP_RE, evaluate_promotion, load_policy
+from hecate_runner.public_review import (
+    PublicReviewRequiredError,
+    prepare_public_review,
+    require_public_review,
+)
 
 log = logging.getLogger(__name__)
 
@@ -273,7 +278,9 @@ class PromotionOutbox:
                 (datetime.now(UTC).isoformat(), datetime.fromtimestamp(stale, UTC).isoformat()),
             )
 
-    def enqueue(self, hunt_id: str, digest: str, files: dict[str, str]) -> str:
+    def enqueue(
+        self, hunt_id: str, digest: str, files: dict[str, str], *, reviewed: bool = True
+    ) -> str:
         now = datetime.now(UTC).isoformat()
         branch = f"hecate/promotion/{hunt_id.lower()}-{digest[:12]}"
         payload = json.dumps(files, sort_keys=True, separators=(",", ":"))
@@ -281,9 +288,23 @@ class PromotionOutbox:
             connection.execute(
                 """INSERT OR IGNORE INTO promotions
                    (hunt_id,digest,payload,status,branch,created_at,updated_at)
-                   VALUES (?,?,?,'queued',?,?,?)""",
-                (hunt_id, digest, payload, branch, now, now),
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    hunt_id,
+                    digest,
+                    payload,
+                    "queued" if reviewed else "awaiting_review",
+                    branch,
+                    now,
+                    now,
+                ),
             )
+            if reviewed:
+                connection.execute(
+                    "UPDATE promotions SET status='queued', updated_at=? "
+                    "WHERE hunt_id=? AND digest=? AND status='awaiting_review'",
+                    (now, hunt_id, digest),
+                )
             row = connection.execute(
                 "SELECT status FROM promotions WHERE hunt_id=? AND digest=?", (hunt_id, digest)
             ).fetchone()
@@ -336,6 +357,17 @@ class PromotionOutbox:
                 """UPDATE promotions SET status='retry', next_attempt=?, last_error=?,
                    updated_at=? WHERE id=?""",
                 (now.timestamp() + delay, error[:1000], now.isoformat(), row_id),
+            )
+
+    def await_review(self, row_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE promotions SET status='awaiting_review', last_error=?, updated_at=? WHERE id=?",
+                (
+                    "Public privacy and redistribution review required",
+                    datetime.now(UTC).isoformat(),
+                    row_id,
+                ),
             )
 
     def summary(self) -> list[sqlite3.Row]:
@@ -486,6 +518,7 @@ class GitHubAppClient:
             raise PublisherError("Outbox visibility does not match the destination policy")
         if visibility == "public":
             _validate_public_bundle(self.settings, files)
+            require_public_review(self.settings, files)
         self._assert_target_repository(repo_path, visibility)
 
         existing = self._find_pull_request(repo_path, branch)
@@ -704,7 +737,15 @@ def enqueue_hunt(settings: Settings, hunt_id: str) -> str:
     # Hard policy blocks (for example TLP:RED) raise here. Review-classified
     # bundles are still published so a human can review them in GitHub.
     files, digest = _snapshot_bundle(settings, hunt_id)
-    return outbox_for(settings).enqueue(hunt_id, digest, files)
+    reviewed = True
+    policy = load_policy(settings.hecate_workspace, settings.github_publishing_policy_path)
+    if policy["target_visibility"] == "public":
+        prepare_public_review(settings, files)
+        try:
+            require_public_review(settings, files)
+        except PublicReviewRequiredError:
+            reviewed = False
+    return outbox_for(settings).enqueue(hunt_id, digest, files, reviewed=reviewed)
 
 
 def sync_outbox(settings: Settings, *, max_items: int = 20) -> list[PublishResult]:
@@ -714,7 +755,7 @@ def sync_outbox(settings: Settings, *, max_items: int = 20) -> list[PublishResul
     outbox = outbox_for(settings)
     if not outbox.has_due():
         return []
-    client = GitHubAppClient(settings)
+    client: GitHubAppClient | None = None
     results: list[PublishResult] = []
     try:
         for _ in range(max_items):
@@ -722,6 +763,20 @@ def sync_outbox(settings: Settings, *, max_items: int = 20) -> list[PublishResul
             if row is None:
                 break
             try:
+                policy = load_policy(
+                    settings.hecate_workspace, settings.github_publishing_policy_path
+                )
+                if policy["target_visibility"] == "public":
+                    files = json.loads(str(row["payload"]))
+                    _validate_public_bundle(settings, files)
+                    try:
+                        require_public_review(settings, files)
+                    except PublicReviewRequiredError:
+                        prepare_public_review(settings, files)
+                        outbox.await_review(int(row["id"]))
+                        continue
+                if client is None:
+                    client = GitHubAppClient(settings)
                 result = client.publish(row)
                 outbox.finish(int(row["id"]), result)
                 results.append(result)
@@ -734,7 +789,8 @@ def sync_outbox(settings: Settings, *, max_items: int = 20) -> list[PublishResul
                     exc,
                 )
     finally:
-        client.close()
+        if client is not None:
+            client.close()
     return results
 
 

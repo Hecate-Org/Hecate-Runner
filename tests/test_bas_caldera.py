@@ -273,14 +273,23 @@ def test_timeout_stops_remote_operation_and_does_not_claim_cleanup():
     import json
 
     calls = []
+    abilities = [
+        {
+            "ability_id": "bd527b63-9f9e-46e0-9816-b8434d2b8989",
+            "technique_id": "T1033",
+            "executors": [{"platform": "linux", "name": "sh", "command": "whoami"}],
+        }
+    ]
     connector = CalderaConnector(
-        client=create_mock_caldera_client(poll_states=["running"], calls=calls),
+        client=create_mock_caldera_client(
+            abilities=abilities, poll_states=["running"], calls=calls
+        ),
         allowed_hosts=["agent-01"],
     )
     result = connector.detonate(
         DetonationRequest(
             hunt_id="H-TEST",
-            technique_id="T1059.001",
+            technique_id="T1033",
             timeout_sec=1,
             target=DetonationTarget(host="agent-01", environment="lab"),
         )

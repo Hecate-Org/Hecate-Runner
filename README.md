@@ -12,7 +12,10 @@
 
 ## 🧭 Overview
 
-**Hecate-Runner** (`hecate_runner`) is the autonomous driver of the Hecate platform. Operating as a perpetual daemon service, it continuously monitors threat intelligence feeds, triages and dedupes incoming advisories, executes purple-team adversary emulation, synthesizes detection logic through [Hecate-Core](https://github.com/BrizoSec/Hecate-Core), and opens pull requests into [Hecate-Workspace](https://github.com/BrizoSec/Hecate-Content).
+**Hecate-Runner** (`hecate_runner`) is the autonomous driver of the Hecate platform. Operating as a perpetual daemon service, it continuously monitors threat intelligence feeds, triages and dedupes incoming advisories, executes purple-team adversary emulation, synthesizes detection logic through [Hecate-Core](https://github.com/Hecate-Org/Hecate-Core), and opens pull requests into [Hecate-Workspace](https://github.com/Hecate-Org/Hecate-Public).
+
+> [!TIP]
+> **New to Hecate-Runner?** Check out the [Onboarding Guide](docs/ONBOARDING.md) for a step-by-step walkthrough of local setup, adversary emulation, and daily workflows.
 
 It enforces strict operational guardrails:
 - **Zero-Unattended Production Execution:** Detections are drafted in `status: planning` requiring human approval.
@@ -28,14 +31,14 @@ It enforces strict operational guardrails:
 flowchart LR
     FEEDS["20+ Threat Feeds<br/>(OTX, MISP, RSS, KEV...)"] --> RUNNER["Hecate-Runner<br/>(Autonomous Daemon)"]
     RUNNER -- "imports in-process" --> CORE["Hecate-Core<br/>(Reasoning & Sigma Engine)"]
-    RUNNER -- "adversary emulation" --> PURPLE["Purple Team Replay<br/>(Sysmon, WAF, Auditd, Zeek)"]
-    RUNNER -- "publishes atomic PRs" --> WS["Hecate-Workspace<br/>(BrizoSec/Hecate-Content)"]
+    RUNNER -- "adversary emulation" --> PURPLE["Purple Team & BAS<br/>(CALDERA, Stratus, Sysmon)"]
+    RUNNER -- "publishes atomic PRs" --> WS["Hecate-Workspace<br/>(Hecate-Org/Hecate-Public)"]
     RUNNER -- "interactive cards" --> SLACK["Slack ChatOps Bot<br/>(Thread Actions & Commands)"]
 ```
 
-- **[Hecate-Core](https://github.com/BrizoSec/Hecate-Core)**: Sibling library providing the LLM agents, ATT&CK STIX matrix, Sigma drafting, and pySigma transpilers.
-- **[Hecate-Runner](https://github.com/BrizoSec/Hecate-Runner)** *(this repo)*: Autonomous perpetual daemon, multi-feed CTI triage, purple-team emulation, and Slack bot.
-- **[Hecate-Workspace](https://github.com/BrizoSec/Hecate-Content)**: Version-controlled detection repository holding hunts (`hunts/`), queries (`queries/`), research dossiers (`research/`), and promotion gates.
+- **[Hecate-Core](https://github.com/Hecate-Org/Hecate-Core)**: Sibling library providing the LLM agents, ATT&CK STIX matrix, Sigma drafting, and pySigma transpilers.
+- **[Hecate-Runner](https://github.com/Hecate-Org/Hecate-Runner)** *(this repo)*: Autonomous perpetual daemon, multi-feed CTI triage, purple-team emulation, and Slack bot.
+- **[Hecate-Workspace](https://github.com/Hecate-Org/Hecate-Public)**: Version-controlled detection repository holding hunts (`hunts/`), queries (`queries/`), research dossiers (`research/`), and promotion gates.
 
 ---
 
@@ -44,6 +47,8 @@ flowchart LR
 ```text
 Hecate-Runner/
 ├── src/hecate_runner/           # Primary Python package
+│   ├── bas/                     # Breach & Attack Simulation (CALDERA, Stratus, Mock, Verifier)
+│   ├── correlation.py           # Campaign clustering & incremental hunt updater
 │   ├── cti/                     # 20+ CTI feed providers (OTX, MISP, RSS, KEV, AnyRun...)
 │   ├── orchestrator.py          # Central autonomous worker loop & queue manager
 │   ├── purple_team.py           # Adversary emulation & synthetic telemetry replay
@@ -58,12 +63,14 @@ Hecate-Runner/
 │   ├── hecate-runner-daemon.service    # Resident event-driven worker daemon
 │   └── hecate-runner-slack-bot.service  # Interactive Slack bot service
 ├── docs/                        # Complete technical documentation
+│   ├── ONBOARDING.md            # Step-by-step developer onboarding guide
 │   ├── ARCHITECTURE.md          # 3-repo architecture blueprint & data flow
 │   ├── FEATURES.md              # Exhaustive feature matrix and subsystem details
+│   ├── BAS_SAFETY_AUDIT.md      # Safety guarantees & lab isolation boundaries
 │   ├── CHALLENGES.md            # Technical challenges solved (hallucinations, token quotas)
 │   └── HOW_TO.md                # Developer recipes & step-by-step guides
-├── scripts/                     # Operational scripts (systemd installer)
-└── tests/                       # 850+ unit and integration tests
+├── scripts/                     # Operational scripts (systemd installer, lab setup)
+└── tests/                       # 1,100+ unit and integration tests
 ```
 
 ---
@@ -79,9 +86,9 @@ Hecate-Runner/
 ```bash
 mkdir -p ~/betas && cd ~/betas
 
-git clone https://github.com/BrizoSec/Hecate-Core.git
-git clone https://github.com/BrizoSec/Hecate-Runner.git
-git clone https://github.com/BrizoSec/Hecate-Content.git Hecate-Workspace
+git clone https://github.com/Hecate-Org/Hecate-Core.git
+git clone https://github.com/Hecate-Org/Hecate-Runner.git
+git clone https://github.com/Hecate-Org/Hecate-Public.git Hecate-Workspace
 ```
 
 ### Step 2: Install Dependencies with `uv`
@@ -123,7 +130,7 @@ HECATE_RUNNER_GITHUB_PUBLISHING_ENABLED=true
 HECATE_RUNNER_GITHUB_APP_ID=...
 HECATE_RUNNER_GITHUB_INSTALLATION_ID=...
 HECATE_RUNNER_GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/hecate-publisher.pem
-HECATE_RUNNER_GITHUB_PUBLISHING_REPOSITORY=BrizoSec/Hecate-Content
+HECATE_RUNNER_GITHUB_PUBLISHING_REPOSITORY=Hecate-Org/Hecate-Public
 ```
 
 ### Step 4: Run a Test Hunt or Launch the Daemon
@@ -337,3 +344,12 @@ health records and catalog caches are runtime state, not content to commit.
 `hecate-runner sources reset <name>` resets delta sources to a fresh baseline on
 their next poll. Restart the daemon and reopen the monitor after installing an
 update so both processes load the new code and configuration.
+
+## Reviewed community releases
+
+Use `hecate-runner release build` for the explicit original-content catalog and
+`release verify` for its existing isolated BAS controls. Public hunt snapshots
+now remain private in `awaiting_review` until `publish-review` records an exact
+privacy/redistribution approval; the separate GitHub quality gate still applies.
+See [the community release guide](docs/COMMUNITY_RELEASES.md). Private MISP output
+keeps its organization-only, unpublished, non-IDS defaults.

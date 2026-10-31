@@ -67,6 +67,46 @@ def defang_ioc(text: str) -> str:
     return out
 
 
+_SLACK_SECTION_TEXT_LIMIT = 3000
+_SLACK_FIELD_TEXT_LIMIT = 2000
+_SLACK_HEADER_TEXT_LIMIT = 150
+
+
+def clip_slack_text(text: str, limit: int = _SLACK_SECTION_TEXT_LIMIT) -> str:
+    """Ensure text content does not exceed Slack's Block Kit character limit (default 3,000 chars)."""
+    if not text or len(text) <= limit:
+        return text
+    suffix = "... [clipped]"
+    cut = max(0, limit - len(suffix))
+    return text[:cut] + suffix
+
+
+def sanitize_slack_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clip all text and field contents in Slack blocks to comply with Block Kit limits."""
+    for block in blocks:
+        b_type = block.get("type")
+        if b_type == "header":
+            txt_obj = block.get("text")
+            if isinstance(txt_obj, dict) and "text" in txt_obj:
+                txt_obj["text"] = clip_slack_text(txt_obj["text"], _SLACK_HEADER_TEXT_LIMIT)
+        elif b_type == "section":
+            txt_obj = block.get("text")
+            if isinstance(txt_obj, dict) and "text" in txt_obj:
+                txt_obj["text"] = clip_slack_text(txt_obj["text"], _SLACK_SECTION_TEXT_LIMIT)
+            fields = block.get("fields")
+            if isinstance(fields, list):
+                for fld in fields:
+                    if isinstance(fld, dict) and "text" in fld:
+                        fld["text"] = clip_slack_text(fld["text"], _SLACK_FIELD_TEXT_LIMIT)
+        elif b_type == "context":
+            elements = block.get("elements")
+            if isinstance(elements, list):
+                for el in elements:
+                    if isinstance(el, dict) and "text" in el:
+                        el["text"] = clip_slack_text(el["text"], _SLACK_FIELD_TEXT_LIMIT)
+    return blocks
+
+
 def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[dict[str, Any]]:
     """Build a rich Slack card for a newly created draft hunt."""
     research_ctx = (
@@ -171,7 +211,7 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
         }
     )
 
-    return [{"color": COLOR_WARNING, "blocks": blocks}]
+    return [{"color": COLOR_WARNING, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_hunt_completed_card(
@@ -211,7 +251,7 @@ def build_hunt_completed_card(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Topic / Hypothesis:*\n{topic}",
+                "text": f"*Topic / Hypothesis:*\n{clip_slack_text(topic, 2900)}",
             },
         },
         {
@@ -324,7 +364,7 @@ def build_hunt_completed_card(
         }
     )
 
-    return [{"color": COLOR_SUCCESS, "blocks": blocks}]
+    return [{"color": COLOR_SUCCESS, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_purple_team_card(
@@ -394,7 +434,7 @@ def build_purple_team_card(
         },
     ]
 
-    return [{"color": color, "blocks": blocks}]
+    return [{"color": color, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_threat_intake_card(item: CTIItem) -> list[dict[str, Any]]:
@@ -465,7 +505,7 @@ def build_threat_intake_card(item: CTIItem) -> list[dict[str, Any]]:
             }
         )
 
-    return [{"color": color, "blocks": blocks}]
+    return [{"color": color, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_ops_metrics_card(metrics_summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -527,7 +567,7 @@ def build_ops_metrics_card(metrics_summary: dict[str, Any]) -> list[dict[str, An
         },
     ]
 
-    return [{"color": COLOR_INFO, "blocks": blocks}]
+    return [{"color": COLOR_INFO, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_detection_engineering_digest_card(
@@ -596,7 +636,7 @@ def build_detection_engineering_digest_card(
         },
     ]
 
-    return [{"color": COLOR_SUCCESS, "blocks": blocks}]
+    return [{"color": COLOR_SUCCESS, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_threat_intel_digest_card(
@@ -668,7 +708,7 @@ def build_threat_intel_digest_card(
         },
     ]
 
-    return [{"color": COLOR_CRITICAL, "blocks": blocks}]
+    return [{"color": COLOR_CRITICAL, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_threat_hunting_digest_card(
@@ -740,7 +780,7 @@ def build_threat_hunting_digest_card(
         },
     ]
 
-    return [{"color": COLOR_PURPLE, "blocks": blocks}]
+    return [{"color": COLOR_PURPLE, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_slash_help_card() -> list[dict[str, Any]]:
@@ -764,6 +804,7 @@ def build_slash_help_card() -> list[dict[str, Any]]:
                     "• `/hecate hunt <topic_or_cve>` — Launch an immediate ad-hoc hunt cycle (e.g. `/hecate hunt Akira Ransomware`)\n"
                     "• `/hecate deploy <hunt_id> [target]` — Deploy or simulate queries across SIEM/EDRs (e.g. `/hecate deploy H-0868 sentinel_kql`)\n"
                     "• `/hecate rerun <hunt_id>` — Replay purple-team adversary emulation and validate Sigma rules\n"
+                    "• `/hecate tune <hunt_id> <instruction>` — Interactively tune Sigma rule (e.g. `/hecate tune H-0868 exclude svchost.exe with parent services.exe`)\n"
                     "• `/hecate help` — Show this command reference guide"
                 ),
             },
@@ -778,7 +819,7 @@ def build_slash_help_card() -> list[dict[str, Any]]:
             ],
         },
     ]
-    return [{"color": COLOR_INFO, "blocks": blocks}]
+    return [{"color": COLOR_INFO, "blocks": sanitize_slack_blocks(blocks)}]
 
 
 def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
@@ -865,4 +906,4 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
             ],
         },
     ]
-    return [{"color": COLOR_SUCCESS, "blocks": blocks}]
+    return [{"color": COLOR_SUCCESS, "blocks": sanitize_slack_blocks(blocks)}]
