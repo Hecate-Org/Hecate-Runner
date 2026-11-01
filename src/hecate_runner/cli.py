@@ -1300,7 +1300,7 @@ def parked_restore(
         raise typer.Exit(1)
 
     next_file = settings.cti_next_file
-    if next_file.exists() and next_file.read_text().strip():
+    if next_file.exists() and next_file.read_text(encoding="utf-8", errors="replace").strip():
         console.print(
             f"[red]{next_file} already holds CTI.[/red] The file queue takes one item at a "
             "time; restoring now would overwrite it. Let the next cycle consume it first."
@@ -1394,7 +1394,7 @@ def dlq_restore(
     """Restore a quarantined item back to next.txt so a cycle picks it up."""
     settings = Settings()
     next_file = settings.cti_next_file
-    if next_file.exists() and next_file.read_text().strip():
+    if next_file.exists() and next_file.read_text(encoding="utf-8", errors="replace").strip():
         console.print(
             f"[red]{next_file} already holds CTI.[/red] Let the next cycle consume it first."
         )

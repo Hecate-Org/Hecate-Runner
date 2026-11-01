@@ -104,7 +104,7 @@ class RssCursorState:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             seen_ids = data.get("seen_ids")
             if seen_ids is None:
                 # Back-compat with the old single-last-seen-ID format.
@@ -186,6 +186,7 @@ class RssProvider(CTIProvider):
         self.max_workers = max_workers
         self._cache_lock = threading.Lock()
         self._http_cache: dict[str, RssHttpCacheEntry] = self._load_http_cache()
+        self._dirty_cache: bool = False
         self._client = client or httpx.Client(
             timeout=request_timeout_sec,
             headers={"User-Agent": REQUEST_USER_AGENT},
@@ -194,6 +195,10 @@ class RssProvider(CTIProvider):
         self._owns_client = client is None
 
     def close(self) -> None:
+        with self._cache_lock:
+            if self._dirty_cache:
+                self._save_http_cache()
+                self._dirty_cache = False
         if self._owns_client:
             self._client.close()
 
@@ -252,6 +257,11 @@ class RssProvider(CTIProvider):
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 results = list(executor.map(_fetch_safely, self.feed_urls))
+
+        with self._cache_lock:
+            if self._dirty_cache:
+                self._save_http_cache()
+                self._dirty_cache = False
 
         for feed_url, entries, error in results:
             if error is not None or entries is None:
@@ -342,7 +352,7 @@ class RssProvider(CTIProvider):
                     last_modified=last_modified,
                     content=resp.text,
                 )
-                self._save_http_cache()
+                self._dirty_cache = True
 
         return list(parsed.entries)
 

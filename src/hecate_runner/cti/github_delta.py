@@ -55,7 +55,7 @@ class GitHubDeltaProvider(CTIProvider):
         if not self.cursor_file.exists():
             return {}
         # Never turn a corrupt cursor into a silent new baseline.
-        state = json.loads(self.cursor_file.read_text())
+        state = json.loads(self.cursor_file.read_text(encoding="utf-8"))
         if not isinstance(state, dict):
             raise ValueError("invalid delta cursor")
         return state
@@ -170,7 +170,7 @@ class GitHubDeltaProvider(CTIProvider):
     def reject(self, path: str, revision: str, reason: str) -> None:
         """Retain bounded intake decisions so intentional filters are explainable."""
         destination = self.workspace / ".hecate" / "source-decisions" / f"{self.name}.json"
-        decisions = json.loads(destination.read_text()) if destination.exists() else []
+        decisions = json.loads(destination.read_text(encoding="utf-8")) if destination.exists() else []
         decisions.append(
             {
                 "path": path,

@@ -97,3 +97,10 @@ def test_check_spacing() -> None:
     past = (datetime.now(UTC) - timedelta(hours=7)).isoformat()
     state.last_draft_iso = past
     assert state.check_spacing(min_hours=6.0) == (True, 0.0)
+
+    # Naive ISO string (no tzinfo offset) drafted 1 hour ago -> cooldown active
+    naive_recent = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    state.last_draft_iso = naive_recent
+    spaced, elapsed = state.check_spacing(min_hours=6.0)
+    assert spaced is False
+    assert 0.9 <= elapsed <= 1.1

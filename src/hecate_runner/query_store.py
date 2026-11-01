@@ -36,7 +36,7 @@ class PendingQueryStore:
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             log.warning("Pending query file %s is corrupt (%s)", path, exc)
             return None
@@ -53,7 +53,7 @@ class PendingQueryStore:
         queries = []
         for path in sorted(self.store_dir.glob("*.json")):
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 queries.append(ProposedQuery.from_dict(data))
             except json.JSONDecodeError:
                 log.warning("Skipping corrupt pending query file %s", path)

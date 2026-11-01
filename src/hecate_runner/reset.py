@@ -213,7 +213,8 @@ def execute(plan: ResetPlan, settings: Settings) -> None:
         # owned by whoever runs the Runner.
         settings.log_file.touch()
         settings.cti_queue_dir_resolved.mkdir(parents=True, exist_ok=True)
-        (ws / "hunts" / ".hunt_id_counter").write_text(f"{plan.hunt_counter}\n")
+        (ws / "hunts" / ".hunt_id_counter").write_text(f"{plan.hunt_counter}\n", encoding="utf-8")
         (ws / "research" / ".research_id_counter").write_text(
-            json.dumps({"R-": plan.research_counter}, indent=2, sort_keys=True)
+            json.dumps({"R-": plan.research_counter}, indent=2, sort_keys=True),
+            encoding="utf-8",
         )

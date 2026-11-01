@@ -99,7 +99,7 @@ class MispCursorState:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             return cls(
                 last_timestamp=data.get("last_timestamp", ""),
                 seen_ids_at_cursor=list(data.get("seen_ids_at_cursor", [])),

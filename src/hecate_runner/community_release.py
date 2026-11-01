@@ -249,7 +249,7 @@ def build_release(
     observed: dict[str, Any] = {}
     release_inputs = dict(files)
     if evidence:
-        evidence_text = evidence.read_text()
+        evidence_text = evidence.read_text(encoding="utf-8")
         if len(evidence_text.encode()) > 1_000_000:
             raise CatalogError("Evidence report exceeds the release size limit")
         report = json.loads(evidence_text)

@@ -122,7 +122,7 @@ def require_public_review(settings: Settings, files: dict[str, str]) -> None:
             stat.S_IMODE(mode.st_mode) & 0o077 or mode.st_uid != os.getuid()
         ):
             raise PublicReviewRequiredError("Public release approval must be owner-only")
-        approval = json.loads(path.read_text())
+        approval = json.loads(path.read_text(encoding="utf-8"))
         if (
             approval.get("schema_version") != 1
             or approval.get("destination") != settings.github_publishing_repository

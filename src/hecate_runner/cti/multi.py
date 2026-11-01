@@ -44,7 +44,7 @@ class MultiCursorState:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             return cls(next_index=int(data.get("next_index", 0)))
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             log.warning("Multi CTI cursor file %s corrupt (%s); resetting", path, exc)

@@ -144,7 +144,7 @@ class LolDriversProvider(CatalogProvider):
             return []
         cache = self.workspace / ".hecate" / "catalogs" / "loldrivers.json"
         if cache.exists() and time.time() - cache.stat().st_mtime < 86400:
-            cached = json.loads(cache.read_text())
+            cached = json.loads(cache.read_text(encoding="utf-8"))
             entries = cached["entries"]
             snapshot = cached["snapshot_sha256"]
         else:

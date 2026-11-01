@@ -31,7 +31,7 @@ class OrchestratorState:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             return cls(**{k: v for k, v in data.items() if k in cls.__annotations__})
         except (json.JSONDecodeError, TypeError) as exc:
             log.warning("state file %s corrupt (%s); resetting", path, exc)
@@ -48,6 +48,8 @@ class OrchestratorState:
             return True, 0.0
         try:
             last_dt = datetime.fromisoformat(self.last_draft_iso)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=UTC)
             elapsed = (datetime.now(UTC) - last_dt).total_seconds() / 3600.0
             if elapsed < min_hours:
                 return False, elapsed

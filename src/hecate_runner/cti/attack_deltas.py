@@ -45,7 +45,7 @@ class AttackDeltaProvider(CTIProvider):
     def covered(self) -> set[str]:
         covered: set[str] = set()
         for path in (self.workspace / "hunts").rglob("H-*.md"):
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
             try:
                 meta = yaml.safe_load(text.split("---", 2)[1])
                 if meta.get("status") != "archived":
@@ -59,7 +59,7 @@ class AttackDeltaProvider(CTIProvider):
 
     def next_item(self) -> CTIItem | None:
         try:
-            state = json.loads(self.cursor_file.read_text()) if self.cursor_file.exists() else {}
+            state = json.loads(self.cursor_file.read_text(encoding="utf-8")) if self.cursor_file.exists() else {}
             if (
                 not state.get("pending")
                 and time.time() - state.get("checked", 0) >= self.interval_seconds
@@ -202,6 +202,6 @@ class AttackDeltaProvider(CTIProvider):
             raise
 
     def acknowledge(self, item: CTIItem) -> None:
-        state = json.loads(self.cursor_file.read_text())
+        state = json.loads(self.cursor_file.read_text(encoding="utf-8"))
         state["pending"] = [v for v in state["pending"] if v != item.metadata["delta"]]
         self.save(state)

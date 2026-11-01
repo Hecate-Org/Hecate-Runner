@@ -30,7 +30,7 @@ class CisaAdvisoryProvider(GitHubDeltaProvider):
         import httpx
 
         feed_cursor = self.workspace / ".cursors" / "cisa_narrative_feed.json"
-        state = json.loads(feed_cursor.read_text()) if feed_cursor.exists() else {}
+        state = json.loads(feed_cursor.read_text(encoding="utf-8")) if feed_cursor.exists() else {}
         try:
             if time.time() - state.get("checked", 0) < self.interval_seconds and not state.get(
                 "pending"
@@ -109,7 +109,7 @@ class CisaAdvisoryProvider(GitHubDeltaProvider):
         if not item.metadata.get("cisa_feed"):
             return super().acknowledge(item)
         cursor = self.workspace / ".cursors" / "cisa_narrative_feed.json"
-        state = json.loads(cursor.read_text())
+        state = json.loads(cursor.read_text(encoding="utf-8"))
         state["seen"] = list(dict.fromkeys([*state.get("seen", []), item.identifier]))[-1000:]
         state["pending"] = [
             e for e in state.get("pending", []) if e["_hecate_id"] != item.identifier
