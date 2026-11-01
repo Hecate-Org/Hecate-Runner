@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -124,11 +125,13 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
         key=settings.vt_api_key or "",
         header="x-apikey",
     )
+    gn_key = settings.greynoise_api_key or token("GREYNOISE_API_KEY")
     add(
         "greynoise",
         "https://api.greynoise.io/v3/community/1.1.1.1",
-        enabled=bool(settings.greynoise_api_key),
-        key=settings.greynoise_api_key or "",
+        enabled=bool(gn_key),
+        configured=bool(gn_key),
+        key=gn_key,
         header="key",
     )
     for name, url, keys, header in [
@@ -307,8 +310,9 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
                 enabled=enabled,
             )
         own = client is None
+        timeout = 12 if name == "crtsh" else 8
         c = client or httpx.Client(
-            timeout=8,
+            timeout=timeout,
             follow_redirects=True,
             verify=settings.misp_verify_ssl if name in {"misp", "misp_output"} else True,
         )
@@ -326,12 +330,20 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
                 headers["User-Agent"] = BROWSER_UA
             if name == "llm" and llm_provider == "anthropic":
                 headers["anthropic-version"] = "2023-06-01"
-            r = (
-                c.request(method, url, headers=headers, json=body)
-                if name != "malwarebazaar"
-                else c.post(url, headers=headers, data=body)
-            )
-            r.raise_for_status()
+            for attempt in range(2 if name == "crtsh" else 1):
+                try:
+                    r = (
+                        c.request(method, url, headers=headers, json=body)
+                        if name != "malwarebazaar"
+                        else c.post(url, headers=headers, data=body)
+                    )
+                    r.raise_for_status()
+                    break
+                except (httpx.TimeoutException, httpx.HTTPStatusError):
+                    if attempt == 0 and name == "crtsh":
+                        time.sleep(1)
+                        continue
+                    raise
             if not r.content:
                 raise ValueError("empty response")
             if name == "opencti" and (
@@ -412,8 +424,19 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
                                 detail = "insufficient balance (credits exhausted)"
                             elif d_msg and d_msg.lower() != "unprocessable entity":
                                 detail = f"HTTP {exc.response.status_code}: {d_msg[:40]}"
+                        elif "error" in err_json and "searches will reset on" in str(err_json["error"]).lower():
+                            e_msg = str(err_json["error"])
+                            m_reset = re.search(r"reset on ([A-Za-z]+ \d+)", e_msg, re.IGNORECASE)
+                            if m_reset:
+                                detail = f"quota exceeded (resets {m_reset.group(1)})"
+                            else:
+                                detail = "quota exceeded"
                 except Exception:
                     pass
+                if detail == "HTTP 502":
+                    detail = "HTTP 502 (upstream degraded)"
+            elif isinstance(exc, httpx.TimeoutException):
+                detail = "upstream timeout (degraded)" if name == "crtsh" else "Timeout"
             else:
                 detail = type(exc).__name__
             return name, record_health(
