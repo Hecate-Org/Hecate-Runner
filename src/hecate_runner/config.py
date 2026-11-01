@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -1222,7 +1223,15 @@ class Settings(BaseSettings):
 
     @property
     def hecate_bin_resolved(self) -> Path:
-        return self.hecate_bin or (self.hecate_workspace / ".venv" / "bin" / "hecate-agent")
+        if self.hecate_bin:
+            return self.hecate_bin
+        workspace_bin = self.hecate_workspace / ".venv" / "bin" / "hecate-agent"
+        if workspace_bin.exists():
+            return workspace_bin
+        which_bin = shutil.which("hecate-agent")
+        if which_bin:
+            return Path(which_bin)
+        return workspace_bin
 
     @property
     def cti_queue_dir_resolved(self) -> Path:
