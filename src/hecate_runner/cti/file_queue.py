@@ -14,9 +14,10 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Iterator
+from typing import Any, ClassVar
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti.base import CTIItem, CTIProvider
@@ -65,7 +66,9 @@ def route_item_to_queue(queue_dir: Path, item: CTIItem) -> Path:
         safe_id = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", item.identifier or "item")
         dest_file = spool_dir / f"{item.source}-{safe_id}.txt"
         atomic_write_text(dest_file, item.content)
-        log.info("Queue slot next.txt occupied; safely spooled %s to %s", item.identifier, dest_file)
+        log.info(
+            "Queue slot next.txt occupied; safely spooled %s to %s", item.identifier, dest_file
+        )
         return dest_file
 
 

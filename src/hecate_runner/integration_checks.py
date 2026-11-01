@@ -424,7 +424,10 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
                                 detail = "insufficient balance (credits exhausted)"
                             elif d_msg and d_msg.lower() != "unprocessable entity":
                                 detail = f"HTTP {exc.response.status_code}: {d_msg[:40]}"
-                        elif "error" in err_json and "searches will reset on" in str(err_json["error"]).lower():
+                        elif (
+                            "error" in err_json
+                            and "searches will reset on" in str(err_json["error"]).lower()
+                        ):
                             e_msg = str(err_json["error"])
                             m_reset = re.search(r"reset on ([A-Za-z]+ \d+)", e_msg, re.IGNORECASE)
                             if m_reset:

@@ -170,7 +170,9 @@ class GitHubDeltaProvider(CTIProvider):
     def reject(self, path: str, revision: str, reason: str) -> None:
         """Retain bounded intake decisions so intentional filters are explainable."""
         destination = self.workspace / ".hecate" / "source-decisions" / f"{self.name}.json"
-        decisions = json.loads(destination.read_text(encoding="utf-8")) if destination.exists() else []
+        decisions = (
+            json.loads(destination.read_text(encoding="utf-8")) if destination.exists() else []
+        )
         decisions.append(
             {
                 "path": path,

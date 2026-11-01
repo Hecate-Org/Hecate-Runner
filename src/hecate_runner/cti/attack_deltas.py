@@ -59,7 +59,11 @@ class AttackDeltaProvider(CTIProvider):
 
     def next_item(self) -> CTIItem | None:
         try:
-            state = json.loads(self.cursor_file.read_text(encoding="utf-8")) if self.cursor_file.exists() else {}
+            state = (
+                json.loads(self.cursor_file.read_text(encoding="utf-8"))
+                if self.cursor_file.exists()
+                else {}
+            )
             if (
                 not state.get("pending")
                 and time.time() - state.get("checked", 0) >= self.interval_seconds

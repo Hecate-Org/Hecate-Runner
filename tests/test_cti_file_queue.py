@@ -191,4 +191,3 @@ def test_route_item_to_queue_spools_when_next_occupied(tmp_path: Path) -> None:
     assert second is not None
     assert second.content == "Second item"
     provider.acknowledge(second)
-
