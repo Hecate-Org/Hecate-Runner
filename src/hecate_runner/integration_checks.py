@@ -394,11 +394,28 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
                 enabled=enabled,
             )
         except Exception as exc:
-            detail = (
-                f"HTTP {exc.response.status_code}"
-                if isinstance(exc, httpx.HTTPStatusError)
-                else type(exc).__name__
-            )
+            if isinstance(exc, httpx.HTTPStatusError):
+                detail = f"HTTP {exc.response.status_code}"
+                try:
+                    err_json = exc.response.json()
+                    if isinstance(err_json, dict):
+                        errors = err_json.get("errors")
+                        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+                            msg = errors[0].get("message") or ""
+                            if "insufficient balance" in msg.lower():
+                                detail = "insufficient balance (credits exhausted)"
+                            elif msg:
+                                detail = f"HTTP {exc.response.status_code}: {msg[:40]}"
+                        elif "detail" in err_json:
+                            d_msg = str(err_json["detail"])
+                            if "insufficient balance" in d_msg.lower():
+                                detail = "insufficient balance (credits exhausted)"
+                            elif d_msg and d_msg.lower() != "unprocessable entity":
+                                detail = f"HTTP {exc.response.status_code}: {d_msg[:40]}"
+                except Exception:
+                    pass
+            else:
+                detail = type(exc).__name__
             return name, record_health(
                 settings.hecate_workspace, name, False, detail, enabled=enabled
             )
