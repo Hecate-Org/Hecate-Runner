@@ -105,3 +105,21 @@ matching hunt frontmatter result by run ID, and shows automation mode, scope,
 observed events, failures, and skips. The `.hecate` directory must remain ignored
 by Git. Halt unattended execution by setting
 `HECATE_BAS_AUTO_EXECUTE_LIVE=false` and restarting the Runner daemon.
+
+## Quarantine and reset
+
+Manual lab detonation and automatic validation use the same workspace execution
+lock. Reset acquires that lock too and uses the workspace's `.hecate/bas/`
+quarantine state. Failed process inspection, unexpected processes, or
+unconfirmed tmpfs cleanup keep the lab quarantined and cause a nonzero exit.
+Unexpected processes require operator recovery; reset does not claim to kill them.
+
+An active lease timer quarantines overdue execution. The execution lock stays
+held until the worker exits, and overdue results cannot count as success. Remote
+execution still depends on the provider's timeout and stop request; the lease
+cannot prove that an unreachable controller stopped. Exceptions and abandoned
+leases require a successful audit before subsequent execution.
+
+File validation uses successful, time-scoped syscall observations. Expected
+filenames, post-run hashes, and historical `lab_file_delta` records cannot serve
+as creation/deletion evidence.

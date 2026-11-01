@@ -155,12 +155,12 @@ class FileQueueProvider(CTIProvider):
 
         if target_file is None and not queued_path and item.identifier:
             for candidate in (
-                    self.spool_dir / item.identifier,
-                    self.queue_dir / item.identifier,
-                ):
-                    if candidate.exists() and candidate.is_file():
-                        target_file = candidate
-                        break
+                self.spool_dir / item.identifier,
+                self.queue_dir / item.identifier,
+            ):
+                if candidate.exists() and candidate.is_file():
+                    target_file = candidate
+                    break
 
         if target_file is None or not target_file.exists():
             log.debug("No file found to acknowledge for item %s", item.identifier)

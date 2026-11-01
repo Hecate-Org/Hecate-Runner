@@ -16,7 +16,7 @@ def connect_sqlite(
     **kwargs: Any,
 ) -> sqlite3.Connection:
     """Connect to SQLite database with WAL journal mode and busy timeout configured."""
-    conn = sqlite3.connect(str(database), timeout=timeout, **kwargs)
+    conn: sqlite3.Connection = sqlite3.connect(str(database), timeout=timeout, **kwargs)
     if wal:
         with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA journal_mode=WAL")

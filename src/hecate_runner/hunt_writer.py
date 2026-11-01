@@ -514,10 +514,15 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
                 if successful_t:
                     parts.append("##### Native EDR & SIEM Queries")
                     parts.append("")
-                    is_deterministic_ioc = "named in the source intelligence" in title.lower() or len(clean_yaml.splitlines()) > 35
+                    is_deterministic_ioc = (
+                        "named in the source intelligence" in title.lower()
+                        or len(clean_yaml.splitlines()) > 35
+                    )
                     if is_deterministic_ioc:
                         parts.append("<details>")
-                        parts.append("<summary><b>View Transpiled Native Queries for SIEM/EDR Targets (Click to expand)</b></summary>")
+                        parts.append(
+                            "<summary><b>View Transpiled Native Queries for SIEM/EDR Targets (Click to expand)</b></summary>"
+                        )
                         parts.append("")
                     for t_item in successful_t:
                         code_lang = (
@@ -1038,20 +1043,36 @@ def _render_telemetry_prerequisites(req: DraftHuntRequest) -> str:
 
     if any(p in ("windows", "endpoint") for p in platforms_lower) or not platforms_lower:
         lines.append("- **Windows Audit Policies & Telemetry:**")
-        lines.append("  - Process Creation: Windows Event ID 4688 (with CLI auditing enabled) or Sysmon Event ID 1.")
+        lines.append(
+            "  - Process Creation: Windows Event ID 4688 (with CLI auditing enabled) or Sysmon Event ID 1."
+        )
         if "network_connections" in sources or "proxy" in sources or "dns_query" in sources:
-            lines.append("  - Network Activity: Sysmon Event ID 3 (Network Connection) or EDR `DeviceNetworkEvents`.")
+            lines.append(
+                "  - Network Activity: Sysmon Event ID 3 (Network Connection) or EDR `DeviceNetworkEvents`."
+            )
         if "registry_events" in sources:
-            lines.append("  - Registry Monitoring: Sysmon Event ID 12/13/14 or EDR `DeviceRegistryEvents`.")
+            lines.append(
+                "  - Registry Monitoring: Sysmon Event ID 12/13/14 or EDR `DeviceRegistryEvents`."
+            )
         if "file_operations" in sources:
-            lines.append("  - File Integrity / Creation: Sysmon Event ID 11 or EDR `DeviceFileEvents`.")
-        lines.append("  - Scripting: PowerShell ScriptBlock Logging (Microsoft-Windows-PowerShell/Operational Event ID 4104).")
+            lines.append(
+                "  - File Integrity / Creation: Sysmon Event ID 11 or EDR `DeviceFileEvents`."
+            )
+        lines.append(
+            "  - Scripting: PowerShell ScriptBlock Logging (Microsoft-Windows-PowerShell/Operational Event ID 4104)."
+        )
 
     if any(p in ("linux", "containers", "kubernetes") for p in platforms_lower):
         lines.append("- **Linux Audit & Sensor Requirements:**")
-        lines.append("  - Process Execution: `auditd` rule (`-a always,exit -F arch=b64 -S execve`) or eBPF process monitor.")
-        lines.append("  - Socket & Network: eBPF socket connect probes or auditd network tracing (`connect`, `bind`).")
-        lines.append("  - File Monitoring: Inotify / auditd watches on sensitive directories (`/tmp`, `/etc/cron*`, `/etc/systemd`).")
+        lines.append(
+            "  - Process Execution: `auditd` rule (`-a always,exit -F arch=b64 -S execve`) or eBPF process monitor."
+        )
+        lines.append(
+            "  - Socket & Network: eBPF socket connect probes or auditd network tracing (`connect`, `bind`)."
+        )
+        lines.append(
+            "  - File Monitoring: Inotify / auditd watches on sensitive directories (`/tmp`, `/etc/cron*`, `/etc/systemd`)."
+        )
 
     if any(
         p
@@ -1070,15 +1091,27 @@ def _render_telemetry_prerequisites(req: DraftHuntRequest) -> str:
         for p in platforms_lower
     ):
         lines.append("- **Cloud & Identity Audit Telemetry:**")
-        lines.append("  - Management Plane: AWS CloudTrail (management + S3/Lambda data events), Entra ID AuditLogs & SignInLogs.")
-        lines.append("  - Identity Token Monitoring: OAuth app consent grants, STS `AssumeRole` events, service principal credential updates.")
+        lines.append(
+            "  - Management Plane: AWS CloudTrail (management + S3/Lambda data events), Entra ID AuditLogs & SignInLogs."
+        )
+        lines.append(
+            "  - Identity Token Monitoring: OAuth app consent grants, STS `AssumeRole` events, service principal credential updates."
+        )
 
     if any(p in ("macos", "darwin", "osx") for p in platforms_lower):
         lines.append("- **macOS Telemetry Sources:**")
-        lines.append("  - Endpoint Security Framework (ESF) process, file, and authorization events.")
-        lines.append("  - Apple Unified Logging subsystem monitoring for `com.apple.security` and `com.apple.TCC`.")
+        lines.append(
+            "  - Endpoint Security Framework (ESF) process, file, and authorization events."
+        )
+        lines.append(
+            "  - Apple Unified Logging subsystem monitoring for `com.apple.security` and `com.apple.TCC`."
+        )
 
-    return "\n".join(lines) if lines else "- Standard enterprise endpoint and network telemetry logging enabled."
+    return (
+        "\n".join(lines)
+        if lines
+        else "- Standard enterprise endpoint and network telemetry logging enabled."
+    )
 
 
 def _render_attack_chain(req: DraftHuntRequest) -> str:

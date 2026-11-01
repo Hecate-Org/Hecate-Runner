@@ -554,7 +554,9 @@ class SlackBotService:
                     targets_str = ", ".join(f"`{t}`" for t in tune_res.transpiled_targets) or "None"
                     sub_warn_str = ""
                     if tune_res.subsumption_warnings:
-                        sub_warn_str = f"\n⚠️ *Subsumption Warning:* {'; '.join(tune_res.subsumption_warnings)}"
+                        sub_warn_str = (
+                            f"\n⚠️ *Subsumption Warning:* {'; '.join(tune_res.subsumption_warnings)}"
+                        )
 
                     msg = (
                         f"🛠️ *Sigma Rule Tuned & Autonomous Validation Completed for `{hunt_id}`*\n"

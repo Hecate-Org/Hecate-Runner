@@ -1326,7 +1326,9 @@ def parked_restore(
         )
 
 
-dlq_app = typer.Typer(help="Inspect and restore poison-pill CTI quarantined in the dead-letter queue.")
+dlq_app = typer.Typer(
+    help="Inspect and restore poison-pill CTI quarantined in the dead-letter queue."
+)
 app.add_typer(dlq_app, name="dead-letter")
 
 
@@ -1362,7 +1364,9 @@ def dlq_list() -> None:
 
 @dlq_app.command("show")
 def dlq_show(
-    dead_letter_id: Annotated[str, typer.Argument(help="Dead-letter item id, or an unambiguous prefix.")],
+    dead_letter_id: Annotated[
+        str, typer.Argument(help="Dead-letter item id, or an unambiguous prefix.")
+    ],
 ) -> None:
     """Print a quarantined dead-letter item in full."""
     settings = Settings()
@@ -1383,7 +1387,9 @@ def dlq_show(
 
 @dlq_app.command("restore")
 def dlq_restore(
-    dead_letter_id: Annotated[str, typer.Argument(help="Dead-letter item id, or an unambiguous prefix.")],
+    dead_letter_id: Annotated[
+        str, typer.Argument(help="Dead-letter item id, or an unambiguous prefix.")
+    ],
 ) -> None:
     """Restore a quarantined item back to next.txt so a cycle picks it up."""
     settings = Settings()
@@ -1573,7 +1579,7 @@ def dedup(
             cand = SigmaRuleAST.from_yaml_file(check)
         except Exception as e:
             console.print(f"[red]Error parsing candidate rule {check}: {e}[/red]")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from e
 
         internal_issues = deduplicator.audit_internal_redundancy(cand)
         matches = deduplicator.check_candidate(cand, corpus_rules)
@@ -1606,7 +1612,9 @@ def dedup(
                 console.print(f"  • [yellow]{iss}[/yellow]")
 
         if not matches:
-            console.print("\n[bold green]✅ No duplicates or subsumptions found.[/bold green] Rule provides novel coverage.")
+            console.print(
+                "\n[bold green]✅ No duplicates or subsumptions found.[/bold green] Rule provides novel coverage."
+            )
             return
 
         table = Table(title=f"Corpus Match Diagnostics ({len(matches)} matches)")
@@ -1654,7 +1662,9 @@ def dedup(
     )
 
     if report.subsumptions:
-        sub_tbl = Table(title=f"Subsumption Hierarchies ({len(report.subsumptions)})", border_style="yellow")
+        sub_tbl = Table(
+            title=f"Subsumption Hierarchies ({len(report.subsumptions)})", border_style="yellow"
+        )
         sub_tbl.add_column("Relation", style="bold yellow")
         sub_tbl.add_column("Broader Rule")
         sub_tbl.add_column("Narrower / Redundant Rule")
@@ -1664,7 +1674,9 @@ def dedup(
         console.print(sub_tbl)
 
     if not report.has_issues and not (include_overlapping and report.overlaps):
-        console.print("\n[bold green]✅ Clean corpus: No duplicates, redundant subsumptions, or internal dead code detected.[/bold green]")
+        console.print(
+            "\n[bold green]✅ Clean corpus: No duplicates, redundant subsumptions, or internal dead code detected.[/bold green]"
+        )
 
 
 @app.command(name="export-layer")
@@ -1727,7 +1739,6 @@ def export_layer_cmd(
 
 
 app.command(name="layer")(export_layer_cmd)
-
 
 
 # --- Slack Commands & Digests ----------------------------------------------

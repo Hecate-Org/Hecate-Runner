@@ -2479,7 +2479,9 @@ class Orchestrator:
                         measured.set_status("partial")
             except HecateError as exc:
                 log.error("hecate hypothesis-generator failed: %s", exc)
-                return self._handle_item_failure(item, "hecate_error", str(exc), parked_count, state)
+                return self._handle_item_failure(
+                    item, "hecate_error", str(exc), parked_count, state
+                )
 
         repaired = _fill_empty_source_slot(hypothesis.hypothesis, item.title)
         if repaired != hypothesis.hypothesis:
