@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -15,14 +16,16 @@ runner = CliRunner()
 def test_runner_export_layer_help() -> None:
     result = runner.invoke(app, ["export-layer", "--help"])
     assert result.exit_code == 0
-    assert "Export MITRE ATT&CK Navigator JSON layer" in result.output
-    assert "--score-by" in result.output
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "Export MITRE ATT&CK Navigator JSON layer" in clean
+    assert "--score-by" in clean
 
 
 def test_runner_layer_alias_help() -> None:
     result = runner.invoke(app, ["layer", "--help"])
     assert result.exit_code == 0
-    assert "Export MITRE ATT&CK Navigator JSON layer" in result.output
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "Export MITRE ATT&CK Navigator JSON layer" in clean
 
 
 def test_runner_export_layer_stdout(tmp_path: Path) -> None:
