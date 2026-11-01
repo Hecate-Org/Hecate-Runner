@@ -56,7 +56,7 @@ def atomic_write_text(path: Path, content: str, mode: int = DEFAULT_FILE_MODE) -
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)

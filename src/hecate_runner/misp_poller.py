@@ -46,9 +46,13 @@ def run_misp_poll(settings: Settings) -> MispPollResult:
     next_file = queue_dir / "next.txt"
     queue_dir.mkdir(parents=True, exist_ok=True)
 
-    if next_file.exists() and next_file.read_text().strip():
-        log.info("CTI queue slot occupied; nothing to do this poll.")
-        return MispPollResult(skipped_queue_occupied=True)
+    if next_file.exists():
+        try:
+            if next_file.read_text(encoding="utf-8", errors="replace").strip():
+                log.info("CTI queue slot occupied; nothing to do this poll.")
+                return MispPollResult(skipped_queue_occupied=True)
+        except OSError:
+            pass
 
     misp = MispProvider(
         base_url=settings.misp_base_url,
@@ -75,16 +79,17 @@ def run_misp_poll(settings: Settings) -> MispPollResult:
             log.info("No new high-signal MISP events since last poll.")
             return result
 
-        from hecate_runner.atomic_write import atomic_write_text
+        from hecate_runner.cti.file_queue import route_item_to_queue
 
-        atomic_write_text(next_file, item.content)
+        routed_path = route_item_to_queue(queue_dir, item)
         misp.acknowledge(item)
         result.routed = 1
         result.routed_event_uuids.append(item.identifier)
         log.info(
-            "Routed MISP event %s (%s) into CTI queue",
+            "Routed MISP event %s (%s) into CTI queue at %s",
             item.identifier,
             item.metadata.get("event_info", ""),
+            routed_path,
         )
     except MispError as exc:
         log.error("MISP poll failed: %s", exc)

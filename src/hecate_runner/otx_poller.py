@@ -44,9 +44,13 @@ def run_otx_poll(settings: Settings) -> OtxPollResult:
     next_file = queue_dir / "next.txt"
     queue_dir.mkdir(parents=True, exist_ok=True)
 
-    if next_file.exists() and next_file.read_text().strip():
-        log.info("CTI queue slot occupied; nothing to do this poll.")
-        return OtxPollResult(skipped_queue_occupied=True)
+    if next_file.exists():
+        try:
+            if next_file.read_text(encoding="utf-8", errors="replace").strip():
+                log.info("CTI queue slot occupied; nothing to do this poll.")
+                return OtxPollResult(skipped_queue_occupied=True)
+        except OSError:
+            pass
 
     otx = OtxProvider(
         api_key=settings.otx_api_key,
@@ -63,16 +67,17 @@ def run_otx_poll(settings: Settings) -> OtxPollResult:
             log.info("No new high-signal OTX pulses since last poll.")
             return result
 
-        from hecate_runner.atomic_write import atomic_write_text
+        from hecate_runner.cti.file_queue import route_item_to_queue
 
-        atomic_write_text(next_file, item.content)
+        routed_path = route_item_to_queue(queue_dir, item)
         otx.acknowledge(item)
         result.routed = 1
         result.routed_pulse_ids.append(item.identifier)
         log.info(
-            "Routed OTX pulse %s (%s) into CTI queue",
+            "Routed OTX pulse %s (%s) into CTI queue at %s",
             item.identifier,
             item.metadata.get("pulse_name", ""),
+            routed_path,
         )
     except OtxError as exc:
         log.error("OTX poll failed: %s", exc)

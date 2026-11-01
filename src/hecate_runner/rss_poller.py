@@ -49,9 +49,13 @@ def run_rss_poll(settings: Settings) -> RssPollResult:
     next_file = queue_dir / "next.txt"
     queue_dir.mkdir(parents=True, exist_ok=True)
 
-    if next_file.exists() and next_file.read_text().strip():
-        log.info("CTI queue slot occupied; nothing to do this poll.")
-        return RssPollResult(skipped_queue_occupied=True)
+    if next_file.exists():
+        try:
+            if next_file.read_text(encoding="utf-8", errors="replace").strip():
+                log.info("CTI queue slot occupied; nothing to do this poll.")
+                return RssPollResult(skipped_queue_occupied=True)
+        except OSError:
+            pass
 
     rss = RssProvider(
         feed_urls=settings.rss_feed_urls,
@@ -66,16 +70,17 @@ def run_rss_poll(settings: Settings) -> RssPollResult:
             log.info("No new entries across %d configured RSS feeds.", len(settings.rss_feed_urls))
             return result
 
-        from hecate_runner.atomic_write import atomic_write_text
+        from hecate_runner.cti.file_queue import route_item_to_queue
 
-        atomic_write_text(next_file, item.content)
+        routed_path = route_item_to_queue(queue_dir, item)
         rss.acknowledge(item)
         result.routed = 1
         result.routed_entry_ids.append(item.identifier)
         log.info(
-            "Routed RSS entry %s (%s) into CTI queue",
+            "Routed RSS entry %s (%s) into CTI queue at %s",
             item.identifier,
             item.metadata.get("entry_title", ""),
+            routed_path,
         )
     except RssError as exc:
         log.error("RSS poll failed: %s", exc)

@@ -8,16 +8,65 @@ after successful acknowledgment.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
+import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Iterator
 
+from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti.base import CTIItem, CTIProvider
 
 log = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _queue_lock(lock_path: Path) -> Iterator[None]:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def route_item_to_queue(queue_dir: Path, item: CTIItem) -> Path:
+    """Safely route a CTIItem into the file queue without losing data to race conditions.
+
+    If next.txt is empty or does not exist, routes directly to next.txt.
+    If next.txt is already occupied (e.g. concurrent poller wrote first or an unconsumed
+    item is pending), safely spools to spool/ so neither item is overwritten or dropped.
+    Synchronized with an exclusive flock.
+    """
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    next_file = queue_dir / "next.txt"
+    lock_path = queue_dir / ".route.lock"
+
+    with _queue_lock(lock_path):
+        is_occupied = False
+        try:
+            if next_file.is_file() and next_file.stat().st_size > 0:
+                is_occupied = bool(next_file.read_text(encoding="utf-8", errors="replace").strip())
+        except OSError:
+            is_occupied = False
+
+        if not is_occupied:
+            atomic_write_text(next_file, item.content)
+            return next_file
+
+        spool_dir = queue_dir / "spool"
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", item.identifier or "item")
+        dest_file = spool_dir / f"{item.source}-{safe_id}.txt"
+        atomic_write_text(dest_file, item.content)
+        log.info("Queue slot next.txt occupied; safely spooled %s to %s", item.identifier, dest_file)
+        return dest_file
 
 
 class FileQueueProvider(CTIProvider):
@@ -100,10 +149,8 @@ class FileQueueProvider(CTIProvider):
             ext = ".json" if isinstance(content, dict) else ".txt"
             target = self.spool_dir / f"{stamp}{ext}"
 
-        if isinstance(content, dict):
-            target.write_text(json.dumps(content, indent=2))
-        else:
-            target.write_text(content)
+        raw = json.dumps(content, indent=2) if isinstance(content, dict) else str(content)
+        atomic_write_text(target, raw)
 
         log.info("Spooled new CTI item to %s", target)
         return target
@@ -116,7 +163,7 @@ class FileQueueProvider(CTIProvider):
 
         for candidate in pending:
             try:
-                raw_text = candidate.read_text().strip()
+                raw_text = candidate.read_text(encoding="utf-8", errors="replace").strip()
             except OSError as err:
                 log.warning("Could not read CTI file %s: %s", candidate, err)
                 continue

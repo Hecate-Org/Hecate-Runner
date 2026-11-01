@@ -155,3 +155,40 @@ def test_factory_unknown_raises(settings: Settings) -> None:
         assert "bigquery" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_route_item_to_queue_routes_to_next_when_empty(tmp_path: Path) -> None:
+    from hecate_runner.cti.file_queue import route_item_to_queue
+
+    q = tmp_path / "q"
+    item = CTIItem(content="First item", source="otx", identifier="pulse-1")
+    dest = route_item_to_queue(q, item)
+    assert dest == q / "next.txt"
+    assert (q / "next.txt").read_text(encoding="utf-8") == "First item"
+
+
+def test_route_item_to_queue_spools_when_next_occupied(tmp_path: Path) -> None:
+    from hecate_runner.cti.file_queue import route_item_to_queue
+
+    q = tmp_path / "q"
+    q.mkdir(parents=True, exist_ok=True)
+    (q / "next.txt").write_text("Existing item", encoding="utf-8")
+
+    item = CTIItem(content="Second item", source="rss", identifier="feed_123")
+    dest = route_item_to_queue(q, item)
+    assert dest == q / "spool" / "rss-feed_123.txt"
+    assert (q / "next.txt").read_text(encoding="utf-8") == "Existing item"
+    assert dest.read_text(encoding="utf-8") == "Second item"
+
+    # Verify FileQueueProvider consumes next.txt then the spooled item
+    provider = FileQueueProvider(queue_dir=q)
+    first = provider.next_item()
+    assert first is not None
+    assert first.content == "Existing item"
+    provider.acknowledge(first)
+
+    second = provider.next_item()
+    assert second is not None
+    assert second.content == "Second item"
+    provider.acknowledge(second)
+
