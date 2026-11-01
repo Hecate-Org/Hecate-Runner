@@ -552,13 +552,18 @@ class SlackBotService:
                             gh_summary = f"\n• *GitHub PR Sync:* Warning: {gh_err}"
 
                     targets_str = ", ".join(f"`{t}`" for t in tune_res.transpiled_targets) or "None"
+                    sub_warn_str = ""
+                    if tune_res.subsumption_warnings:
+                        sub_warn_str = f"\n⚠️ *Subsumption Warning:* {'; '.join(tune_res.subsumption_warnings)}"
+
                     msg = (
                         f"🛠️ *Sigma Rule Tuned & Autonomous Validation Completed for `{hunt_id}`*\n"
                         f"• *Analyst Instruction:* _{instruction}_\n"
                         f"• *Action Taken:* {tune_res.action_summary}\n"
                         f"• *Updated Telemetry Targets:* {targets_str}\n"
                         f"• *Purple-Team Validation:* {purple_summary}"
-                        f"{gh_summary}\n\n"
+                        f"{gh_summary}"
+                        f"{sub_warn_str}\n\n"
                         f"```diff\n{tune_res.diff}\n```"
                     )
                 else:

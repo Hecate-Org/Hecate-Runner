@@ -461,6 +461,44 @@ def test_hecate_error_refunds_quota(
     assert (workspace / "cti_queue" / "next.txt").exists()
 
 
+def test_hecate_error_quarantines_poison_pill_after_max_retries(
+    settings: Settings,
+    file_queue_with_cti: FileQueueProvider,
+    workspace: Path,
+    sample_research_result: ResearchResult,
+) -> None:
+    from hecate_runner.dead_letter import list_dead_letters
+
+    custom_settings = settings.model_copy(update={"cti_max_retries": 2})
+
+    failing_hecate = MagicMock(spec=HecateClient)
+    failing_hecate.research_new.return_value = sample_research_result
+    failing_hecate.hypothesis_generator.side_effect = HecateError("persistent poison crash")
+
+    orch = Orchestrator(
+        settings=custom_settings,
+        hecate=failing_hecate,
+        cti_provider=file_queue_with_cti,
+    )
+    # Attempt 1: failure recorded, stays in queue
+    r1 = orch.run_once()
+    assert r1.outcome == "hecate_error"
+    assert (workspace / "cti_queue" / "next.txt").exists()
+
+    # Attempt 2: threshold reached -> quarantined to dead_letter/
+    r2 = orch.run_once()
+    assert r2.outcome == "dead_letter"
+    assert "persistent poison crash" in r2.detail
+    assert r2.ok  # ok property handles dead-letter gracefully
+
+    # next.txt acknowledged/consumed so subsequent cycle is clean
+    assert not (workspace / "cti_queue" / "next.txt").exists()
+    dead_letters = list_dead_letters(workspace / "cti_queue")
+    assert len(dead_letters) == 1
+    assert dead_letters[0].attempts == 2
+    assert "persistent poison crash" in dead_letters[0].last_error
+
+
 def test_write_failure_refunds_quota_and_leaves_cti_queued(
     settings: Settings,
     file_queue_with_cti: FileQueueProvider,

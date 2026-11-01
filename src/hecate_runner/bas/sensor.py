@@ -384,51 +384,14 @@ class LabFileDeltaSensor:
         image: str | None = None,
         command_line: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return standardized file_event telemetry for observed file creations and deletions."""
-        events: list[dict[str, Any]] = []
-        for file_path in created_files:
-            file_hash = self.compute_file_sha256(file_path)
-            ev: dict[str, Any] = {
-                "data_source": "file_event",
-                "category": "file_event",
-                "product": "linux",
-                "sensor": "lab_file_delta",
-                "Computer": self.host,
-                "TargetFilename": file_path,
-                "event_type": "create",
-                "UtcTime": start_utc,
-            }
-            if file_hash:
-                ev["Hashes"] = {"SHA256": file_hash}
-                ev["sha256"] = file_hash
-            if process_id is not None:
-                ev["ProcessId"] = process_id
-            if image:
-                ev["Image"] = image
-            if command_line:
-                ev["CommandLine"] = command_line
-            events.append(ev)
+        """Refuse historical events inferred solely from expected file paths.
 
-        for file_path in deleted_files or []:
-            ev = {
-                "data_source": "file_event",
-                "category": "file_event",
-                "product": "linux",
-                "sensor": "lab_file_delta",
-                "Computer": self.host,
-                "TargetFilename": file_path,
-                "event_type": "delete",
-                "UtcTime": end_utc,
-            }
-            if process_id is not None:
-                ev["ProcessId"] = process_id
-            if image:
-                ev["Image"] = image
-            if command_line:
-                ev["CommandLine"] = command_line
-            events.append(ev)
-
-        return events
+        A hash after execution cannot establish creation or deletion during the
+        run. Use successful, time-scoped syscall observations via parse_file_trace.
+        """
+        raise SafetyViolationError(
+            "Expected file paths are not sensor observations; use the file syscall trace."
+        )
 
 
 class LabSensorFusion:

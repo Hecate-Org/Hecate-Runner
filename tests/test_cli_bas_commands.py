@@ -100,6 +100,17 @@ detection:
 
 
 def test_cli_bas_reset_clears_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    def docker(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            "COMMAND\n/usr/bin/strace -f\n/usr/local/bin/sandcat\n" if "top" in cmd else "",
+            "",
+        )
+
+    monkeypatch.setattr("hecate_runner.bas.lifecycle.subprocess.run", docker)
     from hecate_runner.bas.lifecycle import LabLease
 
     lease = LabLease(

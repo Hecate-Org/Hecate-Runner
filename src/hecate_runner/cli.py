@@ -68,6 +68,13 @@ from hecate_runner.commands.sources import (
 )
 from hecate_runner.config import Settings
 from hecate_runner.cti.base import CTIItem
+from hecate_runner.dead_letter import (
+    clear_dead_letters,
+    dead_letter_dir,
+    get_dead_letter,
+    list_dead_letters,
+    restore_dead_letter,
+)
 from hecate_runner.github_publisher import enqueue_hunt, outbox_status, sync_outbox
 from hecate_runner.hecate_client import HecateClient
 from hecate_runner.hunt_audit import (
@@ -1108,9 +1115,22 @@ def status(
     """Show quota, last run, and total drafts."""
     settings = Settings()
     state = OrchestratorState.load(settings.state_file)
+    from hecate_runner.dead_letter import list_dead_letters
     from hecate_runner.parked_store import list_parked
 
     parked_count = len(list_parked(settings.cti_queue_dir_resolved))
+    dead_letter_count = len(list_dead_letters(settings.cti_queue_dir_resolved))
+
+    from hecate_agent.core.llm_provider import CircuitState, get_circuit_breaker
+
+    llm_p = settings.hecate_llm_provider or "default"
+    cb = get_circuit_breaker(llm_p)
+    if cb.state == CircuitState.OPEN:
+        cb_display = f"[bold red]OPEN[/bold red] ({cb.cooldown_remaining:.1f}s cooldown remaining, {cb.failure_count} failures)"
+    elif cb.state == CircuitState.HALF_OPEN:
+        cb_display = "[bold yellow]HALF_OPEN[/bold yellow] (probing recovery)"
+    else:
+        cb_display = "[green]CLOSED[/green] (healthy)"
 
     if json_output:
         data = {
@@ -1119,6 +1139,7 @@ def status(
             "cti_provider": settings.cti_provider,
             "cti_queue_dir": str(settings.cti_queue_dir_resolved),
             "model": _effective_model(settings),
+            "llm_circuit_breaker": cb.status_dict(),
             "drafts_today": state.drafts_today,
             "max_drafts_per_day": settings.max_drafts_per_day,
             "research_runs_today": state.research_runs_today,
@@ -1127,6 +1148,7 @@ def status(
             "last_run": state.last_run_iso,
             "consecutive_failures": state.consecutive_failures,
             "parked_drafts": parked_count,
+            "dead_letter_drafts": dead_letter_count,
         }
         typer.echo(json.dumps(data, indent=2))
         return
@@ -1140,6 +1162,7 @@ def status(
     table.add_row("CTI provider", settings.cti_provider)
     table.add_row("CTI queue dir", str(settings.cti_queue_dir_resolved))
     table.add_row("Model", _effective_model(settings))
+    table.add_row("LLM Circuit Breaker", cb_display)
     table.add_row("Drafts today", f"{state.drafts_today} / {settings.max_drafts_per_day}")
     table.add_row(
         "Research runs today",
@@ -1149,6 +1172,7 @@ def status(
     table.add_row("Last run", state.last_run_iso or "(never)")
     table.add_row("Consecutive failures", str(state.consecutive_failures))
     table.add_row("Parked drafts", str(parked_count))
+    table.add_row("Dead-letter drafts", str(dead_letter_count))
     console.print(table)
 
 
@@ -1302,6 +1326,89 @@ def parked_restore(
         )
 
 
+dlq_app = typer.Typer(help="Inspect and restore poison-pill CTI quarantined in the dead-letter queue.")
+app.add_typer(dlq_app, name="dead-letter")
+
+
+@dlq_app.command("list")
+def dlq_list() -> None:
+    """List CTI quarantined in the dead-letter queue."""
+    settings = Settings()
+    items = list_dead_letters(settings.cti_queue_dir_resolved)
+    if not items:
+        console.print("No dead-letter items quarantined.")
+        return
+
+    table = Table(title="Dead-Letter Queue (Quarantined Poison Pills)")
+    table.add_column("ID", style="red", no_wrap=True)
+    table.add_column("Quarantined")
+    table.add_column("Source")
+    table.add_column("Attempts")
+    table.add_column("Last Error")
+    for item in items:
+        table.add_row(
+            item.dead_letter_id,
+            item.quarantined_at[:16].replace("T", " "),
+            item.source,
+            str(item.attempts),
+            item.last_error[:50],
+        )
+    console.print(table)
+    console.print(
+        f"\n{len(items)} item(s) in {dead_letter_dir(settings.cti_queue_dir_resolved)}. "
+        "Restore one with [bold]hecate-runner dead-letter restore <id>[/bold]."
+    )
+
+
+@dlq_app.command("show")
+def dlq_show(
+    dead_letter_id: Annotated[str, typer.Argument(help="Dead-letter item id, or an unambiguous prefix.")],
+) -> None:
+    """Print a quarantined dead-letter item in full."""
+    settings = Settings()
+    item = get_dead_letter(settings.cti_queue_dir_resolved, dead_letter_id)
+    if item is None:
+        console.print(f"[red]No dead-letter item matching {dead_letter_id!r}.[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[bold red]{item.dead_letter_id}[/bold red]  ({item.source}, quarantined {item.quarantined_at[:16].replace('T', ' ')})"
+    )
+    console.print(f"[bold]Failed attempts:[/bold] {item.attempts}")
+    console.print(f"[bold red]Last error:[/bold red] {item.last_error}")
+    if item.source_url:
+        console.print(f"[bold]Link:[/bold] {item.source_url}")
+    console.print("")
+    console.print(item.content)
+
+
+@dlq_app.command("restore")
+def dlq_restore(
+    dead_letter_id: Annotated[str, typer.Argument(help="Dead-letter item id, or an unambiguous prefix.")],
+) -> None:
+    """Restore a quarantined item back to next.txt so a cycle picks it up."""
+    settings = Settings()
+    next_file = settings.cti_next_file
+    if next_file.exists() and next_file.read_text().strip():
+        console.print(
+            f"[red]{next_file} already holds CTI.[/red] Let the next cycle consume it first."
+        )
+        raise typer.Exit(1)
+
+    restored = restore_dead_letter(settings.cti_queue_dir_resolved, dead_letter_id)
+    if not restored:
+        console.print(f"[red]No dead-letter item matching {dead_letter_id!r}.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Restored {dead_letter_id} to {restored}.[/green]")
+
+
+@dlq_app.command("clear")
+def dlq_clear() -> None:
+    """Clear all quarantined dead-letter items."""
+    settings = Settings()
+    count = clear_dead_letters(settings.cti_queue_dir_resolved)
+    console.print(f"Cleared {count} dead-letter item(s).")
+
+
 @app.command()
 def reset(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
@@ -1393,6 +1500,234 @@ def config(
         typer.echo(json.dumps(dumped, indent=2))
     else:
         console.print_json(json.dumps(dumped))
+
+
+@app.command(name="dedup")
+def dedup(
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="Optional path to query directory or rule file to scan."),
+    ] = None,
+    check: Annotated[
+        Path | None,
+        typer.Option("--check", "-c", help="Check candidate Sigma rule against corpus."),
+    ] = None,
+    threshold: Annotated[
+        float,
+        typer.Option("--threshold", "-t", help="Overlap similarity threshold (default: 0.5)."),
+    ] = 0.5,
+    include_overlapping: Annotated[
+        bool,
+        typer.Option("--include-overlapping", help="Show partial overlaps in results."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit results as plain JSON."),
+    ] = False,
+) -> None:
+    """Analyze Sigma detection rules for duplicates, subsumptions, and redundancies."""
+    from hecate_agent.core.sigma_subsumption import (
+        SigmaDeduplicator,
+        SigmaRuleAST,
+        SubsumptionRelation,
+    )
+
+    settings = Settings()
+    deduplicator = SigmaDeduplicator(overlap_threshold=threshold)
+
+    # Determine paths to search
+    search_dirs: list[Path] = []
+    if path:
+        if path.exists():
+            search_dirs.append(path)
+        else:
+            console.print(f"[yellow]Warning: Specified path '{path}' does not exist.[/yellow]")
+    else:
+        workspace_queries = settings.hecate_workspace / "queries"
+        if workspace_queries.exists() and workspace_queries.is_dir():
+            search_dirs.append(workspace_queries)
+        public_queries = Path("/home/chemch/betas/Hecate-Public/queries")
+        if public_queries.exists() and public_queries.is_dir():
+            search_dirs.append(public_queries)
+
+    corpus_rules: list[SigmaRuleAST] = []
+    seen: set[str] = set()
+    for d in search_dirs:
+        if d.is_file():
+            try:
+                corpus_rules.append(SigmaRuleAST.from_yaml_file(d))
+            except Exception as e:
+                console.print(f"[red]Error loading {d}: {e}[/red]")
+        elif d.is_dir():
+            for r in deduplicator.load_rules_from_directory(d):
+                if r.file_path and r.file_path not in seen:
+                    seen.add(r.file_path)
+                    corpus_rules.append(r)
+
+    # Branch 1: Checking candidate rule
+    if check:
+        if not check.exists():
+            console.print(f"[red]Candidate file '{check}' does not exist.[/red]")
+            raise typer.Exit(code=1)
+        try:
+            cand = SigmaRuleAST.from_yaml_file(check)
+        except Exception as e:
+            console.print(f"[red]Error parsing candidate rule {check}: {e}[/red]")
+            raise typer.Exit(code=1)
+
+        internal_issues = deduplicator.audit_internal_redundancy(cand)
+        matches = deduplicator.check_candidate(cand, corpus_rules)
+
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "candidate": {"id": cand.id, "title": cand.title, "file": str(check)},
+                        "internal_issues": internal_issues,
+                        "matches": [m.to_dict() for m in matches],
+                    },
+                    indent=2,
+                )
+            )
+            return
+
+        console.print(
+            Panel(
+                f"[bold]Candidate Rule:[/bold] {cand.title}\n"
+                f"[dim]ID:[/dim] {cand.id or 'None'} | [dim]Category:[/dim] {cand.category}\n"
+                f"[dim]File:[/dim] {check}",
+                title="🔍 [bold cyan]Sigma Rule Subsumption Check[/bold cyan]",
+                border_style="cyan",
+            )
+        )
+        if internal_issues:
+            console.print("\n[bold yellow]⚠️ Internal Redundancies in Candidate Rule:[/bold yellow]")
+            for iss in internal_issues:
+                console.print(f"  • [yellow]{iss}[/yellow]")
+
+        if not matches:
+            console.print("\n[bold green]✅ No duplicates or subsumptions found.[/bold green] Rule provides novel coverage.")
+            return
+
+        table = Table(title=f"Corpus Match Diagnostics ({len(matches)} matches)")
+        table.add_column("Relation", style="bold")
+        table.add_column("Existing Rule")
+        table.add_column("Score", justify="right")
+        table.add_column("Explanation")
+        for m in matches:
+            style = "green"
+            if m.relation == SubsumptionRelation.EQUIVALENT:
+                style = "bold red"
+            elif m.relation in (SubsumptionRelation.SUBSUMES, SubsumptionRelation.SUBSUMED_BY):
+                style = "bold yellow"
+            elif m.relation == SubsumptionRelation.OVERLAPPING:
+                style = "cyan"
+            table.add_row(
+                f"[{style}]{m.relation.value}[/{style}]",
+                m.rule_b_title,
+                f"{m.overlap_score:.0%}",
+                m.explanation,
+            )
+        console.print(table)
+        return
+
+    # Branch 2: Corpus Analysis
+    if not corpus_rules:
+        console.print("[yellow]No Sigma rules found in workspace or public queries.[/yellow]")
+        return
+
+    report = deduplicator.analyze_corpus(corpus_rules, include_overlaps=include_overlapping)
+    if json_output:
+        typer.echo(report.to_json(indent=2))
+        return
+
+    console.print(
+        Panel(
+            f"[bold]Total Rules Scanned:[/bold] {report.total_rules}\n"
+            f"[bold red]Duplicates (Equivalent):[/bold red] {len(report.duplicates)}\n"
+            f"[bold yellow]Subsumptions (Broader/Narrower):[/bold yellow] {len(report.subsumptions)}\n"
+            f"[bold cyan]Overlaps:[/bold cyan] {len(report.overlaps)}\n"
+            f"[bold magenta]Internal Redundancies:[/bold magenta] {sum(len(v) for v in report.internal_redundancies.values())}",
+            title="📊 [bold green]Sigma Deduplication & Subsumption Summary[/bold green]",
+            border_style="green" if not report.has_issues else "yellow",
+        )
+    )
+
+    if report.subsumptions:
+        sub_tbl = Table(title=f"Subsumption Hierarchies ({len(report.subsumptions)})", border_style="yellow")
+        sub_tbl.add_column("Relation", style="bold yellow")
+        sub_tbl.add_column("Broader Rule")
+        sub_tbl.add_column("Narrower / Redundant Rule")
+        sub_tbl.add_column("Explanation")
+        for s in report.subsumptions:
+            sub_tbl.add_row(s.relation.value, s.rule_a_title, s.rule_b_title, s.explanation)
+        console.print(sub_tbl)
+
+    if not report.has_issues and not (include_overlapping and report.overlaps):
+        console.print("\n[bold green]✅ Clean corpus: No duplicates, redundant subsumptions, or internal dead code detected.[/bold green]")
+
+
+@app.command(name="export-layer")
+def export_layer_cmd(
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Output JSON file path (default: stdout)."),
+    ] = None,
+    name: Annotated[
+        str,
+        typer.Option("--name", help="Layer title in ATT&CK Navigator."),
+    ] = "Hecate Detection Coverage",
+    score_by: Annotated[
+        str,
+        typer.Option("--score-by", help="Scoring metric: 'hunts', 'queries', or 'binary'."),
+    ] = "hunts",
+    tactic: Annotated[
+        str | None,
+        typer.Option("--tactic", help="Filter by specific ATT&CK tactic."),
+    ] = None,
+    platform: Annotated[
+        str | None,
+        typer.Option("--platform", help="Filter by platform (e.g. Windows, Linux)."),
+    ] = None,
+    include_uncovered: Annotated[
+        bool,
+        typer.Option("--include-uncovered", help="Include all techniques with score 0."),
+    ] = False,
+    hunts_dir: Annotated[
+        Path | None,
+        typer.Option("--hunts-dir", help="Custom hunts directory."),
+    ] = None,
+    queries_dir: Annotated[
+        Path | None,
+        typer.Option("--queries-dir", help="Custom queries directory."),
+    ] = None,
+) -> None:
+    """Export MITRE ATT&CK Navigator JSON layer from hunts and queries."""
+    from hecate_agent.core.attack_navigator import NavigatorExporter
+
+    settings = Settings()
+    h_dir = hunts_dir or settings.hunts_root
+    q_dir = queries_dir or (settings.hecate_workspace / "queries")
+
+    exporter = NavigatorExporter(hunts_dir=h_dir, queries_dir=q_dir)
+    layer_dict = exporter.build_layer(
+        name=name,
+        score_by=score_by,
+        tactic_filter=tactic,
+        platform_filter=platform,
+        include_uncovered=include_uncovered,
+    )
+
+    if output:
+        out = exporter.export_to_file(output, layer_dict=layer_dict)
+        console.print(f"[green]✓ Exported ATT&CK Navigator layer to:[/green] {out}")
+        console.print(f"[dim]Techniques included: {len(layer_dict.get('techniques', []))}[/dim]")
+    else:
+        typer.echo(json.dumps(layer_dict, indent=2))
+
+
+app.command(name="layer")(export_layer_cmd)
+
 
 
 # --- Slack Commands & Digests ----------------------------------------------

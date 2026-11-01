@@ -171,7 +171,9 @@ class DetectionVerifier:
         )
         # Scheduling/execution receipts are not independent sensor observations.
         events_to_evaluate = [
-            e for e in events_to_evaluate if e.get("data_source") != "caldera_link"
+            e
+            for e in events_to_evaluate
+            if e.get("data_source") != "caldera_link" and e.get("sensor") != "lab_file_delta"
         ]
         if events_to_evaluate:
             telemetry_arrived = True

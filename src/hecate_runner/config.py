@@ -250,6 +250,12 @@ class Settings(BaseSettings):
         alias="HECATE_RUNNER_PARKED_MAX_AGE_DAYS",
         description="Days after which parked CTI items are automatically deleted. 0 to disable.",
     )
+    cti_max_retries: int = Field(
+        default=3,
+        ge=1,
+        alias="HECATE_RUNNER_CTI_MAX_RETRIES",
+        description="Maximum failed attempts before a poison-pill CTI item is quarantined to the dead-letter queue.",
+    )
 
     # --- Campaign Clustering & Incremental Hunt Updates -----------------------
     campaign_clustering_enabled: bool = Field(

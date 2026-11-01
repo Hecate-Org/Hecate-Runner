@@ -139,3 +139,20 @@ def test_untrusted_approval_file_is_refused(tmp_path):
     path.write_text(json.dumps({**record, "privacy_checked": False}))
     with pytest.raises(PublicReviewRequiredError):
         require_public_review(settings, files)
+
+
+def test_policy_change_queues_exact_new_approved_snapshot(tmp_path):
+    settings = _public_settings(tmp_path)
+    enqueue_hunt(settings, "H-9001")
+    before, digest_before = _snapshot_bundle(settings, "H-9001")
+    policy = settings.hecate_workspace / "promotion-policy.yaml"
+    data = yaml.safe_load(policy.read_text())
+    data["auto_merge"]["merge_method"] = "merge"
+    policy.write_text(yaml.safe_dump(data))
+    after, digest_after = _snapshot_bundle(settings, "H-9001")
+    assert before != after and digest_before != digest_after
+    approve(settings, after)
+    assert enqueue_hunt(settings, "H-9001") == "queued"
+    row = outbox_for(settings).claim_due()
+    assert json.loads(row["payload"]) == after
+    require_public_review(settings, json.loads(row["payload"]))

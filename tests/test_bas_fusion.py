@@ -93,35 +93,19 @@ def test_parse_net_trace_connect():
     assert events[1]["ProcessId"] == 302
 
 
-def test_lab_file_delta_sensor():
+@pytest.mark.parametrize("file_hash", ["", "abcdef1234567890"])
+def test_expected_paths_cannot_generate_file_evidence(file_hash):
+    from hecate_runner.bas.base import SafetyViolationError
+
     sensor = LabFileDeltaSensor("fake-container", "lab-host")
-    sensor.compute_file_sha256 = MagicMock(return_value="abcdef1234567890")  # type: ignore
-
-    events = sensor.collect_delta_events(
-        created_files=["/tmp/hecate-t1027.tmp"],
-        deleted_files=["/tmp/hecate-t1027.tmp"],
-        start_utc="2026-10-31T04:00:00Z",
-        end_utc="2026-10-31T04:00:02Z",
-        process_id=500,
-        image="/bin/base64",
-        command_line="base64 -d",
-    )
-    assert len(events) == 2
-
-    create_ev = events[0]
-    assert create_ev["category"] == "file_event"
-    assert create_ev["event_type"] == "create"
-    assert create_ev["TargetFilename"] == "/tmp/hecate-t1027.tmp"
-    assert create_ev["ProcessId"] == 500
-    assert create_ev["Image"] == "/bin/base64"
-    assert create_ev["CommandLine"] == "base64 -d"
-    assert create_ev["Hashes"]["SHA256"] == "abcdef1234567890"
-
-    delete_ev = events[1]
-    assert delete_ev["category"] == "file_event"
-    assert delete_ev["event_type"] == "delete"
-    assert delete_ev["TargetFilename"] == "/tmp/hecate-t1027.tmp"
-    assert delete_ev["ProcessId"] == 500
+    sensor.compute_file_sha256 = MagicMock(return_value=file_hash)
+    with pytest.raises(SafetyViolationError, match="not sensor observations"):
+        sensor.collect_delta_events(
+            created_files=["/tmp/never-observed"],
+            deleted_files=["/tmp/never-observed"],
+            start_utc="2026-10-31T04:00:00Z",
+            end_utc="2026-10-31T04:00:02Z",
+        )
 
 
 def test_lab_sensor_fusion_lineage_and_deduplication():
@@ -267,6 +251,13 @@ detection:
     )
     assert v_file.rule_triggered is True
     assert v_file.status.value == "verified_true_positive"
+
+    legacy = {**fused_events[1], "sensor": "lab_file_delta"}
+    unobserved = verifier.verify_detonation(
+        detonation, rule_yaml=file_rule, raw_events=[legacy], backend="lab_fusion"
+    )
+    assert not unobserved.rule_triggered
+    assert not unobserved.telemetry_arrived
 
     # 3. Network Rule
     net_rule = """

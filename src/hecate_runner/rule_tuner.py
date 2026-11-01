@@ -57,6 +57,7 @@ class RuleTuningResult:
     diff: str = ""
     new_rule_yaml: str = ""
     transpiled_targets: list[str] = field(default_factory=list)
+    subsumption_warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
 
@@ -324,6 +325,34 @@ class RuleTuner:
                     atomic_write_text(q_path, t_res.query.strip() + "\n")
                     successful_targets.append(tgt)
 
+        # Check for subsumption or duplication against existing rules
+        subsumption_warnings: list[str] = []
+        try:
+            from hecate_agent.core.sigma_subsumption import (
+                SigmaDeduplicator,
+                SigmaRuleAST,
+                SubsumptionRelation,
+            )
+
+            cand_dict = yaml.safe_load(new_yaml)
+            if isinstance(cand_dict, dict):
+                cand_ast = SigmaRuleAST.from_dict(cand_dict, file_path=str(rule_file))
+                dedup = SigmaDeduplicator()
+                corpus_dirs = [self.workspace / "queries", Path("/home/chemch/betas/Hecate-Public/queries")]
+                corpus: list[SigmaRuleAST] = []
+                for cd in corpus_dirs:
+                    if cd.exists():
+                        corpus.extend(dedup.load_rules_from_directory(cd))
+                matches = dedup.check_candidate(cand_ast, corpus)
+                for m in matches:
+                    if m.relation in (SubsumptionRelation.EQUIVALENT, SubsumptionRelation.SUBSUMED_BY):
+                        subsumption_warnings.append(m.explanation)
+        except Exception as dedup_err:
+            log.debug("Subsumption check skipped: %s", dedup_err)
+
+        if subsumption_warnings:
+            log.warning("Tuned rule for %s has subsumption warnings: %s", hunt_id, subsumption_warnings)
+
         # Also update the hunt markdown file if present
         matches = sorted((self.workspace / "hunts").glob(f"**/{hunt_id}.md"))
         if matches:
@@ -336,6 +365,8 @@ class RuleTuner:
                     f"- **Summary:** {summary}\n"
                     f"- **Updated Targets:** {', '.join(successful_targets)}\n"
                 )
+                if subsumption_warnings:
+                    tuning_note += f"- **Subsumption Warnings:** {'; '.join(subsumption_warnings)}\n"
                 atomic_write_text(hunt_doc, doc_text + tuning_note)
             except Exception as h_err:
                 log.debug("Note update to %s skipped (%s)", hunt_doc.name, h_err)
@@ -349,4 +380,5 @@ class RuleTuner:
             diff=diff_text,
             new_rule_yaml=new_yaml,
             transpiled_targets=successful_targets,
+            subsumption_warnings=subsumption_warnings,
         )

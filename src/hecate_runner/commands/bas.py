@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from typing import Annotated
 
 import typer
@@ -118,7 +119,7 @@ def bas_reset_cmd(
         typer.Option("--note", "-n", help="Operator note explaining the reason for reset."),
     ] = "Audited reset via CLI",
 ) -> None:
-    """Audit the lab environment, terminate lingering child processes, and clear quarantine."""
+    """Audit lab cleanup and clear quarantine only if the lab is clean."""
     from hecate_runner.bas.lifecycle import reset_lab
 
     settings = _get_settings()
@@ -228,6 +229,7 @@ def bas_detonate_cmd(
         timeout_sec=timeout,
     )
 
+    lease = None
     if target.environment == "lab":
         from hecate_runner.bas.lifecycle import LabLease
 
@@ -249,7 +251,10 @@ def bas_detonate_cmd(
     )
 
     try:
-        result = provider.detonate(req)
+        with lease.acquire(hunt_id, timeout_sec=timeout) if lease else nullcontext():
+            result = provider.detonate(req)
+            if lease and not result.cleanup_success:
+                lease.quarantine("Manual BAS cleanup was not confirmed.", hunt_id)
     except Exception as exc:
         console.print(f"[bold red]Detonation failed with exception:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc

@@ -13,10 +13,11 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Generator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -75,8 +76,7 @@ class LabLease:
         """Clear quarantine state during an audited reset."""
         info = self.get_quarantine_info()
         if self.quarantine_path.exists():
-            with suppress(OSError):
-                self.quarantine_path.unlink()
+            self.quarantine_path.unlink()
         return info
 
     def check_quarantine(self) -> None:
@@ -89,63 +89,82 @@ class LabLease:
             )
 
     @contextmanager
-    def acquire(
-        self, hunt_id: str, timeout_sec: int = 180
-    ) -> Generator[dict[str, Any], None, None]:
-        """Acquire the lab lease under a watchdog deadline, failing closed on contention/quarantine."""
-        self.check_quarantine()
-
+    def locked(self) -> Generator[None, None, None]:
+        """Serialize both execution and reset; reset may inspect quarantine."""
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = self.lock_path.open("a+")
-        try:
+        with self.lock_path.open("a+") as lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except (BlockingIOError, OSError) as exc:
+            except OSError as exc:
                 raise SafetyViolationError(
                     "Another BAS operation holds the active lab lease."
                 ) from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-            # Inspect previous lease for watchdog expiration
-            now = time.time()
+    @contextmanager
+    def acquire(
+        self, hunt_id: str, timeout_sec: int = 180
+    ) -> Generator[dict[str, Any], None, None]:
+        """Quarantine on deadline or exceptional exit while retaining the execution lock.
+
+        The provider must also bound/stop remote execution. A timer cannot safely
+        kill a Python worker or prove remote cleanup, so timeout requires reset.
+        """
+        if timeout_sec <= 0:
+            raise SafetyViolationError("BAS lease timeout must be positive.")
+        with self.locked():
+            self.check_quarantine()
             if self.lease_path.exists():
-                try:
-                    prior = json.loads(self.lease_path.read_text(encoding="utf-8"))
-                    prior_expires = float(prior.get("expires_at", 0))
-                    if prior_expires and prior_expires < now:
-                        self.quarantine(
-                            f"Previous lab lease for {prior.get('hunt_id', 'unknown')} expired at "
-                            f"{datetime.fromtimestamp(prior_expires, UTC).isoformat()} without clean release.",
-                            hunt_id=hunt_id,
-                            details=prior,
-                        )
-                        raise SafetyViolationError(
-                            "Previous lab lease expired without clean release; lab has been quarantined."
-                        )
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            lease_id = uuid.uuid4().hex
-            expires_at = now + timeout_sec
+                self.quarantine(
+                    "Previous lab lease expired or was abandoned without clean release.", hunt_id
+                )
+                raise SafetyViolationError(
+                    "Previous lab lease expired or was abandoned; lab has been quarantined."
+                )
+            now = time.time()
+            deadline = time.monotonic() + timeout_sec
             lease_data = {
-                "lease_id": lease_id,
+                "lease_id": uuid.uuid4().hex,
                 "hunt_id": hunt_id,
                 "pid": os.getpid(),
                 "acquired_at": datetime.now(UTC).isoformat(),
-                "expires_at": expires_at,
+                "expires_at": now + timeout_sec,
                 "timeout_sec": timeout_sec,
             }
-            atomic_write_text(self.lease_path, json.dumps(lease_data, indent=2), mode=0o644)
+            atomic_write_text(self.lease_path, json.dumps(lease_data, indent=2), mode=0o600)
+            expired = threading.Event()
 
+            def expire() -> None:
+                expired.set()
+                self.quarantine(
+                    "BAS execution exceeded its lease deadline; cleanup requires audit.", hunt_id
+                )
+
+            watchdog = threading.Timer(timeout_sec, expire)
+            watchdog.daemon = True
+            watchdog.start()
             try:
                 yield lease_data
+                if expired.is_set() or time.monotonic() >= deadline:
+                    if not expired.is_set():
+                        expire()
+                    raise SafetyViolationError("BAS execution exceeded its lease deadline.")
+            except BaseException:
+                if not self.is_quarantined():
+                    self.quarantine(
+                        "BAS operation exited without confirmed clean release.", hunt_id
+                    )
+                raise
             finally:
-                if not self.is_quarantined() and self.lease_path.exists():
-                    with suppress(OSError):
-                        self.lease_path.unlink()
-        finally:
-            with suppress(OSError):
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            lock_file.close()
+                watchdog.cancel()
+                watchdog.join()
+                if expired.is_set():
+                    raise SafetyViolationError("BAS execution exceeded its lease deadline.")
+                if not self.is_quarantined():
+                    self.lease_path.unlink(missing_ok=True)
 
 
 def audit_container_tmpfs(container_name: str = "hecate-bas-agent") -> list[str]:
@@ -174,9 +193,9 @@ def audit_container_tmpfs(container_name: str = "hecate-bas-agent") -> list[str]
         )
         if proc.returncode == 0:
             return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    except Exception as exc:
-        log.warning("Failed to audit container tmpfs on %s: %s", container_name, exc)
-    return []
+        raise SafetyViolationError("Container tmpfs inspection failed.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SafetyViolationError("Container tmpfs inspection failed.") from exc
 
 
 def clean_container_tmpfs(
@@ -211,56 +230,72 @@ def reset_lab(
     workspace: Path | None = None,
     lease: LabLease | None = None,
 ) -> dict[str, Any]:
-    """Audit the lab environment, terminate lingering child processes, purge tmpfs, and clear quarantine."""
-    lab_lease = lease or LabLease()
+    """Clear quarantine only after serialized, successful process and tmpfs audits.
 
-    # 1. Audit & clear quarantine
-    prior_quarantine = lab_lease.clear_quarantine(operator_note)
-
-    # 2. Check docker processes and tmpfs files in agent container
-    lingering_processes: list[str] = []
-    lingering_files: list[str] = []
-    files_purged: list[str] = []
-    docker_available = True
-    try:
-        proc = subprocess.run(
-            ["docker", "top", container_name],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if proc.returncode == 0:
+    Unexpected processes require operator recovery; never claim to have killed
+    them, or clear quarantine while they may still be changing container state.
+    """
+    root = workspace / ".hecate" / "bas" if workspace else None
+    lab_lease = lease or (
+        LabLease(root / "lab.lease", root / "lab.quarantine", root / "execution.lock")
+        if root
+        else LabLease()
+    )
+    with lab_lease.locked():
+        record: dict[str, Any] = {
+            "reset_at": datetime.now(UTC).isoformat(),
+            "operator_note": operator_note or "Audited reset via hecate-runner bas-reset.",
+            "prior_quarantine": lab_lease.get_quarantine_info(),
+            "lingering_processes_found": [],
+            "lingering_files_found": [],
+            "files_purged": [],
+            "docker_available": False,
+            "status": "failed",
+        }
+        try:
+            proc = subprocess.run(
+                ["docker", "top", container_name, "-eo", "args"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            if proc.returncode != 0:
+                raise SafetyViolationError("Container process inspection failed.")
             lines = proc.stdout.strip().splitlines()
-            if len(lines) > 1:
-                for line in lines[1:]:
-                    parts = line.split(maxsplit=7)
-                    cmd = parts[7] if len(parts) > 7 else ""
-                    # Allowed supervisor processes
-                    if not any(sup in cmd for sup in ("/usr/bin/strace", "/usr/local/bin/sandcat")):
-                        lingering_processes.append(cmd)
-        lingering_files = audit_container_tmpfs(container_name)
-        if lingering_files:
-            files_purged = clean_container_tmpfs(container_name, lingering_files)
-    except Exception:
-        docker_available = False
-
-    # 3. Log audit record
-    reset_record = {
-        "reset_at": datetime.now(UTC).isoformat(),
-        "operator_note": operator_note or "Audited reset via hecate-runner bas-reset.",
-        "prior_quarantine": prior_quarantine,
-        "lingering_processes_found": lingering_processes,
-        "lingering_files_found": lingering_files,
-        "files_purged": files_purged,
-        "docker_available": docker_available,
-        "status": "clean",
-    }
-
-    if workspace:
-        audit_file = workspace / ".hecate" / "bas" / "resets.jsonl"
-        audit_file.parent.mkdir(parents=True, exist_ok=True)
-        with audit_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(reset_record) + "\n")
-
-    return reset_record
+            if len(lines) < 2 or lines[0].strip() not in {"COMMAND", "CMD"}:
+                raise SafetyViolationError(
+                    "Container process inspection returned no usable process list."
+                )
+            record["docker_available"] = True
+            allowed = {"/usr/bin/strace", "/usr/local/bin/sandcat"}
+            lingering = [
+                line.strip()
+                for line in lines[1:]
+                if not line.strip() or line.split()[0] not in allowed
+            ]
+            record["lingering_processes_found"] = lingering
+            if lingering:
+                raise SafetyViolationError(
+                    "Unexpected processes remain; recover the lab before resetting quarantine."
+                )
+            files = audit_container_tmpfs(container_name)
+            record["lingering_files_found"] = files
+            record["files_purged"] = clean_container_tmpfs(container_name, files)
+            if audit_container_tmpfs(container_name):
+                raise SafetyViolationError("Container tmpfs cleanup could not be confirmed.")
+            record["status"] = "clean"
+            # Persist the audit before clearing safety state.
+            if workspace:
+                audit_file = workspace / ".hecate" / "bas" / "resets.jsonl"
+                audit_file.parent.mkdir(parents=True, exist_ok=True)
+                with audit_file.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+            lab_lease.lease_path.unlink(missing_ok=True)
+            lab_lease.clear_quarantine(operator_note)
+        except Exception as exc:
+            lab_lease.quarantine("Lab reset failed: " + str(exc))
+            raise SafetyViolationError(
+                "Lab reset failed; quarantine retained: " + str(exc)
+            ) from exc
+        return record

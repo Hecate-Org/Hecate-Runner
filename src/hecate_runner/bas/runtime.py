@@ -12,7 +12,7 @@ from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.approved import APPROVED_PROCEDURES, ApprovedProcedure, catalog_digest
 from hecate_runner.bas.base import DetonationRequest, DetonationTarget, SafetyViolationError
 from hecate_runner.bas.lifecycle import LabLease, audit_container_tmpfs
-from hecate_runner.bas.sensor import LabFileDeltaSensor, LabProcessSensor
+from hecate_runner.bas.sensor import LabProcessSensor
 from hecate_runner.bas.verifier import DetectionVerifier
 from hecate_runner.config import Settings
 
@@ -138,24 +138,11 @@ def run_approved_validation(
             )
             detonation = provider.detonate(request)
             if detonation.success:
-                delta_sensor = LabFileDeltaSensor(
-                    settings.bas_sensor_container, settings.bas_linux_host
-                )
-                file_delta_events: list[dict[str, Any]] = []
-                if procedure.expected_files and detonation.cleanup_success:
-                    file_delta_events = delta_sensor.collect_delta_events(
-                        created_files=list(procedure.expected_files),
-                        deleted_files=list(procedure.expected_files),
-                        start_utc=detonation.start_time_utc,
-                        end_utc=detonation.end_time_utc,
-                        command_line=procedure.command,
-                    )
                 if hasattr(sensor, "collect_fused"):
                     events = sensor.collect_fused(
                         detonation,
                         procedure.argv,
                         expected_files=procedure.expected_files,
-                        file_delta_events=file_delta_events,
                     )
                 else:
                     events = sensor.collect(detonation, procedure.argv)

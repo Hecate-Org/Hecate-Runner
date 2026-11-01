@@ -31,6 +31,7 @@ from hecate_runner.config import Settings
 from hecate_runner.context_metrics import measure_tokens
 from hecate_runner.cti import CTIItem, CTIProvider, get_provider
 from hecate_runner.cti_triage import source_quality_verdict, triage
+from hecate_runner.dead_letter import clear_retry, quarantine, record_failure
 from hecate_runner.github_publisher import enqueue_hunt, sync_outbox
 from hecate_runner.hecate_client import HecateClient, HecateError, HypothesisResult
 from hecate_runner.hunt_writer import (
@@ -103,6 +104,7 @@ class RunResult:
             "parked_after_research",
             "parked_after_hypothesis",
             "parked_no_techniques",
+            "dead_letter",
         }
 
 
@@ -1774,6 +1776,54 @@ class Orchestrator:
         log.info("Found %d non-actionable CTI items; stopping this cycle.", skipped)
         return None, skipped, parked_count
 
+    def _handle_item_failure(
+        self,
+        item: CTIItem,
+        outcome: str,
+        error_msg: str,
+        parked_count: int,
+        state: OrchestratorState,
+    ) -> RunResult:
+        """Handle a fatal failure during CTI item processing with DLQ retry management."""
+        state.drafts_today -= 1
+        state.total_drafts_ever -= 1
+
+        queue_dir = self.settings.cti_queue_dir_resolved
+        attempts = record_failure(queue_dir, item, error_msg)
+
+        if attempts >= self.settings.cti_max_retries:
+            dlq_path = quarantine(queue_dir, item, error_msg, attempts)
+            self._advance_past(item)
+            self.trail.step(
+                "dead_letter",
+                "item %s quarantined to %s after %d failures: %s",
+                item.identifier or "unnamed",
+                dlq_path.name,
+                attempts,
+                error_msg,
+            )
+            log.warning(
+                "Quarantined poison-pill item %s to DLQ %s after %d failed attempts: %s",
+                item.identifier,
+                dlq_path.name,
+                attempts,
+                error_msg,
+            )
+            return RunResult(
+                outcome="dead_letter",
+                detail=f"Quarantined to DLQ after {attempts} attempts ({error_msg})",
+                parked_count=parked_count,
+            )
+
+        log.warning(
+            "CTI item %s failed (attempt %d/%d): %s",
+            item.identifier,
+            attempts,
+            self.settings.cti_max_retries,
+            error_msg,
+        )
+        return RunResult(outcome=outcome, detail=error_msg, parked_count=parked_count)
+
     def _run_body(self, state: OrchestratorState, *, dry_run: bool) -> RunResult:
         # Primary-source evidence for this cycle's item; see _gather_source_evidence.
         self._source_evidence = None
@@ -1844,6 +1894,7 @@ class Orchestrator:
                     enrichment.new_indicators_count,
                     enrichment.new_rules_count,
                 )
+                clear_retry(self.settings.cti_queue_dir_resolved, item)
                 self._advance_past(item)
                 return RunResult(
                     outcome="incremental_enrichment",
@@ -2428,10 +2479,7 @@ class Orchestrator:
                         measured.set_status("partial")
             except HecateError as exc:
                 log.error("hecate hypothesis-generator failed: %s", exc)
-                # Refund the quota — the CTI stays in the queue.
-                state.drafts_today -= 1
-                state.total_drafts_ever -= 1
-                return RunResult(outcome="hecate_error", detail=str(exc), parked_count=parked_count)
+                return self._handle_item_failure(item, "hecate_error", str(exc), parked_count, state)
 
         repaired = _fill_empty_source_slot(hypothesis.hypothesis, item.title)
         if repaired != hypothesis.hypothesis:
@@ -2727,14 +2775,11 @@ class Orchestrator:
                 req.grounding_section = self._grounding_section(req, item, technique_facts)
                 with self.metrics.measure("draft_write"):
                     path = write_draft(req, self.settings.hunts_root)
+                clear_retry(self.settings.cti_queue_dir_resolved, item)
                 self.trail.step("write", "%s written to %s", hunt_id, path)
         except OSError as exc:
             log.error("Failed to allocate/write draft hunt file: %s", exc)
-            # Refund the quota — nothing was actually drafted, and the CTI
-            # item is still unacknowledged so it stays queued for retry.
-            state.drafts_today -= 1
-            state.total_drafts_ever -= 1
-            return RunResult(outcome="write_error", detail=str(exc), parked_count=parked_count)
+            return self._handle_item_failure(item, "write_error", str(exc), parked_count, state)
 
         # Close the loop back to the research document. Isolated like the
         # other post-write steps: the draft already exists and its quota is

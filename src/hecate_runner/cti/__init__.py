@@ -32,6 +32,7 @@ from hecate_runner.cti.shadowserver import ShadowserverProvider
 from hecate_runner.cti.triage import TriageProvider
 from hecate_runner.cti.vulncheck import VulnCheckProvider
 from hecate_runner.cti.vxunderground import VxUndergroundProvider
+from hecate_runner.http_pool import get_shared_client
 
 __all__ = [
     "ATTACK_TECHNIQUE_LINE",
@@ -94,6 +95,10 @@ def get_provider(name: str, *, settings: Settings) -> CTIProvider:
             page_limit=settings.otx_page_limit,
             max_pulse_age_days=settings.otx_max_pulse_age_days,
             request_timeout_sec=settings.otx_request_timeout_sec,
+            client=get_shared_client(
+                pool_name="otx",
+                timeout=settings.otx_request_timeout_sec,
+            ),
         )
     if name == "rss":
         return RssProvider(
@@ -101,6 +106,10 @@ def get_provider(name: str, *, settings: Settings) -> CTIProvider:
             cursor_file=settings.rss_cursor_file,
             max_entry_age_days=settings.rss_max_entry_age_days,
             request_timeout_sec=settings.rss_request_timeout_sec,
+            client=get_shared_client(
+                pool_name="rss",
+                timeout=settings.rss_request_timeout_sec,
+            ),
         )
     if name == "misp":
         return MispProvider(
@@ -116,6 +125,11 @@ def get_provider(name: str, *, settings: Settings) -> CTIProvider:
             org_allowlist=settings.misp_org_allowlist,
             backfill=settings.misp_backfill,
             max_pages_per_poll=settings.misp_max_pages_per_poll,
+            client=get_shared_client(
+                pool_name="misp",
+                timeout=settings.misp_request_timeout_sec,
+                verify=settings.misp_verify_ssl,
+            ),
         )
     if name == "cisa_kev":
         return CisaKevProvider(workspace=settings.hecate_workspace)

@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.hecate_client import HypothesisResult
 
@@ -76,6 +78,8 @@ class DraftHuntRequest:
     bas_verification: dict[str, Any] | None = None
     #: Claim excerpts and exact source passages checked by the Runner.
     claim_evidence: list[dict[str, str]] = field(default_factory=list)
+    #: Incremental campaign updates / dossier revision history
+    campaign_updates: list[dict[str, Any]] = field(default_factory=list)
 
 
 #: Ceiling on the CTI blurb embedded in a draft. Generous on purpose: the
@@ -271,15 +275,18 @@ def _defang_prose_iocs(markdown: str, indicators: set[str]) -> str:
 def embedded_cti(threat_intel: str) -> str:
     """The CTI blurb as it is quoted into a draft."""
     text = (threat_intel or "").strip()
-    if len(text) <= _MAX_EMBEDDED_CTI:
-        return text
-    omitted = len(text) - _MAX_EMBEDDED_CTI
-    return (
-        text[:_MAX_EMBEDDED_CTI].rstrip()
-        + f"\n[... {omitted} characters of CTI omitted from this draft. "
-        "Indicators below this point were available to drafting but are not "
-        "quoted here, so a grounding audit cannot confirm them.]"
-    )
+    if len(text) > _MAX_EMBEDDED_CTI:
+        omitted = len(text) - _MAX_EMBEDDED_CTI
+        text = (
+            text[:_MAX_EMBEDDED_CTI].rstrip()
+            + f"\n[... {omitted} characters of CTI omitted from this draft. "
+            "Indicators below this point were available to drafting but are not "
+            "quoted here, so a grounding audit cannot confirm them.]"
+        )
+    # Demote/strip internal headings so they do not collide with document-level sections
+    text = re.sub(r"(?m)^#{1,4}\s+(?:Threat Context|Primary Source Evidence)\b[^\n]*\n?", "", text)
+    text = re.sub(r"(?m)^#{1,3}\s+", "#### ", text)
+    return text.strip()
 
 
 # Hunt ID allocation (hunt_id_lock, next_hunt_id) lives in hecate_agent.core.hunt_ids,
@@ -409,6 +416,21 @@ def _research_document_line(req: DraftHuntRequest) -> str:
     return "- **Research Context:** None — review the CTI directly"
 
 
+def _clean_rule_yaml_for_display(rule_yaml: str) -> str:
+    """Strip internal provenance tracking structures from displayed markdown YAML."""
+    if "hecate_provenance:" not in rule_yaml:
+        return rule_yaml.rstrip()
+    try:
+        data = yaml.safe_load(rule_yaml)
+        if isinstance(data, dict) and "hecate_provenance" in data:
+            data.pop("hecate_provenance", None)
+            return yaml.safe_dump(data, sort_keys=False).rstrip()
+    except Exception:
+        pass
+    cleaned = re.sub(r"(?m)^hecate_provenance:\s*\n(^(?:  |-|\s).*\n)*", "", rule_yaml)
+    return cleaned.rstrip()
+
+
 def _render_sigma_section(req: DraftHuntRequest) -> str:
     """Render the drafted Sigma rules, or the old placeholder if there are none.
 
@@ -472,8 +494,9 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
         parts.append("")
         parts.append(f"*Severity:* {level} | *ATT&CK:* {techniques}")
         parts.append("")
+        clean_yaml = _clean_rule_yaml_for_display(str(rule.get("rule_yaml", "")).rstrip())
         parts.append("```yaml")
-        parts.append(str(rule.get("rule_yaml", "")).rstrip())
+        parts.append(clean_yaml)
         parts.append("```")
         parts.append("")
 
@@ -491,6 +514,11 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
                 if successful_t:
                     parts.append("##### Native EDR & SIEM Queries")
                     parts.append("")
+                    is_deterministic_ioc = "named in the source intelligence" in title.lower() or len(clean_yaml.splitlines()) > 35
+                    if is_deterministic_ioc:
+                        parts.append("<details>")
+                        parts.append("<summary><b>View Transpiled Native Queries for SIEM/EDR Targets (Click to expand)</b></summary>")
+                        parts.append("")
                     for t_item in successful_t:
                         code_lang = (
                             "kql"
@@ -501,6 +529,9 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
                         parts.append(f"```{code_lang}")
                         parts.append(t_item.query.strip())
                         parts.append("```")
+                        parts.append("")
+                    if is_deterministic_ioc:
+                        parts.append("</details>")
                         parts.append("")
             except Exception:
                 pass
@@ -580,13 +611,42 @@ def _render_source_evidence(req: DraftHuntRequest) -> str:
             "| Indicator | Type | Role | Status | Confidence | Rules | Evidence |",
             "|---|---|---|---|---|---|---|",
         ]
-        for r in records:
-            evidence = f'"{_cell(r["evidence"])}"' if r.get("evidence") else "unverified"
-            lines.append(
-                f"| `{_cell(r['value'], 70)}` | {r['type']} | {r.get('role', 'unknown')} | "
-                f"{r.get('status', 'unknown')} | {r.get('confidence', 'unknown')} | {_rule_placements(r)} | "
-                f"{evidence} |"
-            )
+        if len(records) > 20:
+            non_hashes = [
+                r
+                for r in records
+                if str(r.get("type", "")).lower()
+                not in {"md5", "sha1", "sha256", "filehash-md5", "filehash-sha1", "filehash-sha256"}
+            ]
+            hashes = [
+                r
+                for r in records
+                if str(r.get("type", "")).lower()
+                in {"md5", "sha1", "sha256", "filehash-md5", "filehash-sha1", "filehash-sha256"}
+            ]
+            displayed_hashes = hashes[:10]
+            omitted_hashes = len(hashes) - len(displayed_hashes)
+
+            for r in non_hashes + displayed_hashes:
+                evidence = f'"{_cell(r["evidence"])}"' if r.get("evidence") else "unverified"
+                lines.append(
+                    f"| `{_cell(r['value'], 70)}` | {r['type']} | {r.get('role', 'unknown')} | "
+                    f"{r.get('status', 'unknown')} | {r.get('confidence', 'unknown')} | {_rule_placements(r)} | "
+                    f"{evidence} |"
+                )
+            if omitted_hashes > 0:
+                lines.append(
+                    f"| *(+{omitted_hashes} additional file hash indicators)* | file_hash | unknown | active | cti | "
+                    f"process_creation | *See queries/{req.hunt_id}/indicator_sweep.py for full indicator list* |"
+                )
+        else:
+            for r in records:
+                evidence = f'"{_cell(r["evidence"])}"' if r.get("evidence") else "unverified"
+                lines.append(
+                    f"| `{_cell(r['value'], 70)}` | {r['type']} | {r.get('role', 'unknown')} | "
+                    f"{r.get('status', 'unknown')} | {r.get('confidence', 'unknown')} | {_rule_placements(r)} | "
+                    f"{evidence} |"
+                )
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -607,6 +667,13 @@ def _render_claim_evidence(req: DraftHuntRequest) -> str:
     """Show quote provenance for generated claims, including missing links."""
     if not req.claim_evidence:
         return ""
+    active_claims = [
+        row
+        for row in req.claim_evidence
+        if row.get("quote") or row.get("status") != "no exact claim citation supplied"
+    ]
+    unquoted_count = len(req.claim_evidence) - len(active_claims)
+
     lines = [
         "",
         "#### Claim Evidence References",
@@ -614,21 +681,31 @@ def _render_claim_evidence(req: DraftHuntRequest) -> str:
         "The Runner checks that each quote occurs in the source text and that the cited claim excerpt appears in the final field. "
         "A text match does not prove the quote supports the claim; review that relationship.",
         "",
-        "| Field | Claim excerpt | Source passage | Quote check |",
-        "|---|---|---|---|",
     ]
-    for row in req.claim_evidence:
-        quote = f'"{_cell(row.get("quote", ""), 220)}"' if row.get("quote") else "—"
-        source = row.get("source", "")
-        source_link = (
-            f"[{_cell(source, 100)}]({source})"
-            if source.startswith(("https://", "http://"))
-            else _cell(source, 100) or "—"
-        )
+    if active_claims:
+        lines += [
+            "| Field | Claim excerpt | Source passage | Quote check |",
+            "|---|---|---|---|",
+        ]
+        for row in active_claims:
+            quote = f'"{_cell(row.get("quote", ""), 220)}"' if row.get("quote") else "—"
+            source = row.get("source", "")
+            source_link = (
+                f"[{_cell(source, 100)}]({source})"
+                if source.startswith(("https://", "http://"))
+                else _cell(source, 100) or "—"
+            )
+            lines.append(
+                f"| {row.get('field', '')} | {_cell(row.get('claim', ''), 180)} | {quote} | "
+                f"{_cell(row.get('status', ''), 80)} ({source_link}) |"
+            )
+        lines.append("")
+    if unquoted_count > 0:
         lines.append(
-            f"| {row.get('field', '')} | {_cell(row.get('claim', ''), 180)} | {quote} | "
-            f"{_cell(row.get('status', ''), 80)} ({source_link}) |"
+            f"> **Note:** {unquoted_count} additional technique(s) and observable(s) were derived from feed metadata "
+            "or contextual inference without direct in-text quotations (see Grounding Audit below)."
         )
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -811,6 +888,251 @@ def _render_bas_verification(req: DraftHuntRequest) -> str:
     return "\n".join(lines)
 
 
+def _render_pivot_matrix(req: DraftHuntRequest) -> str:
+    """Render concrete operational pivoting guidance for SOC analysts."""
+    platforms_lower = {p.strip().lower() for p in req.platforms if p.strip()}
+    is_macos = any(p in ("macos", "darwin", "osx") for p in platforms_lower)
+    is_linux = any(p in ("linux", "containers", "kubernetes") for p in platforms_lower)
+    is_cloud = any(
+        p
+        in (
+            "cloud",
+            "iaas",
+            "saas",
+            "aws",
+            "gcp",
+            "azure",
+            "m365",
+            "office365",
+            "entra id",
+            "okta",
+        )
+        for p in platforms_lower
+    )
+
+    if is_cloud:
+        rows = [
+            (
+                "Anomalous API Action / Role Assumption",
+                "Principal Identity & Source IP",
+                "Query CloudTrail / Entra logs for all calls from principal session ±2 hours.",
+            ),
+            (
+                "New OAuth Grant / Service Principal",
+                "Permissions & App Scope",
+                "Review Microsoft Graph / cloud IAM role grants for high-privilege directory permissions.",
+            ),
+            (
+                "External Data Access / Egress Spike",
+                "Target Object / Storage Bucket",
+                "Check bucket access logs and VPC flow logs for unauthorized egress destinations.",
+            ),
+        ]
+    elif is_macos:
+        rows = [
+            (
+                "Suspicious Command Line / Script Execution",
+                "Parent Process Lineage",
+                "Query parent executable, code signing entitlements, and Terminal/app session ±5 min.",
+            ),
+            (
+                "External C2 Network Connection",
+                "Host Socket & DNS History",
+                "Extract all outgoing connections from endpoint ±15 min; correlate with proxy logs.",
+            ),
+            (
+                "Staged Payload / Script in User Cache",
+                "File Metadata & TCC Database",
+                "Check ~/Library/Caches and LaunchAgents for persistence; verify Quarantine bit status.",
+            ),
+            (
+                "LaunchAgent / Daemon Creation",
+                "Persistence & Authorization",
+                "Inspect plist program arguments and run `sfltool dumpbtm` to inspect background task.",
+            ),
+        ]
+    elif is_linux:
+        rows = [
+            (
+                "Suspicious Command Line Parameter",
+                "Parent Process Lineage",
+                "Query parent PID, shell type, executable path, and user session within ±5 min.",
+            ),
+            (
+                "External C2 Network Connection",
+                "Host Socket & DNS History",
+                "Extract all outbound connections from endpoint ±15 min; isolate if beaconing.",
+            ),
+            (
+                "Staged Payload in /tmp or /dev/shm",
+                "File Inode & Execution Context",
+                "Inspect file permissions and hash; query auditd execve logs for related invocations.",
+            ),
+            (
+                "Cron / Systemd Unit Persistence",
+                "User Crontabs & Service Units",
+                "Review /etc/cron* and /etc/systemd/system/ for unauthorized modifications.",
+            ),
+        ]
+    else:  # Windows & Generic
+        rows = [
+            (
+                "Suspicious Command Line Argument",
+                "Parent Process Lineage",
+                "Query parent executable, user account, and process tree within ±5 min.",
+            ),
+            (
+                "External C2 Network Connection",
+                "Host Socket & DNS History",
+                "Extract all external connections from the endpoint within ±15 min; isolate if beaconing.",
+            ),
+            (
+                "Staged Payload in Staging Directory",
+                "File Metadata & Global Scope",
+                "Compute file SHA256; search enterprise EDR for matching hashes across all endpoints.",
+            ),
+            (
+                "Registry Persistence Key",
+                "User Account & Run Keys",
+                "Inspect autoruns and scheduled tasks registered by the same security identifier (SID).",
+            ),
+        ]
+
+    lines = [
+        "#### 4. Investigative Pivot Matrix",
+        "",
+        "| If Alert Trigger Shows | Pivot Investigation To | Recommended Query / Action |",
+        "|---|---|---|",
+    ]
+    for trigger, pivot, action in rows:
+        lines.append(f"| **{trigger}** | {pivot} | {action} |")
+    return "\n".join(lines)
+
+
+def _render_alerting_profile(req: DraftHuntRequest) -> str:
+    """Render operational deployment mode, alerting tier, and rate-limiting guidance."""
+    is_ioc = req.hypothesis.is_indicator_only
+    tier = (
+        "Tier-3 Retrospective Sweep / Scheduled Hunt"
+        if is_ioc
+        else "Tier-1 Real-Time Alert / High-Fidelity TTP"
+    )
+    throttle = (
+        "Aggregate by IOC, run weekly across 30-day historical telemetry."
+        if is_ioc
+        else "Aggregate by `Computer, User` (1-hour window); alert immediately on first occurrence."
+    )
+    return (
+        "#### 5. Operational Alerting Profile\n\n"
+        f"- **Recommended Deployment Tier:** `{tier}`\n"
+        f"- **Aggregation & Throttling:** {throttle}\n"
+        "- **Target Queue:** SOC Primary Queue for single-host detection; IR Priority Queue if multi-host correlation is observed.\n"
+    )
+
+
+def _render_telemetry_prerequisites(req: DraftHuntRequest) -> str:
+    """Render platform-specific audit policies and telemetry prerequisites."""
+    platforms_lower = {p.strip().lower() for p in req.platforms if p.strip()}
+    sources = set(req.hypothesis.data_sources or [])
+    lines: list[str] = []
+
+    if any(p in ("windows", "endpoint") for p in platforms_lower) or not platforms_lower:
+        lines.append("- **Windows Audit Policies & Telemetry:**")
+        lines.append("  - Process Creation: Windows Event ID 4688 (with CLI auditing enabled) or Sysmon Event ID 1.")
+        if "network_connections" in sources or "proxy" in sources or "dns_query" in sources:
+            lines.append("  - Network Activity: Sysmon Event ID 3 (Network Connection) or EDR `DeviceNetworkEvents`.")
+        if "registry_events" in sources:
+            lines.append("  - Registry Monitoring: Sysmon Event ID 12/13/14 or EDR `DeviceRegistryEvents`.")
+        if "file_operations" in sources:
+            lines.append("  - File Integrity / Creation: Sysmon Event ID 11 or EDR `DeviceFileEvents`.")
+        lines.append("  - Scripting: PowerShell ScriptBlock Logging (Microsoft-Windows-PowerShell/Operational Event ID 4104).")
+
+    if any(p in ("linux", "containers", "kubernetes") for p in platforms_lower):
+        lines.append("- **Linux Audit & Sensor Requirements:**")
+        lines.append("  - Process Execution: `auditd` rule (`-a always,exit -F arch=b64 -S execve`) or eBPF process monitor.")
+        lines.append("  - Socket & Network: eBPF socket connect probes or auditd network tracing (`connect`, `bind`).")
+        lines.append("  - File Monitoring: Inotify / auditd watches on sensitive directories (`/tmp`, `/etc/cron*`, `/etc/systemd`).")
+
+    if any(
+        p
+        in (
+            "cloud",
+            "iaas",
+            "saas",
+            "aws",
+            "gcp",
+            "azure",
+            "m365",
+            "office365",
+            "entra id",
+            "okta",
+        )
+        for p in platforms_lower
+    ):
+        lines.append("- **Cloud & Identity Audit Telemetry:**")
+        lines.append("  - Management Plane: AWS CloudTrail (management + S3/Lambda data events), Entra ID AuditLogs & SignInLogs.")
+        lines.append("  - Identity Token Monitoring: OAuth app consent grants, STS `AssumeRole` events, service principal credential updates.")
+
+    if any(p in ("macos", "darwin", "osx") for p in platforms_lower):
+        lines.append("- **macOS Telemetry Sources:**")
+        lines.append("  - Endpoint Security Framework (ESF) process, file, and authorization events.")
+        lines.append("  - Apple Unified Logging subsystem monitoring for `com.apple.security` and `com.apple.TCC`.")
+
+    return "\n".join(lines) if lines else "- Standard enterprise endpoint and network telemetry logging enabled."
+
+
+def _render_attack_chain(req: DraftHuntRequest) -> str:
+    """Render a tactical attack sequence flow for mapped techniques and tactics."""
+    techniques = req.hypothesis.techniques
+    if not techniques:
+        return ""
+    tactics = req.tactics or []
+    tactic_order = [
+        "initial-access",
+        "execution",
+        "persistence",
+        "privilege-escalation",
+        "defense-evasion",
+        "credential-access",
+        "discovery",
+        "lateral-movement",
+        "collection",
+        "command-and-control",
+        "exfiltration",
+        "impact",
+    ]
+    ordered_tactics = [t for t in tactic_order if t in tactics] or tactics
+    if ordered_tactics:
+        chain_str = " ➔ ".join(f"`{t.replace('-', ' ').title()}`" for t in ordered_tactics[:6])
+        return f"- **Adversary Attack Path Progression:** {chain_str}\n"
+    if len(techniques) > 1:
+        return f"- **Attack Chain Progression:** `{' ➔ '.join(techniques[:5])}`\n"
+    return ""
+
+
+def _render_campaign_history(req: DraftHuntRequest) -> str:
+    """Render incremental enrichment history for living campaign dossiers."""
+    updates = getattr(req, "campaign_updates", None)
+    if not updates:
+        return ""
+    lines = [
+        "",
+        "### Campaign Evolution & Incremental Dossier History",
+        "",
+        "| Date | Source / CTI | Action Taken | Incremental Indicators | Rule Variants |",
+        "|---|---|---|---|---|",
+    ]
+    for update in updates:
+        date = str(update.get("date", req.generated_at.strftime("%Y-%m-%d")))
+        source = str(update.get("source", "CTI Update"))
+        action = str(update.get("action", "Enrichment"))
+        iocs = str(update.get("new_iocs", "None"))
+        rules = str(update.get("rule_variants", "None"))
+        lines.append(f"| {date} | {source} | {action} | {iocs} | {rules} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
     """Render SOC Responder Triage Playbook (ADS-Lite) to guide analysts when alerts fire."""
     if req.hypothesis.is_indicator_only:
@@ -830,7 +1152,8 @@ def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
             "#### 3. Detection Robustness & Evasion Cost\n"
             "- **Observable Robustness:** IOC-centric (Pyramid of Pain: Hashes / IP Addresses / Domains). Fragile and easily changed by adversary.\n"
             "- **Event Robustness:** Sensor & perimeter logging (Proxy, DNS, Firewall, EDR network events).\n"
-            "- **Adversary Evasion Cost:** Low — adversary can rapidly alter domain or IP infrastructure.\n"
+            "- **Adversary Evasion Cost:** Low — adversary can rapidly alter domain or IP infrastructure.\n\n"
+            + _render_alerting_profile(req)
         )
 
     techniques = ", ".join(req.hypothesis.techniques) if req.hypothesis.techniques else "Unmapped"
@@ -876,7 +1199,10 @@ def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
             "#### 3. Detection Robustness & Evasion Cost\n"
             "- **Observable Robustness:** Behavioral / TTP-centric (Pyramid of Pain: TTPs). Resistant to IP or tool rotation.\n"
             "- **Event Robustness:** Control Plane / Management Plane audit telemetry (immutable CloudTrail / Entra Audit logs).\n"
-            "- **Adversary Evasion Cost:** High — adversary cannot bypass management-plane audit logging without cloud control plane compromise.\n"
+            "- **Adversary Evasion Cost:** High — adversary cannot bypass management-plane audit logging without cloud control plane compromise.\n\n"
+            + _render_pivot_matrix(req)
+            + "\n\n"
+            + _render_alerting_profile(req)
         )
 
     # Linux & Containers Triage Playbook
@@ -902,7 +1228,10 @@ def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
             "#### 3. Detection Robustness & Evasion Cost\n"
             "- **Observable Robustness:** Behavioral / TTP-centric (Pyramid of Pain: TTPs). Resistant to simple script or binary renaming.\n"
             "- **Event Robustness:** Sensor & kernel audit telemetry (`auditd`, eBPF, EDR Linux sensor).\n"
-            "- **Adversary Evasion Cost:** High — adversary must redesign execution vehicle or bypass telemetry hooks.\n"
+            "- **Adversary Evasion Cost:** High — adversary must redesign execution vehicle or bypass telemetry hooks.\n\n"
+            + _render_pivot_matrix(req)
+            + "\n\n"
+            + _render_alerting_profile(req)
         )
 
     # macOS Triage Playbook
@@ -928,7 +1257,10 @@ def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
             "#### 3. Detection Robustness & Evasion Cost\n"
             "- **Observable Robustness:** Behavioral / TTP-centric (Pyramid of Pain: TTPs). Resistant to file hash or binary path changes.\n"
             "- **Event Robustness:** Endpoint Security Framework (ESF) / Unified Logging sensor telemetry.\n"
-            "- **Adversary Evasion Cost:** High — adversary must redesign execution vehicle or bypass macOS transparency and security hooks.\n"
+            "- **Adversary Evasion Cost:** High — adversary must redesign execution vehicle or bypass macOS transparency and security hooks.\n\n"
+            + _render_pivot_matrix(req)
+            + "\n\n"
+            + _render_alerting_profile(req)
         )
 
     # Windows & Generic Endpoint Triage Playbook
@@ -953,7 +1285,10 @@ def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
         "#### 3. Detection Robustness & Evasion Cost\n"
         "- **Observable Robustness:** Behavioral / TTP-centric (Pyramid of Pain: TTPs). Resistant to simple file hash or IP changes.\n"
         "- **Event Robustness:** Kernel / EDR sensor-level telemetry (e.g., Sysmon / EDR process creation & memory access).\n"
-        "- **Adversary Evasion Cost:** High — adversary must redesign execution vehicle or bypass telemetry hooks.\n"
+        "- **Adversary Evasion Cost:** High — adversary must redesign execution vehicle or bypass telemetry hooks.\n\n"
+        + _render_pivot_matrix(req)
+        + "\n\n"
+        + _render_alerting_profile(req)
     )
 
 
@@ -1094,14 +1429,14 @@ Source CTI:
 ### Threat Intel & Research
 
 - **MITRE ATT&CK Techniques:** {techniques_display}
-- **CTI Sources & References:** {f"[{req.source_url}]({req.source_url})" if req.source_url else "[Review CTI and populate]"}
+{_render_attack_chain(req)}- **CTI Sources & References:** {f"[{req.source_url}]({req.source_url})" if req.source_url else "[Review CTI and populate]"}
 {_research_document_line(req)}
 {_render_technique_evidence(req)}
 {_render_claim_evidence(req)}
 ### Grounding
 
 {req.grounding_section or "Not yet audited."}{_render_claim_audit(req)}
-
+{_render_campaign_history(req)}
 ### Related Tickets
 
 | **Team** | **Ticket/Details** |
@@ -1124,6 +1459,10 @@ Source CTI:
 
 - **Data Sources:** {", ".join(hyp.data_sources) or "[TBD]"}
 - **Observables:** listed under "What Suspicious Looks Like" above
+
+### Telemetry & Audit Prerequisites
+
+{_render_telemetry_prerequisites(req)}
 
 ---
 

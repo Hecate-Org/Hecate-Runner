@@ -33,7 +33,9 @@ from hecate_runner.public_review import (
     PublicReviewRequiredError,
     prepare_public_review,
     require_public_review,
+    review_digest,
 )
+from hecate_runner.sqlite_utils import connect_sqlite
 
 log = logging.getLogger(__name__)
 
@@ -210,7 +212,8 @@ def _snapshot_bundle(settings: Settings, hunt_id: str) -> tuple[dict[str, str], 
         )
         + "\n"
     )
-    return files, digest
+    # Queue/branch identity must cover the manifest and destination as approval does.
+    return files, review_digest(settings.github_publishing_repository, files)
 
 
 class PromotionOutbox:
@@ -237,9 +240,8 @@ class PromotionOutbox:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.database, timeout=30)
+        connection = connect_sqlite(self.database, timeout=30, wal=True, busy_timeout_ms=30000)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=30000")
         try:
             with connection:
                 yield connection

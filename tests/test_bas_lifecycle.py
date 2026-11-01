@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,19 @@ import pytest
 
 from hecate_runner.bas.base import SafetyViolationError
 from hecate_runner.bas.lifecycle import LabLease, reset_lab
+
+
+@pytest.fixture(autouse=True)
+def isolated_docker(monkeypatch):
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            "COMMAND\n/usr/bin/strace -f\n/usr/local/bin/sandcat\n" if "top" in cmd else "",
+            "",
+        )
+
+    monkeypatch.setattr("hecate_runner.bas.lifecycle.subprocess.run", run)
 
 
 def test_lease_acquire_and_clean_release(tmp_path: Path) -> None:
@@ -65,7 +79,7 @@ def test_watchdog_quarantines_expired_lease(tmp_path: Path) -> None:
     lease.lease_path.write_text(json.dumps(abandoned_lease), encoding="utf-8")
 
     with (
-        pytest.raises(SafetyViolationError, match="expired without clean release"),
+        pytest.raises(SafetyViolationError, match="expired or was abandoned"),
         lease.acquire("H-0002", timeout_sec=60),
     ):
         pass
@@ -115,23 +129,15 @@ def test_reset_lab_inspects_lingering_processes(tmp_path: Path) -> None:
         quarantine_path=tmp_path / "lab.quarantine",
         lock_path=tmp_path / "lab.lock",
     )
-    fake_docker_top = """UID        PID  PPID  C STIME TTY          TIME CMD
-65534     1001     1  0 02:00 ?        00:00:00 /usr/bin/strace -f -qq -ttt -o /tmp/hecate-exec.trace /usr/local/bin/sandcat
-65534     1002  1001  0 02:00 ?        00:00:00 /usr/local/bin/sandcat
-65534     1050  1002  0 02:05 ?        00:00:00 python3 -m http.server 8000
-"""
+    fake_docker_top = (
+        "COMMAND\n/usr/bin/strace -f\n/usr/local/bin/sandcat\npython3 -m http.server 8000\n"
+    )
     with patch("subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = fake_docker_top
-
-        summary = reset_lab(
-            container_name="test-agent",
-            operator_note="Routine reset",
-            workspace=tmp_path,
-            lease=lease,
-        )
-
-        assert summary["lingering_processes_found"] == ["python3 -m http.server 8000"]
+        with pytest.raises(SafetyViolationError, match="Unexpected processes"):
+            reset_lab(container_name="test-agent", workspace=tmp_path, lease=lease)
+    assert lease.is_quarantined()
 
 
 def test_audit_and_clean_container_tmpfs() -> None:
@@ -203,16 +209,18 @@ def test_reset_lab_audits_and_purges_tmpfs_files(tmp_path: Path) -> None:
         lock_path=tmp_path / "lab.lock",
     )
 
+    dirty = True
+
     def mock_docker_run(cmd, *args, **kwargs):
+        nonlocal dirty
         res = MagicMock()
         res.returncode = 0
         if "top" in cmd:
-            res.stdout = (
-                "UID PID PPID C STIME TTY TIME CMD\n65534 1 0 0 ? 00:00:00 /usr/bin/strace\n"
-            )
+            res.stdout = "COMMAND\n/usr/bin/strace -f\n/usr/local/bin/sandcat\n"
         elif "find" in cmd:
-            res.stdout = "/tmp/hecate-stale.bin\n"
+            res.stdout = "/tmp/hecate-stale.bin\n" if dirty else ""
         elif "rm" in cmd:
+            dirty = False
             res.stdout = ""
         else:
             res.stdout = ""
