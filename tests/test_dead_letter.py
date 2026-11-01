@@ -92,7 +92,7 @@ def test_restore_dead_letter_spools_when_next_occupied(tmp_path: Path) -> None:
     next_file.write_text("Existing unacknowledged item\n")
 
     item = CTIItem(content="Quarantined item", identifier="pill.txt", title="Test Title")
-    path = quarantine(tmp_path, item, "parse error", 3)
+    quarantine(tmp_path, item, "parse error", 3)
     items = list_dead_letters(tmp_path)
     assert len(items) == 1
 
