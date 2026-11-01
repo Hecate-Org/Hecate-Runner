@@ -604,7 +604,7 @@ class SlackBotService:
             # Resolve hunt ID
             hunt_id = self._thread_hunt_map.get(thread_ts)
             if not hunt_id:
-                h_match = re.search(r"\b(H-\d{4})\b", text)
+                h_match = re.search(r"(?i)\b(H-\d+)\b", text)
                 if h_match:
                     hunt_id = h_match.group(1).upper()
 
@@ -615,7 +615,7 @@ class SlackBotService:
                     messages = resp.get("messages", [])
                     if messages:
                         parent_text = messages[0].get("text", "")
-                        h_match = re.search(r"\b(H-\d{4})\b", parent_text)
+                        h_match = re.search(r"(?i)\b(H-\d+)\b", parent_text)
                         if h_match:
                             hunt_id = h_match.group(1).upper()
                             self._thread_hunt_map[thread_ts] = hunt_id

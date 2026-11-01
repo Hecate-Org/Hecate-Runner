@@ -40,31 +40,52 @@ class FileQueueProvider(CTIProvider):
         pending: list[Path] = []
 
         # 1. next.txt always has immediate backwards-compatible priority
-        if self.next_file.is_file() and self.next_file.stat().st_size > 0:
-            pending.append(self.next_file)
+        try:
+            if self.next_file.is_file() and self.next_file.stat().st_size > 0:
+                pending.append(self.next_file)
+        except OSError:
+            pass
 
         # 2. Files in spool directory
         spool_files: list[Path] = []
         if self.spool_dir.is_dir():
-            for p in self.spool_dir.iterdir():
-                if p.is_file() and not p.name.startswith("."):
-                    spool_files.append(p)
+            try:
+                for p in self.spool_dir.iterdir():
+                    try:
+                        if p.is_file() and not p.name.startswith("."):
+                            spool_files.append(p)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
 
         # 3. Direct files in queue_dir (excluding next.txt, hidden files, and reserved subdirs)
         queue_files: list[Path] = []
-        for p in self.queue_dir.iterdir():
-            if (
-                p.is_file()
-                and not p.name.startswith(".")
-                and p != self.next_file
-                and p.name not in self._RESERVED_DIRS
-            ):
-                queue_files.append(p)
+        try:
+            for p in self.queue_dir.iterdir():
+                try:
+                    if (
+                        p.is_file()
+                        and not p.name.startswith(".")
+                        and p != self.next_file
+                        and p.name not in self._RESERVED_DIRS
+                    ):
+                        queue_files.append(p)
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
-        # Sort non-next files by modification time (FIFO), breaking ties with name
+        # Sort non-next files by modification time (FIFO), safely handling concurrent unlinks
         other_files = spool_files + queue_files
-        other_files.sort(key=lambda p: (p.stat().st_mtime_ns, p.name))
 
+        def _safe_sort_key(p: Path) -> tuple[int, str]:
+            try:
+                return (p.stat().st_mtime_ns, p.name)
+            except OSError:
+                return (0, p.name)
+
+        other_files.sort(key=_safe_sort_key)
         pending.extend(other_files)
         return pending
 

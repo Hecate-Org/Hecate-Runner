@@ -16,7 +16,13 @@ def connect_sqlite(
     **kwargs: Any,
 ) -> sqlite3.Connection:
     """Connect to SQLite database with WAL journal mode and busy timeout configured."""
-    conn: sqlite3.Connection = sqlite3.connect(str(database), timeout=timeout, **kwargs)
+    db_str = str(database)
+    if db_str != ":memory:":
+        try:
+            Path(database).parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    conn: sqlite3.Connection = sqlite3.connect(db_str, timeout=timeout, **kwargs)
     if wal:
         with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA journal_mode=WAL")

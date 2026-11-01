@@ -84,3 +84,21 @@ def test_clear_dead_letters(tmp_path: Path) -> None:
     cleared = clear_dead_letters(tmp_path)
     assert cleared == 2
     assert len(list_dead_letters(tmp_path)) == 0
+
+
+def test_restore_dead_letter_spools_when_next_occupied(tmp_path: Path) -> None:
+    # Pre-occupy next.txt
+    next_file = tmp_path / "next.txt"
+    next_file.write_text("Existing unacknowledged item\n")
+
+    item = CTIItem(content="Quarantined item", identifier="pill.txt", title="Test Title")
+    path = quarantine(tmp_path, item, "parse error", 3)
+    items = list_dead_letters(tmp_path)
+    assert len(items) == 1
+
+    restored = restore_dead_letter(tmp_path, items[0].dead_letter_id)
+    assert restored is not None
+    assert restored != next_file
+    assert restored.parent.name == "spool"
+    assert "Existing unacknowledged item" in next_file.read_text()
+    assert "Quarantined item" in restored.read_text()

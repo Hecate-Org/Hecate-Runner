@@ -197,19 +197,39 @@ def get_dead_letter(queue_dir: Path, dead_letter_id: str) -> DeadLetterItem | No
 
 
 def restore_dead_letter(queue_dir: Path, dead_letter_id: str) -> Path | None:
-    """Restore a quarantined item back into next.txt for re-processing."""
+    """Restore a quarantined item back into the queue for re-processing.
+
+    If next.txt is empty or does not exist, restores directly to next.txt.
+    If next.txt already holds an unacknowledged item, safely spools to spool/ to prevent overwriting.
+    """
     item = get_dead_letter(queue_dir, dead_letter_id)
     if item is None:
         return None
 
     next_file = queue_dir / "next.txt"
+    spool_dir = queue_dir / "spool"
     queue_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(next_file, item.content.rstrip("\n") + "\n")
+
+    if next_file.is_file() and next_file.stat().st_size > 0:
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = spool_dir / f"restored-{item.dead_letter_id}.txt"
+    else:
+        dest_file = next_file
+
+    atomic_write_text(dest_file, item.content.rstrip("\n") + "\n")
     if item.path and item.path.exists():
         item.path.unlink()
-    clear_retry(queue_dir, CTIItem(content=item.content, identifier=item.identifier))
-    log.info("Restored dead-letter item %s to %s", item.dead_letter_id, next_file)
-    return next_file
+    clear_retry(
+        queue_dir,
+        CTIItem(
+            content=item.content,
+            identifier=item.identifier,
+            title=item.title,
+            source_url=item.source_url,
+        ),
+    )
+    log.info("Restored dead-letter item %s to %s", item.dead_letter_id, dest_file)
+    return dest_file
 
 
 def clear_dead_letters(queue_dir: Path) -> int:

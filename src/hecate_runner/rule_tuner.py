@@ -123,7 +123,7 @@ class RuleTuner:
             ):
                 field_name = "User"
                 modifier = "contains"
-            elif "/" in target_val or "-" in target_val:
+            elif "/" in target_val or "-" in target_val or "\\" in target_val:
                 field_name = "CommandLine"
                 modifier = "contains"
             else:
@@ -254,20 +254,21 @@ class RuleTuner:
 
     def tune_hunt_rule(self, hunt_id: str, instruction: str) -> RuleTuningResult:
         """Find the Sigma rule for a hunt, apply tuning instruction, and persist changes."""
-        query_dir = self.workspace / "queries" / hunt_id
+        norm_hunt_id = hunt_id.strip().upper()
+        query_dir = self.workspace / "queries" / norm_hunt_id
         if not query_dir.exists():
             return RuleTuningResult(
                 ok=False,
-                hunt_id=hunt_id,
+                hunt_id=norm_hunt_id,
                 action_summary="",
-                error=f"Query directory not found for {hunt_id} at {query_dir}",
+                error=f"Query directory not found for {norm_hunt_id} at {query_dir}",
             )
 
         sigma_files = sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
         if not sigma_files:
             return RuleTuningResult(
                 ok=False,
-                hunt_id=hunt_id,
+                hunt_id=norm_hunt_id,
                 action_summary="",
                 error=f"No Sigma YAML files found under {query_dir}",
             )
@@ -280,7 +281,7 @@ class RuleTuner:
         except Exception as exc:
             return RuleTuningResult(
                 ok=False,
-                hunt_id=hunt_id,
+                hunt_id=norm_hunt_id,
                 action_summary="",
                 rule_file=rule_file,
                 error=str(exc),
@@ -358,11 +359,11 @@ class RuleTuner:
 
         if subsumption_warnings:
             log.warning(
-                "Tuned rule for %s has subsumption warnings: %s", hunt_id, subsumption_warnings
+                "Tuned rule for %s has subsumption warnings: %s", norm_hunt_id, subsumption_warnings
             )
 
         # Also update the hunt markdown file if present
-        matches = sorted((self.workspace / "hunts").glob(f"**/{hunt_id}.md"))
+        matches = sorted((self.workspace / "hunts").glob(f"**/{norm_hunt_id}.md"))
         if matches:
             hunt_doc = matches[0]
             try:
@@ -381,10 +382,10 @@ class RuleTuner:
             except Exception as h_err:
                 log.debug("Note update to %s skipped (%s)", hunt_doc.name, h_err)
 
-        log.info("Successfully tuned rule for %s: %s", hunt_id, summary)
+        log.info("Successfully tuned rule for %s: %s", norm_hunt_id, summary)
         return RuleTuningResult(
             ok=True,
-            hunt_id=hunt_id,
+            hunt_id=norm_hunt_id,
             action_summary=summary,
             rule_file=rule_file,
             diff=diff_text,
