@@ -110,6 +110,26 @@ def test_primary_source_audit_uses_only_rows_with_verified_quotes():
     assert "bad.example" not in recovered
 
 
+def test_primary_source_audit_handles_multiple_evidence_headings():
+    text = """### Primary Source Evidence
+
+| Artifact | Kind | Role | Status | Evidence |
+|---|---|---|---|---|
+| `stage1.sh` | file_path | script | active | "The installer runs stage1.sh" |
+
+### Primary Source Evidence
+
+| Artifact | Kind | Role | Status | Evidence |
+|---|---|---|---|---|
+| `stage2.ko` | file_path | kernel module | active | "Kernel driver loaded via stage2.ko" |
+
+### Justification
+"""
+    recovered = extract_primary_source_evidence(text)
+    assert "stage1.sh" in recovered
+    assert "stage2.ko" in recovered
+
+
 # --- Frontmatter -----------------------------------------------------------
 
 

@@ -112,33 +112,35 @@ def extract_primary_source_evidence(text: str) -> str:
     its final cell contains a quoted excerpt emitted by the source extractor.
     """
     lines = text.splitlines()
-    try:
-        start = next(
-            i for i, line in enumerate(lines) if line.strip() == "### Primary Source Evidence"
-        )
-    except StopIteration:
-        return ""
+    in_section = False
     collected: list[str] = []
-    for line in lines[start + 1 :]:
+    for line in lines:
         stripped = line.strip()
-        if stripped.startswith("### ") or stripped.startswith("## "):
-            break
-        if not stripped.startswith("|"):
+        if stripped == "### Primary Source Evidence":
+            in_section = True
             continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if (
-            len(cells) < 5
-            or cells[0].startswith("---")
-            or cells[0].lower() in {"artifact", "indicator"}
-        ):
-            continue
-        value = cells[0].strip("`")
-        excerpt = cells[-1].strip()
-        if not cells[0].startswith("`"):
-            continue
-        if not value or not (excerpt.startswith('"') and excerpt.endswith('"')):
-            continue
-        collected.extend((value, excerpt.strip('"')))
+        if in_section:
+            if stripped.startswith("## ") or (
+                stripped.startswith("### ") and stripped != "### Primary Source Evidence"
+            ):
+                in_section = False
+                continue
+            if not stripped.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if (
+                len(cells) < 5
+                or cells[0].startswith("---")
+                or cells[0].lower() in {"artifact", "indicator"}
+            ):
+                continue
+            value = cells[0].strip("`")
+            excerpt = cells[-1].strip()
+            if not cells[0].startswith("`"):
+                continue
+            if not value or not (excerpt.startswith('"') and excerpt.endswith('"')):
+                continue
+            collected.extend((value, excerpt.strip('"')))
     return "\n".join(collected)
 
 

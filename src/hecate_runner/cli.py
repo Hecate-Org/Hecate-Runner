@@ -813,6 +813,12 @@ def deploy_queries_cmd(
         str | None,
         typer.Option("--target", help="Specific target platform (e.g. sentinel_kql, splunk_spl)."),
     ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v", help="Show full contract payload schemas and HTTP endpoints."
+        ),
+    ] = False,
 ) -> None:
     """Deploy or simulate deployment of hunt queries to target SIEM and EDR platforms."""
     settings = Settings()
@@ -856,6 +862,15 @@ def deploy_queries_cmd(
     console.print(table)
     mode_str = "simulated (dry-run)" if dry_run else "live"
     console.print(f"[bold]{deployed_count}[/bold] query(s) processed in {mode_str} mode.")
+
+    if verbose:
+        for res in deployments:
+            summary = res.get("request_summary")
+            if summary:
+                console.print(
+                    f"\n[bold cyan]── Contract Payload: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
+                )
+                console.print_json(data=summary)
 
 
 # --- BAS Commands ----------------------------------------------------------

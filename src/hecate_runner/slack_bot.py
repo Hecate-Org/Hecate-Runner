@@ -69,6 +69,7 @@ def deploy_queries_for_hunt(
                 "ok": res.get("ok", False),
                 "remote_id": res.get("remote_id"),
                 "detail": res.get("detail", ""),
+                "request_summary": res.get("request_summary", {}),
             }
         )
 
