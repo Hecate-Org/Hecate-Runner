@@ -51,6 +51,9 @@ class VerificationResult:
     sample_matched_events: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     verified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    detection_latency_sec: float | None = None
+    search_job_id: str = ""
+    siem_alert_fired: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -89,11 +92,13 @@ class DetectionVerifier:
         ingestion_slack_sec: int = 30,
         max_wait_sec: int = 60,
         poll_interval_sec: float = 2.0,
+        workspace: Any = None,
     ):
         self.query_provider = query_provider
         self.ingestion_slack_sec = ingestion_slack_sec
         self.max_wait_sec = max_wait_sec
         self.poll_interval_sec = poll_interval_sec
+        self.workspace = workspace
 
     def _calculate_time_window(
         self, start_utc: str, end_utc: str
@@ -128,6 +133,7 @@ class DetectionVerifier:
         backend: str = "mock",
         baseline_query: str | None = None,
         raw_events: list[dict[str, Any]] | None = None,
+        t0_detonate: float | None = None,
     ) -> VerificationResult:
         """Run closed-loop verification on an adversary emulation detonation."""
         hunt_id = detonation.hunt_id
@@ -242,8 +248,13 @@ class DetectionVerifier:
             except Exception as eval_exc:
                 notes.append(f"Sigma AST evaluation error: {eval_exc}")
 
+        latency_sec: float | None = None
+        search_job_id: str = ""
+        siem_alert_fired: bool = False
+
         # Path B: Live SIEM query execution via QueryProvider with polling
         if self.query_provider and candidate_query:
+            t0 = t0_detonate if t0_detonate is not None else time.perf_counter()
             poll_start = time.time()
             query_matched = False
             last_err = ""
@@ -265,10 +276,13 @@ class DetectionVerifier:
                             query_matched = True
                             rule_triggered = True
                             telemetry_arrived = True
+                            siem_alert_fired = True
+                            latency_sec = max(0.001, time.perf_counter() - t0)
                             matched_count = q_res.row_count
                             backend = active_backend
                             notes.append(
-                                f"Live {active_backend.upper()} SIEM query matched {matched_count} event(s)."
+                                f"Live {active_backend.upper()} SIEM alert verified! Matched {matched_count} event(s) "
+                                f"(Detection Latency: {latency_sec:.3f}s)."
                             )
                             break
                     else:
@@ -312,4 +326,7 @@ class DetectionVerifier:
             backend=backend,
             sample_matched_events=samples,
             notes=notes,
+            detection_latency_sec=latency_sec,
+            search_job_id=search_job_id,
+            siem_alert_fired=siem_alert_fired,
         )

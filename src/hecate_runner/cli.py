@@ -893,7 +893,7 @@ def deploy_queries_cmd(
         target_hunts = [hunt_id]
 
     table = Table(
-        title=f"SIEM & EDR Query Deployment ({'All Hunts' if hunt_id.lower() == 'all' else hunt_id})",
+        title="SIEM & EDR Query Deployment (All Hunts)" if hunt_id.lower() == "all" else f"SIEM & EDR Query Deployment for {hunt_id}",
         show_header=True,
         header_style="bold cyan",
     )

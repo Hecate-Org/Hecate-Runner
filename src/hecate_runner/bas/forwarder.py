@@ -47,6 +47,21 @@ def forward_events_to_splunk(
     if not events:
         return 0
 
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+        for env_path in (
+            Path.cwd() / ".env",
+            Path("/home/chemch/betas/Hecate-Public/.env"),
+            Path.home() / "betas" / "Hecate-Public" / ".env",
+        ):
+            if env_path.exists():
+                load_dotenv(env_path, override=False)
+    except Exception:
+        pass
+
     splunk_host = (host or os.getenv("SPLUNK_HOST") or "https://localhost:8089").rstrip("/")
     if not splunk_host.startswith(("http://", "https://")):
         splunk_host = f"https://{splunk_host}"

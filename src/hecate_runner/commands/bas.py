@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from contextlib import nullcontext
 from typing import Annotated, Any
 
@@ -189,6 +190,24 @@ def bas_detonate_cmd(
         int,
         typer.Option("--timeout", "-t", help="Timeout in seconds."),
     ] = 60,
+    verify_siem: Annotated[
+        bool,
+        typer.Option(
+            "--verify-siem/--no-verify-siem",
+            help="Verify live SIEM alert firing and measure True Positive detection latency.",
+        ),
+    ] = True,
+    siem_target: Annotated[
+        str,
+        typer.Option("--siem-target", help="Target SIEM platform for live verification (splunk, mock)."),
+    ] = "splunk",
+    siem_query: Annotated[
+        str | None,
+        typer.Option(
+            "--siem-query",
+            help="Explicit SPL query to verify in SIEM (overrides heuristic or query file lookup).",
+        ),
+    ] = None,
 ) -> None:
     """Execute on-demand adversary emulation via MITRE CALDERA, Stratus Red Team, or Mock."""
     from rich.syntax import Syntax
@@ -250,6 +269,9 @@ def bas_detonate_cmd(
         f"[bold]{provider_name.upper()}[/bold] on {target.environment} ({target.host or target.cloud_account or 'local'})..."
     )
 
+    import time
+
+    t0_detonate = time.perf_counter()
     try:
         with lease.acquire(hunt_id, timeout_sec=timeout) if lease else nullcontext():
             result = provider.detonate(req)
@@ -275,6 +297,54 @@ def bas_detonate_cmd(
         console.print(
             f"[dim]Generated {len(result.telemetry_signatures)} raw telemetry events.[/dim]"
         )
+
+    # Closed-Loop Detection Validation: Query SIEM search jobs API
+    if verify_siem and result.success:
+        from hecate_runner.bas.siem_verifier import SiemAlertVerifier
+
+        console.print(
+            f"\n[bold cyan]Closed-Loop Detection Validation: Querying {siem_target.upper()} Search Jobs API...[/bold cyan]"
+        )
+        siem_verifier = SiemAlertVerifier(settings.hecate_workspace)
+        siem_res = siem_verifier.verify_detonation_alert(
+            detonation=result,
+            hunt_id=hunt_id,
+            candidate_query=siem_query,
+            siem_target=siem_target,
+            t0_detonate=t0_detonate,
+        )
+
+        siem_table = Table(
+            title=f"Closed-Loop SIEM Alert Verification: {hunt_id}",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        siem_table.add_column("Metric / Property", style="bold")
+        siem_table.add_column("Value")
+
+        status_style = (
+            "bold green"
+            if siem_res.rule_triggered
+            else ("bold yellow" if siem_res.telemetry_arrived else "bold red")
+        )
+        siem_table.add_row(
+            "SIEM Alert Status", f"[{status_style}]{siem_res.status.upper()}[/{status_style}]"
+        )
+        siem_table.add_row("SIEM Backend", siem_res.siem_backend.upper())
+        if siem_res.search_job_id:
+            siem_table.add_row("Search Job ID", siem_res.search_job_id)
+        if siem_res.detection_latency_sec is not None:
+            latency_ms = siem_res.detection_latency_sec * 1000.0
+            siem_table.add_row(
+                "True Positive Detection Latency",
+                f"[bold bright_green]{siem_res.detection_latency_sec:.3f}s ({latency_ms:.0f} ms)[/bold bright_green]",
+            )
+        siem_table.add_row("Alert Fired / Matched Hits", f"{siem_res.matched_events_count} hit(s)")
+        siem_table.add_row("SPL Query Evaluated", siem_res.query_used)
+        if siem_res.notes:
+            siem_table.add_row("Verification Notes", "; ".join(siem_res.notes))
+
+        console.print(siem_table)
     if not result.success or not result.cleanup_success:
         raise typer.Exit(code=1)
 
@@ -420,13 +490,8 @@ def bas_verify_cmd(
         raise typer.Exit(code=1) from exc
 
     # Find candidate Sigma rule file and SIEM query
-    query_dir = settings.hecate_workspace / "queries" / hunt_id
-    sigma_files = sorted(query_dir.glob("*.yml")) + sorted(query_dir.glob("*.yaml"))
     sigma_yaml = ""
     candidate_query = None
-
-    if sigma_files:
-        sigma_yaml = sigma_files[0].read_text(encoding="utf-8")
 
     # If an approved procedure is used, formulate rule and SPL query
     if proc:
@@ -446,9 +511,18 @@ def bas_verify_cmd(
         sigma_yaml = yaml.safe_dump(rule_def)
         candidate_query = f'Image="*/{proc.argv[0]}" CommandLine="{shlex.join(proc.argv)}"'
     else:
-        spl_files = sorted(query_dir.glob("*.spl"))
-        if spl_files:
-            candidate_query = spl_files[0].read_text(encoding="utf-8").strip()
+        from hecate_runner.bas.siem_verifier import SiemAlertVerifier
+
+        candidate_query, _, resolved_yaml = SiemAlertVerifier(
+            settings.hecate_workspace
+        ).resolve_candidate_rule(hunt_id, technique_id)
+        if resolved_yaml:
+            sigma_yaml = resolved_yaml
+        else:
+            query_dir = settings.hecate_workspace / "queries" / hunt_id
+            sigma_files = sorted(query_dir.glob("*.yml")) + sorted(query_dir.glob("*.yaml"))
+            if sigma_files:
+                sigma_yaml = sigma_files[0].read_text(encoding="utf-8")
 
     siem_provider = None
     if use_siem:
@@ -487,6 +561,7 @@ def bas_verify_cmd(
             console.print(f"[yellow]Sensor preflight notice: {sensor_exc}[/yellow]")
             sensor = None
 
+    t0_detonate = time.perf_counter()
     try:
         det_result = provider.detonate(det_req)
     except Exception as exc:
@@ -507,14 +582,47 @@ def bas_verify_cmd(
     else:
         raw_events = det_result.telemetry_signatures
 
-    verifier = DetectionVerifier(query_provider=siem_provider, max_wait_sec=30)
+    verifier = DetectionVerifier(
+        query_provider=siem_provider, max_wait_sec=30, workspace=settings.hecate_workspace
+    )
     res = verifier.verify_detonation(
         detonation=det_result,
         rule_yaml=sigma_yaml,
         candidate_query=candidate_query,
         backend=siem_provider.name if siem_provider else "mock",
         raw_events=raw_events,
+        t0_detonate=t0_detonate,
     )
+
+    siem_latency_sec = res.detection_latency_sec
+    siem_job_sid = res.search_job_id
+
+    # If SIEM verification requested and live Splunk configured, run search jobs validation
+    if use_siem and (siem_provider or os.getenv("SPLUNK_HOST")):
+        from hecate_runner.bas.siem_verifier import SiemAlertVerifier
+
+        siem_verifier = SiemAlertVerifier(settings.hecate_workspace)
+        siem_res = siem_verifier.verify_detonation_alert(
+            detonation=det_result,
+            hunt_id=hunt_id,
+            candidate_query=candidate_query,
+            siem_target=siem_provider.name if siem_provider else "splunk",
+            t0_detonate=t0_detonate,
+        )
+        siem_latency_sec = siem_res.detection_latency_sec
+        siem_job_sid = siem_res.search_job_id
+        if siem_res.rule_triggered:
+            from hecate_runner.bas.verifier import VerificationStatus
+
+            res.rule_triggered = True
+            res.status = VerificationStatus.VERIFIED_TRUE_POSITIVE
+            res.matched_events_count = siem_res.matched_events_count
+            res.detection_latency_sec = siem_res.detection_latency_sec
+            res.search_job_id = siem_res.search_job_id
+            res.backend = siem_res.siem_backend
+            for n in siem_res.notes:
+                if n not in res.notes:
+                    res.notes.append(n)
 
     table = Table(
         title=f"BAS Verification Results: {hunt_id}",
@@ -532,8 +640,16 @@ def bas_verify_cmd(
         "Rule Triggered",
         f"{'Yes' if res.rule_triggered else 'No'} ({res.matched_events_count} hits)",
     )
-    if siem_provider:
-        table.add_row("SIEM Backend", siem_provider.name.upper())
+    if siem_provider or res.backend:
+        table.add_row("SIEM Backend", res.backend.upper())
+    if siem_job_sid:
+        table.add_row("Search Job ID", siem_job_sid)
+    if siem_latency_sec is not None:
+        latency_ms = siem_latency_sec * 1000.0
+        table.add_row(
+            "True Positive Detection Latency",
+            f"[bold bright_green]{siem_latency_sec:.3f}s ({latency_ms:.0f} ms)[/bold bright_green]",
+        )
     if candidate_query:
         table.add_row("Query Tested", candidate_query)
     table.add_row("Time Window", f"{res.window_start_utc} to {res.window_end_utc}")
@@ -549,6 +665,11 @@ def bas_verify_cmd(
         fm["bas_status"] = res.status.value
         fm["bas_backend"] = res.backend
         fm["bas_detection_triggered"] = res.rule_triggered
+        if siem_latency_sec is not None:
+            fm["bas_detection_latency_sec"] = round(siem_latency_sec, 3)
+        if siem_job_sid:
+            fm["bas_search_job_id"] = siem_job_sid
+        fm["bas_siem_alert_fired"] = res.rule_triggered
         new_fm = yaml.safe_dump(fm, sort_keys=False)
         updated_content = f"---\n{new_fm}---\n" + fm_parts[2].lstrip()
         atomic_write_text(hunt_file, updated_content)

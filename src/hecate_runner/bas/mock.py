@@ -103,7 +103,12 @@ class MockBASProvider(BASProvider):
             or "javascript" in ability_id
             or request.technique_id == "T1059.007"
         )
-        is_windows = request.platform == "windows" or is_psh or is_js
+        is_minidump = (
+            "comsvcs" in ability_id.lower()
+            or "minidump" in ability_id.lower()
+            or request.technique_id in ("T1003.001", "T1218.011")
+        )
+        is_windows = request.platform == "windows" or is_psh or is_js or is_minidump
 
         if is_cloud:
             category = "cloud"
@@ -123,6 +128,13 @@ class MockBASProvider(BASProvider):
             process_name = "wscript.exe"
             image = "C:\\Windows\\System32\\wscript.exe"
             cmdline = "wscript.exe C:\\Users\\victim\\Downloads\\update.js"
+        elif is_minidump:
+            category = "process_creation"
+            product = "windows"
+            event_type = "Sysmon Event ID 1"
+            process_name = "rundll32.exe"
+            image = "C:\\Windows\\System32\\rundll32.exe"
+            cmdline = "rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 624 C:\\temp\\lsass.dmp full"
         elif is_psh:
             category = "process_creation"
             product = "windows"
@@ -151,6 +163,7 @@ class MockBASProvider(BASProvider):
                 "product": product,
                 "data_source": category,
                 "technique_id": request.technique_id,
+                "hunt_id": request.hunt_id,
                 "event_type": event_type,
                 "process_name": process_name,
                 "Image": image,

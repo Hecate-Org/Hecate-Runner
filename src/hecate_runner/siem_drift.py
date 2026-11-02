@@ -627,6 +627,29 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_drift_events_type ON drift_events(event_type);
             CREATE INDEX IF NOT EXISTS idx_audit_sweeps_timestamp ON audit_sweeps(timestamp);
             CREATE INDEX IF NOT EXISTS idx_query_versions_lookup ON query_versions(hunt_id, target, file_name);
+
+            CREATE TABLE IF NOT EXISTS detection_validations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                hunt_id TEXT NOT NULL,
+                technique_id TEXT NOT NULL,
+                ability_id TEXT,
+                bas_provider TEXT NOT NULL,
+                siem_backend TEXT NOT NULL,
+                status TEXT NOT NULL,
+                rule_triggered INTEGER NOT NULL,
+                telemetry_arrived INTEGER NOT NULL,
+                detection_latency_sec REAL,
+                matched_events_count INTEGER NOT NULL,
+                query_used TEXT,
+                search_job_id TEXT,
+                detonation_time_utc TEXT NOT NULL,
+                notes TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_detection_validations_hunt ON detection_validations(hunt_id);
+            CREATE INDEX IF NOT EXISTS idx_detection_validations_technique ON detection_validations(technique_id);
+            CREATE INDEX IF NOT EXISTS idx_detection_validations_timestamp ON detection_validations(timestamp);
             """
         )
 
@@ -954,6 +977,81 @@ def get_query_versions(
         conn.close()
 
 
+def record_detection_validation(
+    workspace: Path,
+    hunt_id: str,
+    technique_id: str,
+    ability_id: str | None = None,
+    bas_provider: str = "mock",
+    siem_backend: str = "splunk",
+    status: str = "verified_true_positive",
+    rule_triggered: bool = True,
+    telemetry_arrived: bool = True,
+    detection_latency_sec: float | None = None,
+    matched_events_count: int = 1,
+    query_used: str = "",
+    search_job_id: str = "",
+    detonation_time_utc: str = "",
+    notes: str = "",
+) -> int:
+    """Record a closed-loop BAS adversary emulation and SIEM alert verification result."""
+    conn = init_drift_db(workspace)
+    now_iso = datetime.now(UTC).isoformat()
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO detection_validations (
+                    timestamp, hunt_id, technique_id, ability_id,
+                    bas_provider, siem_backend, status, rule_triggered,
+                    telemetry_arrived, detection_latency_sec, matched_events_count,
+                    query_used, search_job_id, detonation_time_utc, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_iso,
+                    hunt_id,
+                    technique_id,
+                    ability_id or "",
+                    bas_provider,
+                    siem_backend,
+                    status,
+                    1 if rule_triggered else 0,
+                    1 if telemetry_arrived else 0,
+                    detection_latency_sec,
+                    matched_events_count,
+                    query_used,
+                    search_job_id,
+                    detonation_time_utc or now_iso,
+                    notes,
+                ),
+            )
+            return cur.lastrowid or 0
+    finally:
+        conn.close()
+
+
+def get_detection_validations(
+    workspace: Path, hunt_id: str | None = None, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Retrieve chronological detection validation results from drift_history.db."""
+    conn = init_drift_db(workspace)
+    conn.row_factory = sqlite3.Row
+    query = "SELECT * FROM detection_validations"
+    params: list[Any] = []
+    if hunt_id:
+        query += " WHERE UPPER(hunt_id) = UPPER(?)"
+        params.append(hunt_id)
+    query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+    params.append(limit)
+    try:
+        with conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
     """Calculate aggregated SIEM drift metrics and operational health."""
     conn = init_drift_db(workspace)
@@ -1017,6 +1115,25 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
                 """,
                 (since_iso,),
             ).fetchall()
+
+            val_stats = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as total_validations,
+                    COUNT(CASE WHEN status = 'verified_true_positive' THEN 1 END) as verified_count,
+                    AVG(CASE WHEN status = 'verified_true_positive' THEN detection_latency_sec END) as avg_latency_sec
+                FROM detection_validations
+                WHERE timestamp >= ?
+                """,
+                (since_iso,),
+            ).fetchone()
+
+            latest_val = conn.execute(
+                """
+                SELECT * FROM detection_validations
+                ORDER BY timestamp DESC, id DESC LIMIT 1
+                """
+            ).fetchone()
     finally:
         conn.close()
 
@@ -1072,6 +1189,11 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
         "tracked_query_versions": versions_count,
         "target_drift_breakdown": target_map,
         "top_drifted_hunts": top_hunts,
+        "bas_verified_alerts_count": val_stats["verified_count"] if val_stats else 0,
+        "avg_detection_latency_sec": round(float(val_stats["avg_latency_sec"] or 0.0), 3) if (val_stats and val_stats["avg_latency_sec"] is not None) else 0.0,
+        "last_detection_latency_sec": round(float(latest_val["detection_latency_sec"] or 0.0), 3) if (latest_val and latest_val["detection_latency_sec"] is not None) else 0.0,
+        "last_verified_hunt": str(latest_val["hunt_id"]) if latest_val else "",
+        "last_verified_technique": str(latest_val["technique_id"]) if latest_val else "",
     }
 
 
