@@ -848,7 +848,7 @@ def publish_sync(
 
 @app.command("deploy-queries")
 def deploy_queries_cmd(
-    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0868) to deploy queries for.")],
+    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0868) or 'all' to deploy all hunt queries.")],
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -859,6 +859,13 @@ def deploy_queries_cmd(
         str | None,
         typer.Option("--target", help="Specific target platform (e.g. sentinel_kql, splunk_spl)."),
     ] = None,
+    github_step_summary: Annotated[
+        bool,
+        typer.Option(
+            "--github-step-summary",
+            help="Append deployment summary to GITHUB_STEP_SUMMARY.",
+        ),
+    ] = False,
     verbose: Annotated[
         bool,
         typer.Option(
@@ -868,55 +875,96 @@ def deploy_queries_cmd(
 ) -> None:
     """Deploy or simulate deployment of hunt queries to target SIEM and EDR platforms."""
     settings = Settings()
-    query_dir = settings.hecate_workspace / "queries" / hunt_id
-    if not query_dir.exists():
-        console.print(f"[red]Query directory not found:[/red] {query_dir}")
+    queries_root = settings.hecate_workspace / "queries"
+    if not queries_root.exists():
+        console.print(f"[red]Queries root directory not found:[/red] {queries_root}")
         raise typer.Exit(code=1)
 
     from hecate_runner.slack_bot import deploy_queries_for_hunt
 
+    target_hunts: list[str] = []
+    if hunt_id.lower() == "all":
+        target_hunts = sorted([d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")])
+    else:
+        target_dir = queries_root / hunt_id
+        if not target_dir.exists():
+            console.print(f"[red]Query directory not found:[/red] {target_dir}")
+            raise typer.Exit(code=1)
+        target_hunts = [hunt_id]
+
     table = Table(
-        title=f"SIEM & EDR Query Deployment for {hunt_id}",
+        title=f"SIEM & EDR Query Deployment ({'All Hunts' if hunt_id.lower() == 'all' else hunt_id})",
         show_header=True,
         header_style="bold cyan",
     )
+    table.add_column("Hunt ID")
     table.add_column("File")
     table.add_column("Target")
     table.add_column("Status")
     table.add_column("Remote ID")
     table.add_column("Detail")
 
-    deployments = deploy_queries_for_hunt(
-        settings.hecate_workspace,
-        hunt_id,
-        dry_run=dry_run,
-        target=target,
-    )
-    deployed_count = 0
-    for res in deployments:
-        status_color = "green" if res.get("ok") else "red"
-        table.add_row(
-            str(res.get("file", "")),
-            str(res.get("target", "")),
-            f"[{status_color}]{res.get('status')}[/{status_color}]",
-            str(res.get("remote_id") or ""),
-            str(res.get("detail", "")),
+    total_deployed = 0
+    total_processed = 0
+    all_deployments: list[tuple[str, dict[str, Any]]] = []
+
+    for h_id in target_hunts:
+        deployments = deploy_queries_for_hunt(
+            settings.hecate_workspace,
+            h_id,
+            dry_run=dry_run,
+            target=target,
         )
-        if res.get("ok"):
-            deployed_count += 1
+        for res in deployments:
+            total_processed += 1
+            all_deployments.append((h_id, res))
+            status_color = "green" if res.get("ok") else "red"
+            table.add_row(
+                h_id,
+                str(res.get("file", "")),
+                str(res.get("target", "")),
+                f"[{status_color}]{res.get('status')}[/{status_color}]",
+                str(res.get("remote_id") or ""),
+                str(res.get("detail", "")),
+            )
+            if res.get("ok"):
+                total_deployed += 1
 
     console.print(table)
     mode_str = "simulated (dry-run)" if dry_run else "live"
-    console.print(f"[bold]{deployed_count}[/bold] query(s) processed in {mode_str} mode.")
+    console.print(
+        f"[bold]{total_deployed}/{total_processed}[/bold] query(s) processed across {len(target_hunts)} hunt(s) in {mode_str} mode."
+    )
 
     if verbose:
-        for res in deployments:
+        for h_id, res in all_deployments:
             summary = res.get("request_summary")
             if summary:
                 console.print(
-                    f"\n[bold cyan]── Contract Payload: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
+                    f"\n[bold cyan]── Contract Payload: {h_id} / {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
                 )
                 console.print_json(data=summary)
+
+    if github_step_summary and "GITHUB_STEP_SUMMARY" in os.environ:
+        summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+        md_lines = [
+            f"## 🚀 SIEM Detection-as-Code Deployment ({mode_str})",
+            "",
+            f"> **Processed:** `{total_deployed}/{total_processed}` queries across `{len(target_hunts)}` hunt(s).",
+            "",
+            "| Hunt ID | File | Target | Status | Remote ID |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for h_id, res in all_deployments[:30]:
+            st = "✅ " + str(res.get("status")) if res.get("ok") else "❌ " + str(res.get("status"))
+            md_lines.append(
+                f"| `{h_id}` | `{res.get('file')}` | `{res.get('target')}` | {st} | `{(res.get('remote_id') or '')[:25]}` |"
+            )
+        if len(all_deployments) > 30:
+            md_lines.append(f"| ... | *({len(all_deployments) - 30} additional queries deployed)* | | | |")
+        md_lines.append("")
+        with summary_path.open("a", encoding="utf-8") as f:
+            f.write("\n".join(md_lines) + "\n")
 
 
 @app.command("undeploy-queries")
@@ -1115,6 +1163,28 @@ def audit_siem_cmd(
             help="Simulate audit (default) or query/mutate live SIEM APIs.",
         ),
     ] = True,
+    format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: table, markdown, or json."),
+    ] = "table",
+    output_markdown: Annotated[
+        Path | None,
+        typer.Option("--output-markdown", "-o", help="Write GitHub Flavored Markdown report to a file."),
+    ] = None,
+    github_step_summary: Annotated[
+        bool,
+        typer.Option(
+            "--github-step-summary",
+            help="Append GitHub Flavored Markdown report to GITHUB_STEP_SUMMARY environment variable.",
+        ),
+    ] = False,
+    fail_on_drift: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-drift",
+            help="Exit with non-zero exit code 1 if query drift or missing queries are detected (useful for PR gating).",
+        ),
+    ] = False,
     alert_slack: Annotated[
         bool,
         typer.Option(
@@ -1129,47 +1199,19 @@ def audit_siem_cmd(
 ) -> None:
     """Audit all workspace hunting queries across SIEM & EDR platforms for detection drift."""
     settings = Settings()
-    from hecate_runner.siem_drift import audit_workspace_queries, reconcile_all_drifted_queries
+    from hecate_runner.siem_drift import (
+        audit_workspace_queries,
+        build_siem_markdown_report,
+        reconcile_all_drifted_queries,
+    )
 
     mode_str = "simulated (dry-run)" if dry_run else "live"
-    console.print(
-        f"[bold cyan]Auditing detection-as-code queries across {settings.hecate_workspace.name}...[/bold cyan]"
-    )
+    if format != "markdown" and format != "json":
+        console.print(
+            f"[bold cyan]Auditing detection-as-code queries across {settings.hecate_workspace.name}...[/bold cyan]"
+        )
 
     report = audit_workspace_queries(settings.hecate_workspace, target=target, dry_run=dry_run)
-
-    table = Table(
-        title=f"SIEM & EDR Detection-as-Code Audit ({mode_str})",
-        show_header=True,
-        header_style="bold magenta",
-    )
-    table.add_column("Hunt ID")
-    table.add_column("File")
-    table.add_column("Target")
-    table.add_column("Status")
-    table.add_column("Remote ID")
-
-    for hunt_id, results in report.get("hunts", {}).items():
-        for res in results:
-            status = res.get("status", "")
-            if status in {"in_sync", "dry_run"}:
-                status_color = "green" if status == "in_sync" else "blue"
-            elif status == "drift_detected":
-                status_color = "yellow"
-            elif status == "missing_remote":
-                status_color = "magenta"
-            else:
-                status_color = "red"
-
-            table.add_row(
-                hunt_id,
-                str(res.get("file", "")),
-                str(res.get("target", "")),
-                f"[{status_color}]{status}[/{status_color}]",
-                str(res.get("remote_id") or ""),
-            )
-
-    console.print(table)
 
     in_sync = report.get("in_sync_count", 0)
     drifted = report.get("drifted_count", 0)
@@ -1177,22 +1219,71 @@ def audit_siem_cmd(
     total_q = report.get("total_queries", 0)
     total_h = report.get("total_hunts", 0)
 
-    console.print(
-        f"\n[bold]Audit Summary:[/bold] {total_h} hunt(s), {total_q} queries evaluated "
-        f"([green]{in_sync} in sync[/green], "
-        f"[yellow]{drifted} drifted[/yellow], "
-        f"[magenta]{missing} missing[/magenta])."
-    )
+    md_report = build_siem_markdown_report(report)
 
-    if verbose or drifted > 0:
-        for hunt_id, drifted_list in report.get("drifted_by_hunt", {}).items():
-            for res in drifted_list:
-                diff = res.get("drift_diff")
-                if diff:
-                    console.print(
-                        f"\n[bold yellow]── Query Drift Detected: {hunt_id} / {res.get('target')} ({res.get('file')}) ──[/bold yellow]"
-                    )
-                    console.print(diff)
+    if format == "markdown":
+        console.print(md_report)
+    elif format == "json":
+        console.print_json(data=report)
+    else:
+        table = Table(
+            title=f"SIEM & EDR Detection-as-Code Audit ({mode_str})",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        table.add_column("Hunt ID")
+        table.add_column("File")
+        table.add_column("Target")
+        table.add_column("Status")
+        table.add_column("Remote ID")
+
+        for hunt_id, results in report.get("hunts", {}).items():
+            for res in results:
+                status = res.get("status", "")
+                if status in {"in_sync", "dry_run"}:
+                    status_color = "green" if status == "in_sync" else "blue"
+                elif status == "drift_detected":
+                    status_color = "yellow"
+                elif status == "missing_remote":
+                    status_color = "magenta"
+                else:
+                    status_color = "red"
+
+                table.add_row(
+                    hunt_id,
+                    str(res.get("file", "")),
+                    str(res.get("target", "")),
+                    f"[{status_color}]{status}[/{status_color}]",
+                    str(res.get("remote_id") or ""),
+                )
+
+        console.print(table)
+        console.print(
+            f"\n[bold]Audit Summary:[/bold] {total_h} hunt(s), {total_q} queries evaluated "
+            f"([green]{in_sync} in sync[/green], "
+            f"[yellow]{drifted} drifted[/yellow], "
+            f"[magenta]{missing} missing[/magenta])."
+        )
+
+        if verbose or drifted > 0:
+            for hunt_id, drifted_list in report.get("drifted_by_hunt", {}).items():
+                for res in drifted_list:
+                    diff = res.get("drift_diff")
+                    if diff:
+                        console.print(
+                            f"\n[bold yellow]── Query Drift Detected: {hunt_id} / {res.get('target')} ({res.get('file')}) ──[/bold yellow]"
+                        )
+                        console.print(diff)
+
+    if output_markdown:
+        output_markdown.write_text(md_report, encoding="utf-8")
+        if format != "markdown" and format != "json":
+            console.print(f"[green]Markdown report written to:[/green] {output_markdown}")
+
+    if github_step_summary and "GITHUB_STEP_SUMMARY" in os.environ:
+        summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+        with summary_path.open("a", encoding="utf-8") as f:
+            f.write(md_report + "\n")
 
     if alert_slack and (drifted > 0 or missing > 0):
         from hecate_runner.notifications import notify_siem_drift
@@ -1202,19 +1293,29 @@ def audit_siem_cmd(
         for hunt_id, missing_list in report.get("missing_by_hunt", {}).items():
             if hunt_id not in report.get("drifted_by_hunt", {}):
                 notify_siem_drift(settings, hunt_id, missing_list)
-        console.print("[green]Slack drift alert notification cards dispatched.[/green]")
+        if format != "markdown" and format != "json":
+            console.print("[green]Slack drift alert notification cards dispatched.[/green]")
 
     if reconcile and (drifted > 0 or missing > 0):
-        console.print(
-            f"\n[bold yellow]Triggering automated reconciliation ({mode_str})...[/bold yellow]"
-        )
+        if format != "markdown" and format != "json":
+            console.print(
+                f"\n[bold yellow]Triggering automated reconciliation ({mode_str})...[/bold yellow]"
+            )
         rec_summary = reconcile_all_drifted_queries(
             settings.hecate_workspace, target=target, dry_run=dry_run
         )
-        console.print(
-            f"[bold green]Reconciliation complete:[/bold green] {rec_summary.get('total_reconciled', 0)} reconciled, "
-            f"{rec_summary.get('total_failed', 0)} failed."
-        )
+        if format != "markdown" and format != "json":
+            console.print(
+                f"[bold green]Reconciliation complete:[/bold green] {rec_summary.get('total_reconciled', 0)} reconciled, "
+                f"{rec_summary.get('total_failed', 0)} failed."
+            )
+
+    if fail_on_drift and (drifted > 0 or missing > 0):
+        if format != "markdown" and format != "json":
+            console.print(
+                "[bold red]CI Gate Failed: Detection query drift or missing remote queries detected.[/bold red]"
+            )
+        raise typer.Exit(code=1)
 
 
 @app.command("reconcile-queries")

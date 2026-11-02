@@ -768,3 +768,131 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
         "target_drift_breakdown": target_map,
         "top_drifted_hunts": top_hunts,
     }
+
+
+def build_siem_markdown_report(
+    report: dict[str, Any],
+    title: str = "SIEM Detection-as-Code GitOps Report",
+    trigger: str = "ci",
+) -> str:
+    """Generate a clean, GitHub Flavored Markdown report from an audit report.
+
+    Suitable for PR comments, GITHUB_STEP_SUMMARY, and issue bodies.
+    """
+    total_h = report.get("total_hunts", 0)
+    total_q = report.get("total_queries", 0)
+    in_sync = report.get("in_sync_count", 0)
+    drifted = report.get("drifted_count", 0)
+    missing = report.get("missing_count", 0)
+    errors = report.get("error_count", 0)
+    dry_run = report.get("dry_run", True)
+    audited_at = str(report.get("audited_at") or datetime.now(UTC).isoformat())
+
+    sync_pct = round((in_sync / total_q) * 100.0, 1) if total_q > 0 else 100.0
+    mode_str = "Simulated (Dry-Run)" if dry_run else "Live SIEM API"
+
+    if drifted > 0:
+        badge = f"⚠️ **DRIFT DETECTED** ({drifted} query{'s' if drifted != 1 else ''})"
+    elif missing > 0:
+        badge = f"⚠️ **MISSING ON REMOTE** ({missing} query{'s' if missing != 1 else ''})"
+    elif errors > 0:
+        badge = f"❌ **AUDIT ERRORS** ({errors} error{'s' if errors != 1 else ''})"
+    elif total_q > 0:
+        badge = "✅ **IN SYNC (100%)**"
+    else:
+        badge = "⚪ **STANDBY (0 queries)**"
+
+    lines = [
+        f"## 🛡️ {title}",
+        "",
+        f"> **Status:** {badge} | **Mode:** `{mode_str}` | **Audited At:** `{audited_at[:19].replace('T', ' ')} UTC`",
+        "",
+        "### 📊 Detection Sync Overview",
+        "",
+        "| Metric | Count | Ratio / Health |",
+        "| :--- | :---: | :--- |",
+        f"| **Total Hunts** | `{total_h}` | Monitored threat hunts |",
+        f"| **Total Queries** | `{total_q}` | Transpiled query files |",
+        f"| **In Sync** | `{in_sync}` | `{sync_pct}%` matching git HEAD |",
+        f"| **Drifted** | `{drifted}` | {'⚠️ Needs reconciliation' if drifted > 0 else '🟢 Zero drift'} |",
+        f"| **Missing on Remote** | `{missing}` | {'⚠️ Unindexed on target SIEM' if missing > 0 else '🟢 All deployed'} |",
+        f"| **Errors** | `{errors}` | {'❌ API or transpilation error' if errors > 0 else '🟢 None'} |",
+        "",
+    ]
+
+    target_counts: dict[str, dict[str, int]] = {}
+    for hunt_id, results in report.get("hunts", {}).items():
+        for res in results:
+            tgt = str(res.get("target") or "unknown")
+            st = str(res.get("status") or "unknown")
+            if tgt not in target_counts:
+                target_counts[tgt] = {"total": 0, "in_sync": 0, "drifted": 0, "missing": 0, "error": 0}
+            target_counts[tgt]["total"] += 1
+            if st == "in_sync":
+                target_counts[tgt]["in_sync"] += 1
+            elif st == "drift_detected":
+                target_counts[tgt]["drifted"] += 1
+            elif st == "missing_remote":
+                target_counts[tgt]["missing"] += 1
+            elif st == "error":
+                target_counts[tgt]["error"] += 1
+
+    if target_counts:
+        lines.extend([
+            "### 🎯 Target Platform Breakdown",
+            "",
+            "| Target Backend | Total Queries | In Sync | Drifted | Missing | Health |",
+            "| :--- | :---: | :---: | :---: | :---: | :--- |",
+        ])
+        for tgt, counts in sorted(target_counts.items()):
+            h_pct = round((counts["in_sync"] / counts["total"]) * 100, 1) if counts["total"] > 0 else 100.0
+            if counts["drifted"] > 0:
+                h_badge = "🔴 Drifted"
+            elif counts["missing"] > 0:
+                h_badge = "🟡 Missing"
+            else:
+                h_badge = "🟢 100% In Sync"
+            lines.append(
+                f"| `{tgt}` | `{counts['total']}` | `{counts['in_sync']}` | `{counts['drifted']}` | `{counts['missing']}` | {h_badge} (`{h_pct}%`) |"
+            )
+        lines.append("")
+
+    drifted_by_hunt = report.get("drifted_by_hunt", {})
+    if drifted_by_hunt:
+        lines.extend([
+            "### 🔍 Drift Inspection & AST Diff",
+            "",
+            "> ⚠️ *The following queries on remote SIEM consoles have drifted from local git repository source code:*",
+            "",
+        ])
+        for hunt_id, res_list in sorted(drifted_by_hunt.items()):
+            for res in res_list:
+                file_name = res.get("file", "")
+                tgt = res.get("target", "")
+                remote_id = res.get("remote_id", "")
+                diff = res.get("drift_diff", "")
+                lines.extend([
+                    "<details>",
+                    f"<summary><b>⚠️ {hunt_id} / {tgt}: <code>{file_name}</code></b> (Remote ID: <code>{remote_id}</code>)</summary>",
+                    "",
+                    "```diff",
+                    diff or "- Local and remote queries differ in AST syntax or query options",
+                    "```",
+                    "",
+                    "</details>",
+                    "",
+                ])
+    else:
+        lines.extend([
+            "### 🔍 Drift Inspection",
+            "",
+            "> ✅ **All deployed SIEM queries match git-authoritative AST and search definitions.** No active drift detected across targets.",
+            "",
+        ])
+
+    lines.extend([
+        "---",
+        f"*Report generated by Hecate GitOps Detection Pipeline (trigger: `{trigger}`).*",
+    ])
+
+    return "\n".join(lines)

@@ -327,3 +327,132 @@ def test_slack_slash_commands_siem_status_and_history(mock_workspace: Path):
     assert ack_mock.called
     assert respond_mock.called
     assert "attachments" in respond_mock.call_args[1]
+
+
+def test_build_siem_markdown_report_in_sync() -> None:
+    from hecate_runner.siem_drift import build_siem_markdown_report
+
+    report = {
+        "total_hunts": 2,
+        "total_queries": 4,
+        "in_sync_count": 4,
+        "drifted_count": 0,
+        "missing_count": 0,
+        "error_count": 0,
+        "dry_run": True,
+        "audited_at": "2026-11-02T04:00:00Z",
+        "hunts": {
+            "H-0001": [
+                {"target": "splunk_spl", "status": "in_sync"},
+                {"target": "sentinel_kql", "status": "in_sync"},
+            ],
+            "H-0002": [
+                {"target": "splunk_spl", "status": "in_sync"},
+                {"target": "sentinel_kql", "status": "in_sync"},
+            ],
+        },
+        "drifted_by_hunt": {},
+    }
+
+    md = build_siem_markdown_report(report)
+    assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in md
+    assert "IN SYNC (100%)" in md
+    assert "| **Total Hunts** | `2` |" in md
+    assert "| `splunk_spl` | `2` | `2` | `0` | `0` | 🟢 100% In Sync (`100.0%`) |" in md
+    assert "No active drift detected across targets." in md
+
+
+def test_build_siem_markdown_report_with_drift() -> None:
+    from hecate_runner.siem_drift import build_siem_markdown_report
+
+    report = {
+        "total_hunts": 1,
+        "total_queries": 2,
+        "in_sync_count": 1,
+        "drifted_count": 1,
+        "missing_count": 0,
+        "error_count": 0,
+        "dry_run": False,
+        "audited_at": "2026-11-02T04:00:00Z",
+        "hunts": {
+            "H-0007": [
+                {"target": "splunk_spl", "status": "in_sync"},
+                {
+                    "target": "splunk_spl",
+                    "status": "drift_detected",
+                    "file": "test.spl",
+                    "remote_id": "Hecate_Test",
+                    "drift_diff": "- Local: foo\n+ Remote: bar",
+                },
+            ]
+        },
+        "drifted_by_hunt": {
+            "H-0007": [
+                {
+                    "target": "splunk_spl",
+                    "status": "drift_detected",
+                    "file": "test.spl",
+                    "remote_id": "Hecate_Test",
+                    "drift_diff": "- Local: foo\n+ Remote: bar",
+                }
+            ]
+        },
+    }
+
+    md = build_siem_markdown_report(report)
+    assert "⚠️ **DRIFT DETECTED** (1 query)" in md
+    assert "<summary><b>⚠️ H-0007 / splunk_spl: <code>test.spl</code></b>" in md
+    assert "- Local: foo" in md
+    assert "+ Remote: bar" in md
+
+
+def test_cli_audit_siem_markdown_and_fail_on_drift(mock_workspace: Path) -> None:
+    from typer.testing import CliRunner
+    from hecate_runner.cli import app
+    from unittest import mock
+
+    runner = CliRunner()
+    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace)}):
+        # Clean in-sync run: should succeed
+        res = runner.invoke(app, ["audit-siem", "--format", "markdown", "--dry-run", "--fail-on-drift"])
+        assert res.exit_code == 0
+        assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in res.output
+
+        # Output to markdown file and step summary
+        summary_file = mock_workspace / "step_summary.md"
+        out_file = mock_workspace / "pr_report.md"
+
+        with mock.patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary_file)}):
+            res_out = runner.invoke(
+                app,
+                [
+                    "audit-siem",
+                    "--format",
+                    "table",
+                    "--output-markdown",
+                    str(out_file),
+                    "--github-step-summary",
+                    "--dry-run",
+                ],
+            )
+            assert res_out.exit_code == 0
+            assert out_file.exists()
+            assert summary_file.exists()
+            assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in out_file.read_text(encoding="utf-8")
+
+
+def test_cli_deploy_queries_all(mock_workspace: Path) -> None:
+    from typer.testing import CliRunner
+    from hecate_runner.cli import app
+    from unittest import mock
+
+    runner = CliRunner()
+    summary_file = mock_workspace / "deploy_summary.md"
+
+    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace), "GITHUB_STEP_SUMMARY": str(summary_file)}):
+        res = runner.invoke(app, ["deploy-queries", "all", "--dry-run", "--github-step-summary"])
+        assert res.exit_code == 0
+        assert "SIEM & EDR Query Deployment (All Hunts)" in res.output
+        assert summary_file.exists()
+        assert "## 🚀 SIEM Detection-as-Code Deployment" in summary_file.read_text(encoding="utf-8")
+
