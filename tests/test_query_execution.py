@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from hecate_runner.query_execution import (
+    CrowdStrikeQueryProvider,
+    ElasticQueryProvider,
     MockQueryProvider,
     ProposedQuery,
+    SentinelQueryProvider,
     SplunkQueryProvider,
     get_provider,
     validate_guardrails,
@@ -88,11 +91,47 @@ class TestMockQueryProvider:
         assert result.row_count == 0
         assert "Mock provider" in result.detail
 
+    def test_configurable_responses_sequence(self) -> None:
+        provider = MockQueryProvider(responses=[0, 5, 2])
+        r1 = provider.execute(_query())
+        r2 = provider.execute(_query())
+        r3 = provider.execute(_query())
+        r4 = provider.execute(_query())  # Stays at last response
+        assert r1.row_count == 0
+        assert r2.row_count == 5
+        assert r3.row_count == 2
+        assert r4.row_count == 2
+        assert len(provider.executed_queries) == 4
+
+    def test_reads_env_mock_query_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HECATE_MOCK_QUERY_ROWS", "42")
+        provider = MockQueryProvider()
+        result = provider.execute(_query())
+        assert result.row_count == 42
+
 
 class TestGetProvider:
     def test_mock_provider_needs_no_args(self) -> None:
         provider = get_provider("mock")
         assert isinstance(provider, MockQueryProvider)
+
+    def test_sentinel_provider_constructs(self) -> None:
+        provider = get_provider("sentinel")
+        assert isinstance(provider, SentinelQueryProvider)
+        provider_kql = get_provider("sentinel_kql")
+        assert isinstance(provider_kql, SentinelQueryProvider)
+
+    def test_elastic_provider_constructs(self) -> None:
+        provider = get_provider("elastic")
+        assert isinstance(provider, ElasticQueryProvider)
+        provider_eql = get_provider("elastic_eql")
+        assert isinstance(provider_eql, ElasticQueryProvider)
+
+    def test_crowdstrike_provider_constructs(self) -> None:
+        provider = get_provider("crowdstrike")
+        assert isinstance(provider, CrowdStrikeQueryProvider)
+        provider_cql = get_provider("crowdstrike_cql")
+        assert isinstance(provider_cql, CrowdStrikeQueryProvider)
 
     def test_splunk_provider_requires_hecate_bin_and_workspace(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="requires hecate_bin"):
@@ -105,6 +144,88 @@ class TestGetProvider:
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown query provider"):
             get_provider("bigquery")
+
+
+class TestSentinelQueryProvider:
+    def test_dry_run_without_credentials(self) -> None:
+        provider = SentinelQueryProvider()
+        res = provider.execute(_query())
+        assert res.ok is True
+        assert res.provider == "sentinel"
+        assert res.row_count == 0
+        assert "Validated Sentinel KQL query" in res.detail
+
+    def test_mocked_live_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import unittest.mock as mock
+
+        monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "test-ws")
+        monkeypatch.setenv("SENTINEL_BEARER_TOKEN", "test-token")
+
+        fake_resp = mock.MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {
+            "tables": [{"rows": [["event1", "cmd.exe"], ["event2", "powershell.exe"]]}]
+        }
+
+        with mock.patch("httpx.Client.post", return_value=fake_resp) as mock_post:
+            provider = SentinelQueryProvider()
+            res = provider.execute(_query(query_text="DeviceProcessEvents | take 10"))
+            assert res.ok is True
+            assert res.row_count == 2
+            assert mock_post.called
+
+
+class TestElasticQueryProvider:
+    def test_dry_run_without_credentials(self) -> None:
+        provider = ElasticQueryProvider()
+        res = provider.execute(_query())
+        assert res.ok is True
+        assert res.provider == "elastic"
+        assert res.row_count == 0
+        assert "Validated Elastic query" in res.detail
+
+    def test_mocked_live_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import unittest.mock as mock
+
+        monkeypatch.setenv("ELASTIC_URL", "https://es.local:9200")
+        monkeypatch.setenv("ELASTIC_API_KEY", "es-key-123")
+
+        fake_resp = mock.MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"hits": {"events": [{"_source": {"process": "cmd.exe"}}]}}
+
+        with mock.patch("httpx.Client.post", return_value=fake_resp) as mock_post:
+            provider = ElasticQueryProvider()
+            res = provider.execute(_query(query_text='any where process.name == "cmd.exe"'))
+            assert res.ok is True
+            assert res.row_count == 1
+            assert mock_post.called
+
+
+class TestCrowdStrikeQueryProvider:
+    def test_dry_run_without_credentials(self) -> None:
+        provider = CrowdStrikeQueryProvider()
+        res = provider.execute(_query())
+        assert res.ok is True
+        assert res.provider == "crowdstrike"
+        assert res.row_count == 0
+        assert "Validated Falcon LogScale query" in res.detail
+
+    def test_mocked_live_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import unittest.mock as mock
+
+        monkeypatch.setenv("FALCON_API_TOKEN", "cs-token-xyz")
+
+        fake_resp = mock.MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = [{"event": 1}, {"event": 2}, {"event": 3}]
+
+        with mock.patch("httpx.Client.post", return_value=fake_resp) as mock_post:
+            provider = CrowdStrikeQueryProvider()
+            res = provider.execute(_query(query_text="CommandLine=/whoami/i"))
+            assert res.ok is True
+            assert res.row_count == 3
+            assert mock_post.called
 
 
 class TestSplunkQueryProvider:

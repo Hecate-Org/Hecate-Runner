@@ -131,7 +131,11 @@ class MockQueryProvider(QueryProvider):
             count = self.responses[idx]
         else:
             env_val = os.getenv("HECATE_MOCK_QUERY_ROWS")
-            count = int(env_val) if env_val is not None and env_val.isdigit() else self.default_row_count
+            count = (
+                int(env_val)
+                if env_val is not None and env_val.isdigit()
+                else self.default_row_count
+            )
         self.call_count += 1
         return QueryResult(
             outcome="executed",
@@ -157,7 +161,9 @@ class SentinelQueryProvider(QueryProvider):
         workspace_id = os.getenv("SENTINEL_WORKSPACE_ID")
         token = os.getenv("SENTINEL_BEARER_TOKEN") or os.getenv("AZURE_ACCESS_TOKEN")
 
-        endpoint = f"https://api.loganalytics.io/v1/workspaces/{workspace_id or 'WORKSPACE_ID'}/query"
+        endpoint = (
+            f"https://api.loganalytics.io/v1/workspaces/{workspace_id or 'WORKSPACE_ID'}/query"
+        )
         body = {
             "query": query.query_text.strip(),
             "timespan": f"P{query.time_range_days}D",
@@ -165,7 +171,11 @@ class SentinelQueryProvider(QueryProvider):
 
         # Safe mock / dry-run mode when unconfigured or testing
         if not (workspace_id and token):
-            log.info("[sentinel:mock] Simulated query on workspace %s: %s", workspace_id or "WS_MOCK", query.query_text)
+            log.info(
+                "[sentinel:mock] Simulated query on workspace %s: %s",
+                workspace_id or "WS_MOCK",
+                query.query_text,
+            )
             return QueryResult(
                 outcome="executed",
                 provider=self.name,
@@ -180,7 +190,10 @@ class SentinelQueryProvider(QueryProvider):
                 resp = client.post(
                     endpoint,
                     json=body,
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -234,7 +247,10 @@ class ElasticQueryProvider(QueryProvider):
                 resp = client.post(
                     endpoint,
                     json=body,
-                    headers={"Authorization": f"ApiKey {api_key}", "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"ApiKey {api_key}",
+                        "Content-Type": "application/json",
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -289,7 +305,10 @@ class CrowdStrikeQueryProvider(QueryProvider):
                 resp = client.post(
                     endpoint,
                     json=body,
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json()
