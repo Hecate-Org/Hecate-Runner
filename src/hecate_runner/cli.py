@@ -304,7 +304,9 @@ def daemon(
                     )
 
                     log.info("Daemon executing scheduled SIEM drift audit sweep...")
-                    drift_report = audit_workspace_queries(settings.hecate_workspace, dry_run=False)
+                    drift_report = audit_workspace_queries(
+                        settings.hecate_workspace, dry_run=False, trigger="daemon"
+                    )
                     drift_cnt = drift_report.get("drifted_count", 0)
                     missing_cnt = drift_report.get("missing_count", 0)
 
@@ -323,7 +325,7 @@ def daemon(
                         if getattr(settings, "siem_drift_auto_reconcile", False):
                             log.info("Auto-reconcile enabled: reconciling drifted SIEM queries...")
                             rec_res = reconcile_all_drifted_queries(
-                                settings.hecate_workspace, dry_run=False
+                                settings.hecate_workspace, dry_run=False, actor="daemon"
                             )
                             log.info(
                                 "Auto-reconciled %d query(s) (%d failed)",
@@ -1302,6 +1304,221 @@ def reconcile_queries_cmd(
                     f"\n[bold cyan]── Reconciliation Request: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
                 )
                 console.print_json(data=summary)
+
+
+@app.command("drift-history")
+def drift_history_cmd(
+    hunt_id: Annotated[
+        str | None,
+        typer.Option("--hunt-id", "-h", help="Filter by hunt ID (e.g. H-0007)."),
+    ] = None,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Filter by target platform (e.g. splunk_spl)."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Maximum entries to display."),
+    ] = 25,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show full query drift diffs."),
+    ] = False,
+) -> None:
+    """View chronological SIEM Detection-as-Code drift and reconciliation audit history."""
+    settings = Settings()
+    from hecate_runner.siem_drift import get_drift_history
+
+    events = get_drift_history(
+        settings.hecate_workspace, hunt_id=hunt_id, target=target, limit=limit
+    )
+    if not events:
+        console.print("[dim]No drift or reconciliation events found in audit history.[/dim]")
+        return
+
+    table = Table(
+        title="SIEM Detection-as-Code Drift & Reconciliation History",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Timestamp")
+    table.add_column("Hunt ID")
+    table.add_column("Target")
+    table.add_column("Event")
+    table.add_column("File")
+    table.add_column("Actor")
+    table.add_column("Detail")
+
+    for ev in events:
+        ev_type = ev.get("event_type", "")
+        if ev_type == "reconciled":
+            color = "green"
+        elif ev_type == "drift_detected":
+            color = "yellow"
+        elif ev_type == "missing_remote":
+            color = "magenta"
+        elif ev_type == "deploy_failed":
+            color = "red"
+        else:
+            color = "blue"
+
+        ts = str(ev.get("timestamp", ""))[:19].replace("T", " ")
+        table.add_row(
+            ts,
+            str(ev.get("hunt_id", "")),
+            str(ev.get("target", "")),
+            f"[{color}]{ev_type}[/{color}]",
+            str(ev.get("file_name", "")),
+            str(ev.get("actor", "system")),
+            str(ev.get("detail", "") or "")[:60],
+        )
+
+    console.print(table)
+
+    if verbose:
+        for ev in events:
+            diff = ev.get("drift_diff")
+            if diff:
+                console.print(
+                    f"\n[bold yellow]── Query Diff: {ev.get('hunt_id')} / {ev.get('target')} ({ev.get('file_name')}) at {ev.get('timestamp')} ──[/bold yellow]"
+                )
+                console.print(diff)
+
+
+@app.command("siem-status")
+def siem_status_cmd(
+    days: Annotated[
+        int,
+        typer.Option("--days", "-d", help="Lookback window in days for metrics."),
+    ] = 7,
+) -> None:
+    """Display comprehensive SIEM Detection-as-Code health, sync metrics, and audit summary."""
+    settings = Settings()
+    from rich.panel import Panel
+    from hecate_runner.siem_drift import get_drift_history, get_siem_drift_metrics
+
+    metrics = get_siem_drift_metrics(settings.hecate_workspace, days=days)
+    history = get_drift_history(settings.hecate_workspace, limit=5)
+
+    health_pct = metrics.get("sync_health_pct", 100.0)
+    in_sync = metrics.get("in_sync_count", 0)
+    total_q = metrics.get("total_queries", 0)
+    drifted = metrics.get("drifted_count", 0)
+    missing = metrics.get("missing_count", 0)
+    versions = metrics.get("tracked_query_versions", 0)
+    sweeps = metrics.get("sweeps_conducted", 0)
+    reconciled = metrics.get("reconciliations_period", 0)
+    last_audited = str(metrics.get("last_audited", "never")).replace("T", " ")[:19]
+
+    health_color = (
+        "green" if (drifted == 0 and missing == 0) else ("yellow" if drifted == 0 else "red")
+    )
+
+    summary_text = (
+        f"[bold]Sync Health:[/bold] [{health_color}]{health_pct:.1f}%[/{health_color}] "
+        f"([green]{in_sync}[/green] in sync, [yellow]{drifted}[/yellow] drifted, [magenta]{missing}[/magenta] missing / {total_q} total)\n"
+        f"[bold]Tracked Query Versions:[/bold] [cyan]{versions}[/cyan] rule version(s)\n"
+        f"[bold]Last Audit Sweep:[/bold] {last_audited}\n"
+        f"[bold]7-Day Audit Sweeps:[/bold] {sweeps} | [bold]Reconciliations:[/bold] [green]{reconciled}[/green]"
+    )
+
+    console.print(
+        Panel(
+            summary_text,
+            title="[bold cyan]SIEM Detection-as-Code Status Dashboard[/bold cyan]",
+            border_style="cyan",
+        )
+    )
+
+    target_breakdown = metrics.get("target_drift_breakdown", {})
+    if target_breakdown:
+        tb_table = Table(title="Drift Incidents by Target Platform (Past 7 Days)", show_header=True)
+        tb_table.add_column("Target Platform")
+        tb_table.add_column("Drift Incidents", justify="right")
+        for tgt, count in sorted(target_breakdown.items(), key=lambda x: -x[1]):
+            tb_table.add_row(tgt, f"[yellow]{count}[/yellow]")
+        console.print(tb_table)
+
+    if history:
+        hist_table = Table(title="Recent Drift & Reconciliation Activity", show_header=True)
+        hist_table.add_column("Timestamp")
+        hist_table.add_column("Hunt ID")
+        hist_table.add_column("Target")
+        hist_table.add_column("Event")
+        hist_table.add_column("Actor")
+        for ev in history:
+            ev_type = ev.get("event_type", "")
+            ev_color = (
+                "green"
+                if ev_type == "reconciled"
+                else ("yellow" if ev_type == "drift_detected" else "blue")
+            )
+            ts = str(ev.get("timestamp", ""))[:19].replace("T", " ")
+            hist_table.add_row(
+                ts,
+                str(ev.get("hunt_id", "")),
+                str(ev.get("target", "")),
+                f"[{ev_color}]{ev_type}[/{ev_color}]",
+                str(ev.get("actor", "system")),
+            )
+        console.print(hist_table)
+
+
+@app.command("query-versions")
+def query_versions_cmd(
+    hunt_id: Annotated[
+        str | None,
+        typer.Argument(help="Optional hunt ID (e.g. H-0007) to inspect versions for."),
+    ] = None,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Filter by target platform (e.g. splunk_spl)."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Maximum entries to display."),
+    ] = 25,
+) -> None:
+    """View deployed SIEM query versions, content hashes, and deployment history."""
+    settings = Settings()
+    from hecate_runner.siem_drift import get_query_versions
+
+    versions = get_query_versions(
+        settings.hecate_workspace, hunt_id=hunt_id, target=target, limit=limit
+    )
+    if not versions:
+        console.print("[dim]No query versions recorded in database yet.[/dim]")
+        return
+
+    table = Table(
+        title=f"SIEM Query Versions {f'for {hunt_id}' if hunt_id else ''}",
+        show_header=True,
+        header_style="bold blue",
+    )
+    table.add_column("Hunt ID")
+    table.add_column("Target")
+    table.add_column("File")
+    table.add_column("Ver", justify="right")
+    table.add_column("SHA256 Hash")
+    table.add_column("Deployed At")
+    table.add_column("Deployed By")
+    table.add_column("Status")
+
+    for v in versions:
+        ts = str(v.get("deployed_at", ""))[:19].replace("T", " ")
+        q_hash = str(v.get("query_hash", ""))[:12] + "…"
+        table.add_row(
+            str(v.get("hunt_id", "")),
+            str(v.get("target", "")),
+            str(v.get("file_name", "")),
+            f"[bold cyan]v{v.get('version', 1)}[/bold cyan]",
+            q_hash,
+            ts,
+            str(v.get("deployed_by", "system")),
+            f"[green]{v.get('status', 'active')}[/green]",
+        )
+
+    console.print(table)
 
 
 # --- BAS Commands ----------------------------------------------------------

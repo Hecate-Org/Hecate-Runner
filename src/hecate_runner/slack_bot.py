@@ -497,6 +497,7 @@ class SlackBotService:
                 self.settings.hecate_workspace,
                 hunt_id,
                 dry_run=is_dry_run,
+                actor=f"slack:{user_name}",
             )
 
             if not results:
@@ -753,6 +754,7 @@ class SlackBotService:
                     hunt_id,
                     target=target,
                     dry_run=is_dry_run,
+                    actor=f"slack:{user_id}",
                 )
                 reconciled = [r for r in results if r.get("ok")]
                 rows = [
@@ -780,6 +782,7 @@ class SlackBotService:
                     self.settings.hecate_workspace,
                     target=target,
                     dry_run=is_dry_run,
+                    trigger=f"slack:{user_id}",
                 )
                 msg = (
                     f"🔍 *SIEM & EDR Detection-as-Code Audit*\n"
@@ -791,6 +794,28 @@ class SlackBotService:
                     f"• *Missing in SIEM:* `{report.get('missing_count', 0)}`\n"
                 )
                 respond(text=msg)
+                return
+
+            if subcmd in {"siem-status", "siem"}:
+                from hecate_runner.siem_drift import get_drift_history, get_siem_drift_metrics
+                from hecate_runner.slack_blocks import build_siem_status_card
+
+                metrics = get_siem_drift_metrics(self.settings.hecate_workspace, days=7)
+                recent_history = get_drift_history(self.settings.hecate_workspace, limit=5)
+                card = build_siem_status_card(self.settings, metrics, recent_history)
+                respond(attachments=card)
+                return
+
+            if subcmd in {"history", "drift-history"}:
+                hunt_id = tokens[1].upper() if len(tokens) > 1 else None
+                from hecate_runner.siem_drift import get_drift_history
+                from hecate_runner.slack_blocks import build_siem_history_card
+
+                history = get_drift_history(
+                    self.settings.hecate_workspace, hunt_id=hunt_id, limit=10
+                )
+                card = build_siem_history_card(hunt_id, history)
+                respond(attachments=card)
                 return
 
             if subcmd == "rerun":

@@ -807,6 +807,8 @@ def build_slash_help_card() -> list[dict[str, Any]]:
                     "• `/hecate sync <hunt_id> [target]` — Check synchronization and query drift against SIEM/EDRs\n"
                     "• `/hecate reconcile <hunt_id> [target]` — Reconcile drifted/missing queries back to git-authoritative state\n"
                     "• `/hecate audit-siem [target]` — Audit all active hunts across SIEM/EDR platforms\n"
+                    "• `/hecate siem-status` — View SIEM sync health, target breakdowns & drift metrics\n"
+                    "• `/hecate history [hunt_id]` — View chronological SIEM drift & reconciliation audit history\n"
                     "• `/hecate rerun <hunt_id>` — Replay purple-team adversary emulation and validate Sigma rules\n"
                     "• `/hecate tune <hunt_id> <instruction>` — Interactively tune Sigma rule (e.g. `/hecate tune H-0868 exclude svchost.exe with parent services.exe`)\n"
                     "• `/hecate help` — Show this command reference guide"
@@ -829,6 +831,7 @@ def build_slash_help_card() -> list[dict[str, Any]]:
 def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
     """Build an operational status card for /hecate status."""
     from hecate_runner.parked_store import list_parked
+    from hecate_runner.siem_drift import load_drift_state
     from hecate_runner.state import OrchestratorState
 
     state = OrchestratorState.load(settings.state_file)
@@ -855,6 +858,54 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
         recent_hunts_lines.append(f"• `{hf.stem}`: {hf.name}")
     recent_text = "\n".join(recent_hunts_lines) or "No hunts recorded yet"
 
+    fields = [
+        {
+            "type": "mrkdwn",
+            "text": f"*Workspace:*\n`{settings.hecate_workspace.name}`",
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*CTI Provider:*\n`{settings.cti_provider}`",
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*Draft Quota (24h):*\n`{state.drafts_today} / {settings.max_drafts_per_day}`",
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*Research Quota:*\n`{state.research_runs_today} / {settings.max_research_runs_per_day}`",
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*Hunts in Workspace:*\n`{total_hunts} total` (`{active_count}` active, `{planning_count}` planning)",
+        },
+        {
+            "type": "mrkdwn",
+            "text": f"*Parked Commentary:*\n`{parked_count} item(s)`",
+        },
+    ]
+
+    drift_state = load_drift_state(settings.hecate_workspace)
+    if drift_state:
+        in_sync = drift_state.get("in_sync_count", 0)
+        total_q = drift_state.get("total_queries", 0)
+        drifted = drift_state.get("drifted_count", 0)
+        missing = drift_state.get("missing_count", 0)
+        pct = (in_sync / total_q * 100.0) if total_q > 0 else 100.0
+        icon = "✅" if (drifted == 0 and missing == 0) else "⚠️"
+        fields.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*Detection-as-Code Sync:*\n{icon} `{in_sync}/{total_q}` ({pct:.0f}% in sync, `{drifted}` drifted)",
+            }
+        )
+        fields.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*Last SIEM Audit:*\n`{str(drift_state.get('audited_at', 'unknown'))[:19]}`",
+            }
+        )
+
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
@@ -866,32 +917,7 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
         },
         {
             "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Workspace:*\n`{settings.hecate_workspace.name}`",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*CTI Provider:*\n`{settings.cti_provider}`",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Draft Quota (24h):*\n`{state.drafts_today} / {settings.max_drafts_per_day}`",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Research Quota:*\n`{state.research_runs_today} / {settings.max_research_runs_per_day}`",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Hunts in Workspace:*\n`{total_hunts} total` (`{active_count}` active, `{planning_count}` planning)",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Parked Commentary:*\n`{parked_count} item(s)`",
-                },
-            ],
+            "fields": fields,
         },
         {
             "type": "section",
@@ -999,3 +1025,163 @@ def build_siem_drift_alert_card(
     )
 
     return [{"color": COLOR_WARNING, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def build_siem_status_card(
+    settings: Settings,
+    metrics: dict[str, Any],
+    recent_history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build rich Slack Block Kit card summarizing SIEM sync health, versioning, and recent drift."""
+    health_pct = metrics.get("sync_health_pct", 100.0)
+    in_sync = metrics.get("in_sync_count", 0)
+    total_q = metrics.get("total_queries", 0)
+    drifted = metrics.get("drifted_count", 0)
+    missing = metrics.get("missing_count", 0)
+    versions = metrics.get("tracked_query_versions", 0)
+    sweeps = metrics.get("sweeps_conducted", 0)
+    reconciled = metrics.get("reconciliations_period", 0)
+    last_audited = str(metrics.get("last_audited", "never"))[:19]
+
+    status_icon = "🟢" if (drifted == 0 and missing == 0) else ("🟡" if drifted == 0 else "🔴")
+    card_color = COLOR_SUCCESS if (drifted == 0 and missing == 0) else COLOR_WARNING
+
+    target_breakdown = metrics.get("target_drift_breakdown", {})
+    target_lines = [f"• `{tgt}`: {cnt} drift incident(s)" for tgt, cnt in target_breakdown.items()]
+    target_text = "\n".join(target_lines) if target_lines else "• No platform drift detected."
+
+    recent_rows = []
+    for evt in recent_history[:5]:
+        ts = str(evt.get("timestamp", ""))[:19]
+        h_id = evt.get("hunt_id", "")
+        tgt = evt.get("target", "")
+        ev_type = evt.get("event_type", "")
+        actor = evt.get("actor", "system")
+        icon = "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+        recent_rows.append(f"{icon} `{ts}` *{h_id}* ({tgt}): `{ev_type}` by `{actor}`")
+    timeline_text = "\n".join(recent_rows) if recent_rows else "No recent drift/reconciliation events."
+
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"{status_icon} Detection-as-Code SIEM Health & Versioning",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Sync Health:*\n`{health_pct:.1f}%` ({in_sync}/{total_q} in sync)",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Drifted / Missing:*\n`{drifted}` drifted, `{missing}` missing",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Tracked Query Versions:*\n`{versions}` rule version(s)",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Reconciliations (7d):*\n`{reconciled}` action(s)",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Audit Sweeps (7d):*\n`{sweeps}` sweep(s)",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Last Audit:*\n`{last_audited}`",
+                },
+            ],
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Platform Drift Summary:*\n{target_text}\n\n*Recent Audit Trail:*\n{timeline_text}",
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"🛡️ *Hecate SIEM Guardian* | Workspace: `{settings.hecate_workspace.name}`",
+                }
+            ],
+        },
+    ]
+    return [{"color": card_color, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def build_siem_history_card(
+    hunt_id: str | None,
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build Slack Block Kit card displaying chronological audit events for a hunt or workspace."""
+    title_suffix = f"for `{hunt_id}`" if hunt_id else "Audit Trail"
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📜 SIEM Drift & Versioning History {title_suffix}",
+                "emoji": True,
+            },
+        },
+    ]
+
+    if not history:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "No drift or reconciliation history recorded yet.",
+                },
+            }
+        )
+    else:
+        event_lines = []
+        for ev in history[:10]:
+            ts = str(ev.get("timestamp", ""))[:19]
+            h_id = ev.get("hunt_id", "")
+            tgt = ev.get("target", "")
+            ev_type = ev.get("event_type", "")
+            actor = ev.get("actor", "system")
+            f_name = ev.get("file_name", "")
+            icon = "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+            line = f"{icon} *{ts}* — `{h_id}` / `{tgt}`\n• File: `{f_name}` | Event: `{ev_type}` | Actor: `{actor}`"
+            diff = ev.get("drift_diff")
+            if diff:
+                preview = diff.strip().replace("\n", " | ")[:120]
+                line += f"\n• Diff: _{preview}_"
+            event_lines.append(line)
+
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "\n\n".join(event_lines),
+                },
+            }
+        )
+
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "🛡️ *Hecate Detection-as-Code* | `/hecate history`",
+                }
+            ],
+        }
+    )
+    return [{"color": COLOR_INFO, "blocks": sanitize_slack_blocks(blocks)}]
