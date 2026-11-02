@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 
 _HUNT_ID_RE = re.compile(r"^H-\d{4,}$")
 _RESEARCH_ID_RE = re.compile(r"^R-\d{4,}$")
-_MAX_BUNDLE_FILES = 80
+_MAX_BUNDLE_FILES = 200
 _MAX_FILE_BYTES = 2_000_000
 _MAX_BUNDLE_BYTES = 8_000_000
 _API = "https://api.github.com"
