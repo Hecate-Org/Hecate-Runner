@@ -283,6 +283,16 @@ class Settings(BaseSettings):
         alias="HECATE_RUNNER_SIEM_DEPLOY_DRY_RUN",
         description="Simulate query deployment in dry-run mode without mutating remote SIEM/EDR state.",
     )
+    siem_drift_audit_interval_sec: int = Field(
+        default=3600,
+        alias="HECATE_RUNNER_SIEM_DRIFT_AUDIT_INTERVAL_SEC",
+        description="Interval in seconds between background SIEM query drift audit sweeps (0 to disable).",
+    )
+    siem_drift_auto_reconcile: bool = Field(
+        default=False,
+        alias="HECATE_RUNNER_SIEM_DRIFT_AUTO_RECONCILE",
+        description="Automatically reconcile drifted/missing SIEM queries without requiring manual analyst approval.",
+    )
 
     # --- Live Adversary Emulation & Breach Simulation (BAS) -----------------
     bas_enabled: bool = Field(

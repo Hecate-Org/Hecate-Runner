@@ -471,6 +471,59 @@ class SlackBotService:
             )
             say(text=msg, thread_ts=thread_ts)
 
+        @self._app.action("hecate_reconcile_drift")
+        def handle_reconcile_drift(ack: Any, body: dict[str, Any], say: Any) -> None:
+            ack()
+            action = body.get("actions", [{}])[0]
+            hunt_id = str(action.get("value") or "").strip()
+            thread_ts = body.get("message", {}).get("ts") or body.get("container", {}).get(
+                "message_ts"
+            )
+            user_info = body.get("user", {})
+            user_name = user_info.get("username") or user_info.get("name") or "analyst"
+
+            is_dry_run = getattr(self.settings, "siem_deploy_dry_run", True)
+            mode_str = "Simulated (Dry-Run)" if is_dry_run else "Live Push"
+            log.info(
+                "Slack HITL action: reconcile SIEM drift for %s by %s (mode=%s)",
+                hunt_id,
+                user_name,
+                mode_str,
+            )
+
+            from hecate_runner.siem_drift import reconcile_hunt_queries
+
+            results = reconcile_hunt_queries(
+                self.settings.hecate_workspace,
+                hunt_id,
+                dry_run=is_dry_run,
+            )
+
+            if not results:
+                say(
+                    text=f"ℹ️ *No drifted queries to reconcile for `{hunt_id}`* (already in sync).",
+                    thread_ts=thread_ts,
+                )
+                return
+
+            rows = []
+            for r in results:
+                icon = "✅" if r.get("ok") else "❌"
+                target = r.get("target")
+                fname = r.get("file")
+                rem_id = f" (`{r.get('remote_id')}`)" if r.get("remote_id") else ""
+                prev = r.get("previous_status")
+                st = r.get("status")
+                rows.append(f"{icon} *{target}* (`{fname}`): `{prev}` ➔ `{st}`{rem_id}")
+
+            rows_text = "\n".join(rows)
+            msg = (
+                f"🔄 *SIEM Detection Reconciliation for `{hunt_id}`*\n"
+                f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_info.get('id', user_name)}>\n\n"
+                f"{rows_text}"
+            )
+            say(text=msg, thread_ts=thread_ts)
+
         @self._app.action("hecate_rerun_purple")
         def handle_purple(ack: Any, body: dict[str, Any], say: Any) -> None:
             ack()
@@ -673,6 +726,69 @@ class SlackBotService:
                     f"🔄 *SIEM & EDR Query Synchronization & Drift Check for `{hunt_id}`*\n"
                     f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_id}>\n\n"
                     f"{rows_text}"
+                )
+                respond(text=msg)
+                return
+
+            if subcmd in {"reconcile", "reconcile-queries"}:
+                if len(tokens) < 2:
+                    respond(
+                        text=(
+                            "⚠️ *Usage:* `/hecate reconcile <hunt_id> [target]`\n"
+                            "• Example: `/hecate reconcile H-0007`\n"
+                            "• Example: `/hecate reconcile H-0007 splunk_spl`"
+                        )
+                    )
+                    return
+
+                hunt_id = tokens[1].upper()
+                target = tokens[2].lower() if len(tokens) > 2 else None
+                is_dry_run = getattr(self.settings, "siem_deploy_dry_run", True)
+                mode_str = "Simulated (Dry-Run)" if is_dry_run else "Live Push"
+
+                from hecate_runner.siem_drift import reconcile_hunt_queries
+
+                results = reconcile_hunt_queries(
+                    self.settings.hecate_workspace,
+                    hunt_id,
+                    target=target,
+                    dry_run=is_dry_run,
+                )
+                reconciled = [r for r in results if r.get("ok")]
+                rows = [
+                    f"• `{r.get('target')}` ({r.get('file')}): `{r.get('previous_status')}` ➔ `in_sync`"
+                    for r in reconciled
+                ]
+                rows_text = "\n".join(rows) if rows else "No drifted or missing queries found."
+
+                msg = (
+                    f"🔄 *SIEM Reconciliation for `{hunt_id}`*\n"
+                    f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_id}>\n\n"
+                    f"{rows_text}"
+                )
+                respond(text=msg)
+                return
+
+            if subcmd in {"audit-siem", "siem-audit"}:
+                target = tokens[1].lower() if len(tokens) > 1 else None
+                is_dry_run = getattr(self.settings, "siem_deploy_dry_run", True)
+                mode_str = "Simulated (Dry-Run)" if is_dry_run else "Live API"
+
+                from hecate_runner.siem_drift import audit_workspace_queries
+
+                report = audit_workspace_queries(
+                    self.settings.hecate_workspace,
+                    target=target,
+                    dry_run=is_dry_run,
+                )
+                msg = (
+                    f"🔍 *SIEM & EDR Detection-as-Code Audit*\n"
+                    f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_id}>\n\n"
+                    f"• *Hunts Audited:* `{report.get('total_hunts', 0)}`\n"
+                    f"• *Total Queries:* `{report.get('total_queries', 0)}`\n"
+                    f"• *In-Sync:* `{report.get('in_sync_count', 0)}`\n"
+                    f"• *Drifted:* `{report.get('drifted_count', 0)}`\n"
+                    f"• *Missing in SIEM:* `{report.get('missing_count', 0)}`\n"
                 )
                 respond(text=msg)
                 return

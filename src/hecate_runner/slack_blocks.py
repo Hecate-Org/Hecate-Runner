@@ -805,6 +805,8 @@ def build_slash_help_card() -> list[dict[str, Any]]:
                     "• `/hecate deploy <hunt_id> [target]` — Deploy or simulate queries across SIEM/EDRs (e.g. `/hecate deploy H-0868 sentinel_kql`)\n"
                     "• `/hecate undeploy <hunt_id> [target]` — Teardown/delete queries from SIEM/EDRs (e.g. `/hecate undeploy H-0868 splunk_spl`)\n"
                     "• `/hecate sync <hunt_id> [target]` — Check synchronization and query drift against SIEM/EDRs\n"
+                    "• `/hecate reconcile <hunt_id> [target]` — Reconcile drifted/missing queries back to git-authoritative state\n"
+                    "• `/hecate audit-siem [target]` — Audit all active hunts across SIEM/EDR platforms\n"
                     "• `/hecate rerun <hunt_id>` — Replay purple-team adversary emulation and validate Sigma rules\n"
                     "• `/hecate tune <hunt_id> <instruction>` — Interactively tune Sigma rule (e.g. `/hecate tune H-0868 exclude svchost.exe with parent services.exe`)\n"
                     "• `/hecate help` — Show this command reference guide"
@@ -909,3 +911,91 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
         },
     ]
     return [{"color": COLOR_SUCCESS, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def build_siem_drift_alert_card(
+    hunt_id: str,
+    drifted_queries: list[dict[str, Any]],
+    settings: Settings,
+    interactive: bool = True,
+) -> list[dict[str, Any]]:
+    """Build an interactive alert card notifying analysts of query drift or missing rules."""
+    query_lines = []
+    for q in drifted_queries[:5]:
+        tgt = q.get("target", "unknown")
+        fname = q.get("file", "")
+        st = q.get("status", "drift_detected")
+        rem_id = q.get("remote_id") or ""
+        diff = q.get("drift_diff")
+        icon = "⚠️" if st == "drift_detected" else "❌"
+        line = f"{icon} *{tgt}* (`{fname}`): `{st}`"
+        if rem_id:
+            line += f"\n  • Remote ID: `{rem_id}`"
+        if diff:
+            diff_preview = diff.strip().split("\n")[:2]
+            line += "\n  • " + " | ".join(diff_preview)
+        query_lines.append(line)
+
+    if len(drifted_queries) > 5:
+        query_lines.append(f"_...and {len(drifted_queries) - 5} more query(s)_")
+
+    body_text = (
+        f"🚨 *SIEM Detection Drift Detected for `{hunt_id}`*\n\n"
+        "One or more detection queries deployed to your enterprise SIEM/EDR have "
+        "drifted from git-authoritative definitions or have been deleted remotely.\n\n"
+        + "\n".join(query_lines)
+    )
+
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"⚠️ SIEM Query Drift: {hunt_id}",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": body_text,
+            },
+        },
+    ]
+
+    if interactive:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "⚡ Reconcile in SIEM", "emoji": True},
+                        "style": "primary",
+                        "action_id": "hecate_reconcile_drift",
+                        "value": hunt_id,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Deploy All Queries", "emoji": True},
+                        "action_id": "hecate_deploy_queries",
+                        "value": hunt_id,
+                    },
+                ],
+            }
+        )
+
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "🛡️ *Hecate Detection-as-Code Guardian* | Automated Drift Sentinel",
+                }
+            ],
+        }
+    )
+
+    return [{"color": COLOR_WARNING, "blocks": sanitize_slack_blocks(blocks)}]

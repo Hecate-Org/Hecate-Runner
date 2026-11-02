@@ -273,6 +273,7 @@ def daemon(
     from hecate_runner.integration_checks import start_health_refresh
 
     cycles_completed = 0
+    last_siem_audit_time = 0.0
     try:
         while not stop_event.is_set():
             start_health_refresh(settings)
@@ -290,6 +291,49 @@ def daemon(
                     provider.close()
             _print_result(result)
             cycles_completed += 1
+
+            # Periodic background SIEM Detection-as-Code drift audit
+            now_ts = datetime.now(UTC).timestamp()
+            drift_interval = getattr(settings, "siem_drift_audit_interval_sec", 3600)
+            if drift_interval > 0 and (now_ts - last_siem_audit_time >= drift_interval):
+                try:
+                    from hecate_runner.notifications import notify_siem_drift
+                    from hecate_runner.siem_drift import (
+                        audit_workspace_queries,
+                        reconcile_all_drifted_queries,
+                    )
+
+                    log.info("Daemon executing scheduled SIEM drift audit sweep...")
+                    drift_report = audit_workspace_queries(settings.hecate_workspace, dry_run=False)
+                    drift_cnt = drift_report.get("drifted_count", 0)
+                    missing_cnt = drift_report.get("missing_count", 0)
+
+                    if drift_cnt > 0 or missing_cnt > 0:
+                        log.warning(
+                            "SIEM drift audit detected %d drifted and %d missing detection queries!",
+                            drift_cnt,
+                            missing_cnt,
+                        )
+                        for h_id, d_list in drift_report.get("drifted_by_hunt", {}).items():
+                            notify_siem_drift(settings, h_id, d_list)
+                        for h_id, m_list in drift_report.get("missing_by_hunt", {}).items():
+                            if h_id not in drift_report.get("drifted_by_hunt", {}):
+                                notify_siem_drift(settings, h_id, m_list)
+
+                        if getattr(settings, "siem_drift_auto_reconcile", False):
+                            log.info("Auto-reconcile enabled: reconciling drifted SIEM queries...")
+                            rec_res = reconcile_all_drifted_queries(
+                                settings.hecate_workspace, dry_run=False
+                            )
+                            log.info(
+                                "Auto-reconciled %d query(s) (%d failed)",
+                                rec_res.get("total_reconciled", 0),
+                                rec_res.get("total_failed", 0),
+                            )
+
+                    last_siem_audit_time = now_ts
+                except Exception as exc:
+                    log.warning("Background SIEM drift audit encountered an error: %s", exc)
 
             if max_cycles is not None and cycles_completed >= max_cycles:
                 console.print(
@@ -1047,6 +1091,217 @@ def sync_queries_cmd(
                         f"\n[bold cyan]── Sync Request: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
                     )
                     console.print_json(data=summary)
+
+
+@app.command("audit-siem")
+def audit_siem_cmd(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Specific target platform (e.g. splunk_spl, sentinel_kql)."),
+    ] = None,
+    reconcile: Annotated[
+        bool,
+        typer.Option(
+            "--reconcile/--no-reconcile",
+            help="Automatically reconcile any drifted or missing queries to match local git repository.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--live",
+            help="Simulate audit (default) or query/mutate live SIEM APIs.",
+        ),
+    ] = True,
+    alert_slack: Annotated[
+        bool,
+        typer.Option(
+            "--alert-slack/--no-alert-slack",
+            help="Send Slack alert card if query drift is detected.",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show full query drift diffs."),
+    ] = False,
+) -> None:
+    """Audit all workspace hunting queries across SIEM & EDR platforms for detection drift."""
+    settings = Settings()
+    from hecate_runner.siem_drift import audit_workspace_queries, reconcile_all_drifted_queries
+
+    mode_str = "simulated (dry-run)" if dry_run else "live"
+    console.print(
+        f"[bold cyan]Auditing detection-as-code queries across {settings.hecate_workspace.name}...[/bold cyan]"
+    )
+
+    report = audit_workspace_queries(settings.hecate_workspace, target=target, dry_run=dry_run)
+
+    table = Table(
+        title=f"SIEM & EDR Detection-as-Code Audit ({mode_str})",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("Hunt ID")
+    table.add_column("File")
+    table.add_column("Target")
+    table.add_column("Status")
+    table.add_column("Remote ID")
+
+    for hunt_id, results in report.get("hunts", {}).items():
+        for res in results:
+            status = res.get("status", "")
+            if status in {"in_sync", "dry_run"}:
+                status_color = "green" if status == "in_sync" else "blue"
+            elif status == "drift_detected":
+                status_color = "yellow"
+            elif status == "missing_remote":
+                status_color = "magenta"
+            else:
+                status_color = "red"
+
+            table.add_row(
+                hunt_id,
+                str(res.get("file", "")),
+                str(res.get("target", "")),
+                f"[{status_color}]{status}[/{status_color}]",
+                str(res.get("remote_id") or ""),
+            )
+
+    console.print(table)
+
+    in_sync = report.get("in_sync_count", 0)
+    drifted = report.get("drifted_count", 0)
+    missing = report.get("missing_count", 0)
+    total_q = report.get("total_queries", 0)
+    total_h = report.get("total_hunts", 0)
+
+    console.print(
+        f"\n[bold]Audit Summary:[/bold] {total_h} hunt(s), {total_q} queries evaluated "
+        f"([green]{in_sync} in sync[/green], "
+        f"[yellow]{drifted} drifted[/yellow], "
+        f"[magenta]{missing} missing[/magenta])."
+    )
+
+    if verbose or drifted > 0:
+        for hunt_id, drifted_list in report.get("drifted_by_hunt", {}).items():
+            for res in drifted_list:
+                diff = res.get("drift_diff")
+                if diff:
+                    console.print(
+                        f"\n[bold yellow]── Query Drift Detected: {hunt_id} / {res.get('target')} ({res.get('file')}) ──[/bold yellow]"
+                    )
+                    console.print(diff)
+
+    if alert_slack and (drifted > 0 or missing > 0):
+        from hecate_runner.notifications import notify_siem_drift
+
+        for hunt_id, drifted_list in report.get("drifted_by_hunt", {}).items():
+            notify_siem_drift(settings, hunt_id, drifted_list)
+        for hunt_id, missing_list in report.get("missing_by_hunt", {}).items():
+            if hunt_id not in report.get("drifted_by_hunt", {}):
+                notify_siem_drift(settings, hunt_id, missing_list)
+        console.print("[green]Slack drift alert notification cards dispatched.[/green]")
+
+    if reconcile and (drifted > 0 or missing > 0):
+        console.print(
+            f"\n[bold yellow]Triggering automated reconciliation ({mode_str})...[/bold yellow]"
+        )
+        rec_summary = reconcile_all_drifted_queries(
+            settings.hecate_workspace, target=target, dry_run=dry_run
+        )
+        console.print(
+            f"[bold green]Reconciliation complete:[/bold green] {rec_summary.get('total_reconciled', 0)} reconciled, "
+            f"{rec_summary.get('total_failed', 0)} failed."
+        )
+
+
+@app.command("reconcile-queries")
+def reconcile_queries_cmd(
+    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0007) to reconcile queries for.")],
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Specific target platform (e.g. splunk_spl, sentinel_kql)."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--live",
+            help="Simulate reconciliation (default) or push live updates to SIEM.",
+        ),
+    ] = True,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Force redeploy all queries regardless of current sync status.",
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show full request details."),
+    ] = False,
+) -> None:
+    """Reconcile drifted or missing SIEM/EDR queries back to git-authoritative definitions."""
+    settings = Settings()
+    query_dir = settings.hecate_workspace / "queries" / hunt_id
+    if not query_dir.exists():
+        console.print(f"[red]Query directory not found:[/red] {query_dir}")
+        raise typer.Exit(code=1)
+
+    from hecate_runner.siem_drift import reconcile_hunt_queries
+
+    table = Table(
+        title=f"SIEM & EDR Query Reconciliation for {hunt_id}",
+        show_header=True,
+        header_style="bold green",
+    )
+    table.add_column("File")
+    table.add_column("Target")
+    table.add_column("Previous Status")
+    table.add_column("New Status")
+    table.add_column("Remote ID")
+    table.add_column("Detail")
+
+    results = reconcile_hunt_queries(
+        settings.hecate_workspace,
+        hunt_id,
+        target=target,
+        dry_run=dry_run,
+        force=force,
+    )
+
+    if not results:
+        console.print(f"[green]All queries for {hunt_id} are already in sync.[/green]")
+        return
+
+    reconciled_count = 0
+    for res in results:
+        status_color = "green" if res.get("ok") else "red"
+        table.add_row(
+            str(res.get("file", "")),
+            str(res.get("target", "")),
+            str(res.get("previous_status", "")),
+            f"[{status_color}]{res.get('status')}[/{status_color}]",
+            str(res.get("remote_id") or ""),
+            str(res.get("detail", "")),
+        )
+        if res.get("ok"):
+            reconciled_count += 1
+
+    console.print(table)
+    mode_str = "simulated (dry-run)" if dry_run else "live"
+    console.print(
+        f"[bold]{reconciled_count} / {len(results)}[/bold] query(s) reconciled in {mode_str} mode."
+    )
+
+    if verbose:
+        for res in results:
+            summary = res.get("request_summary")
+            if summary:
+                console.print(
+                    f"\n[bold cyan]── Reconciliation Request: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
+                )
+                console.print_json(data=summary)
 
 
 # --- BAS Commands ----------------------------------------------------------

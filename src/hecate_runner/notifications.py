@@ -24,6 +24,7 @@ from hecate_runner.slack_blocks import (
     build_hunt_completed_card,
     build_ops_metrics_card,
     build_purple_team_card,
+    build_siem_drift_alert_card,
     build_threat_hunting_digest_card,
     build_threat_intake_card,
     build_threat_intel_digest_card,
@@ -441,6 +442,32 @@ def notify_threat_hunting_digest(
         f"Delivered to `{target_channel}`."
     )
     attachments = build_threat_hunting_digest_card(data)
+    return router.post_message(target_channel, text, attachments=attachments)
+
+
+def notify_siem_drift(
+    settings: Settings,
+    hunt_id: str,
+    drifted_queries: list[dict[str, Any]],
+    channel: str | None = None,
+) -> tuple[bool, str]:
+    """Post an alert card to Slack when query drift or missing rules are detected in SIEM/EDR."""
+    router = SlackNotificationRouter(settings)
+    if not router.is_configured:
+        return False, "Slack not configured"
+
+    target_channel = (
+        channel
+        or settings.slack_channel_detection_engineering
+        or settings.slack_channel_hunts_exec
+    )
+    text = f"⚠️ *SIEM Detection Drift Detected for `{hunt_id}`*"
+    attachments = build_siem_drift_alert_card(
+        hunt_id=hunt_id,
+        drifted_queries=drifted_queries,
+        settings=settings,
+        interactive=settings.slack_interactive_enabled,
+    )
     return router.post_message(target_channel, text, attachments=attachments)
 
 
