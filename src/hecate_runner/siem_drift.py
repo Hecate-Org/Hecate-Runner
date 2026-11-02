@@ -16,10 +16,47 @@ from pathlib import Path
 from typing import Any
 
 from hecate_runner.atomic_write import atomic_write_text
-from hecate_runner.slack_bot import sync_queries_for_hunt
+from hecate_runner.lifecycle import get_hunt_lifecycle, set_hunt_lifecycle
+from hecate_runner.slack_bot import sync_queries_for_hunt, undeploy_queries_for_hunt
 from hecate_runner.sqlite_utils import connect_sqlite
 
 log = logging.getLogger(__name__)
+
+
+def get_tracked_query_statuses(workspace: Path) -> dict[tuple[str, str, str], str]:
+    """Retrieve the latest deployment/lifecycle status for all queries from drift_history.db.
+
+    Returns:
+        Mapping of (hunt_id, target, file_name) -> status ('active', 'decommissioned', etc.)
+    """
+    db_path = get_drift_db_path(workspace)
+    if not db_path.exists():
+        return {}
+
+    conn = connect_sqlite(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        with conn:
+            rows = conn.execute(
+                """
+                SELECT qv.hunt_id, qv.target, qv.file_name, qv.status
+                FROM query_versions qv
+                INNER JOIN (
+                    SELECT hunt_id, target, file_name, MAX(version) as max_ver
+                    FROM query_versions
+                    GROUP BY hunt_id, target, file_name
+                ) latest ON qv.hunt_id = latest.hunt_id
+                       AND qv.target = latest.target
+                       AND qv.file_name = latest.file_name
+                       AND qv.version = latest.max_ver
+                """
+            ).fetchall()
+            return {(r["hunt_id"].upper(), r["target"].lower(), r["file_name"]): r["status"] for r in rows}
+    except Exception as exc:
+        log.debug("Could not retrieve tracked query statuses: %s", exc)
+        return {}
+    finally:
+        conn.close()
 
 
 def audit_workspace_queries(
@@ -46,12 +83,17 @@ def audit_workspace_queries(
             "total_hunts": 0,
             "total_queries": 0,
             "in_sync_count": 0,
+            "decommissioned_count": 0,
+            "pending_decommission_count": 0,
             "drifted_count": 0,
             "missing_count": 0,
             "error_count": 0,
             "hunts": {},
             "drifted_by_hunt": {},
             "missing_by_hunt": {},
+            "decommissioned_by_hunt": {},
+            "pending_decommission_by_hunt": {},
+            "hunt_lifecycles": {},
             "audited_at": datetime.now(UTC).isoformat(),
             "dry_run": dry_run,
         }
@@ -59,6 +101,8 @@ def audit_workspace_queries(
     hunt_dirs = sorted([d for d in queries_root.iterdir() if d.is_dir()])
     total_queries = 0
     in_sync_count = 0
+    decommissioned_count = 0
+    pending_decommission_count = 0
     drifted_count = 0
     missing_count = 0
     error_count = 0
@@ -66,9 +110,18 @@ def audit_workspace_queries(
     all_hunts: dict[str, list[dict[str, Any]]] = {}
     drifted_by_hunt: dict[str, list[dict[str, Any]]] = {}
     missing_by_hunt: dict[str, list[dict[str, Any]]] = {}
+    decommissioned_by_hunt: dict[str, list[dict[str, Any]]] = {}
+    pending_decommission_by_hunt: dict[str, list[dict[str, Any]]] = {}
+    hunt_lifecycles: dict[str, dict[str, Any]] = {}
+
+    tracked_statuses = get_tracked_query_statuses(workspace)
 
     for h_dir in hunt_dirs:
         hunt_id = h_dir.name
+        lifecycle = get_hunt_lifecycle(workspace, hunt_id)
+        hunt_lifecycles[hunt_id] = lifecycle
+        is_retired = lifecycle.get("is_retired", False)
+
         results = sync_queries_for_hunt(workspace, hunt_id, dry_run=dry_run, target=target)
         if not results:
             continue
@@ -78,17 +131,45 @@ def audit_workspace_queries(
 
         hunt_drifted: list[dict[str, Any]] = []
         hunt_missing: list[dict[str, Any]] = []
+        hunt_decommissioned: list[dict[str, Any]] = []
+        hunt_pending: list[dict[str, Any]] = []
 
         for r in results:
             status = r.get("status")
-            if status == "in_sync" or (dry_run and status == "dry_run"):
-                in_sync_count += 1
+            tgt = str(r.get("target") or "unknown").lower()
+            fname = str(r.get("file") or "")
+            ver_status = tracked_statuses.get((hunt_id.upper(), tgt, fname), "active")
+            is_query_decommissioned = (ver_status in ("decommissioned", "retired")) or is_retired
+
+            if status == "missing_remote":
+                if is_query_decommissioned:
+                    # Clean/expected decommissioning: rule was intentionally removed from SIEM
+                    r["status"] = "decommissioned"
+                    r["is_decommissioned"] = True
+                    r["detail"] = f"Decommissioned (hunt_status={lifecycle.get('status')})"
+                    decommissioned_count += 1
+                    hunt_decommissioned.append(r)
+                else:
+                    missing_count += 1
+                    hunt_missing.append(r)
+            elif status == "in_sync" or (dry_run and status == "dry_run"):
+                if is_retired:
+                    # Anomaly: Hunt is marked retired in git, but Saved Search is still active in SIEM!
+                    r["status"] = "pending_decommission"
+                    r["detail"] = "Hunt retired in git, but rule is still active on remote SIEM"
+                    pending_decommission_count += 1
+                    hunt_pending.append(r)
+                else:
+                    in_sync_count += 1
             elif status == "drift_detected":
-                drifted_count += 1
-                hunt_drifted.append(r)
-            elif status == "missing_remote":
-                missing_count += 1
-                hunt_missing.append(r)
+                if is_retired:
+                    r["status"] = "pending_decommission"
+                    r["detail"] = "Hunt retired in git, but rule is still active on remote SIEM"
+                    pending_decommission_count += 1
+                    hunt_pending.append(r)
+                else:
+                    drifted_count += 1
+                    hunt_drifted.append(r)
             elif status == "error":
                 error_count += 1
 
@@ -96,17 +177,26 @@ def audit_workspace_queries(
             drifted_by_hunt[hunt_id] = hunt_drifted
         if hunt_missing:
             missing_by_hunt[hunt_id] = hunt_missing
+        if hunt_decommissioned:
+            decommissioned_by_hunt[hunt_id] = hunt_decommissioned
+        if hunt_pending:
+            pending_decommission_by_hunt[hunt_id] = hunt_pending
 
     report = {
         "total_hunts": len(all_hunts),
         "total_queries": total_queries,
         "in_sync_count": in_sync_count,
+        "decommissioned_count": decommissioned_count,
+        "pending_decommission_count": pending_decommission_count,
         "drifted_count": drifted_count,
         "missing_count": missing_count,
         "error_count": error_count,
         "hunts": all_hunts,
         "drifted_by_hunt": drifted_by_hunt,
         "missing_by_hunt": missing_by_hunt,
+        "decommissioned_by_hunt": decommissioned_by_hunt,
+        "pending_decommission_by_hunt": pending_decommission_by_hunt,
+        "hunt_lifecycles": hunt_lifecycles,
         "audited_at": datetime.now(UTC).isoformat(),
         "dry_run": dry_run,
     }
@@ -161,6 +251,12 @@ def reconcile_hunt_queries(
         ".eql": "elastic_eql",
     }
 
+    # First check hunt lifecycle: if retired, do not reconcile
+    lifecycle = get_hunt_lifecycle(workspace, hunt_id)
+    if lifecycle.get("is_retired"):
+        log.info("Skipping reconciliation for retired hunt %s", hunt_id)
+        return []
+
     # First discover current sync status unless forcing complete re-deploy
     current_sync = sync_queries_for_hunt(workspace, hunt_id, dry_run=dry_run, target=target)
     sync_map = {f"{item['file']}:{item['target']}": item for item in current_sync}
@@ -179,7 +275,7 @@ def reconcile_hunt_queries(
         prev_status = current.get("status") if current else "unknown"
 
         # Only reconcile if drifted, missing, or force is requested
-        if not force and prev_status in {"in_sync", "dry_run"}:
+        if not force and prev_status in {"in_sync", "dry_run", "decommissioned"}:
             continue
 
         q_text = q_file.read_text(encoding="utf-8").strip()
@@ -287,6 +383,164 @@ def reconcile_all_drifted_queries(
     }
 
 
+def decommission_hunt_queries(
+    workspace: Path,
+    hunt_id: str,
+    dry_run: bool = True,
+    target: str | None = None,
+    reason: str = "Decommissioned via Query Lifecycle Management",
+    actor: str = "analyst",
+    retire_hunt: bool = False,
+) -> dict[str, Any]:
+    """Decommission and undeploy queries for a hunt from target SIEM/EDR platforms.
+
+    Updates query version state to 'decommissioned', records decommissioning provenance
+    and sign-off in drift_events, and optionally transitions the hunt lifecycle in frontmatter
+    to 'retired'.
+
+    Args:
+        workspace: Path to the root Hecate workspace.
+        hunt_id: Hunt identifier (e.g. 'H-0011') or 'all'.
+        dry_run: When True, simulates the undeployment and database update.
+        target: Optional platform filter (e.g. 'splunk_spl').
+        reason: Analyst rationale for decommissioning.
+        actor: Analyst or system signing off on decommissioning.
+        retire_hunt: If True, marks the hunt frontmatter lifecycle as 'retired'.
+
+    Returns:
+        Structured decommissioning summary dict.
+    """
+    queries_root = workspace / "queries"
+    if hunt_id.lower() == "all":
+        hunts = sorted([d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")])
+    else:
+        hunts = [hunt_id]
+
+    all_results: list[dict[str, Any]] = []
+    total_queries = 0
+    total_decommissioned = 0
+    now_iso = datetime.now(UTC).isoformat()
+
+    conn = init_drift_db(workspace)
+    try:
+        for h_id in hunts:
+            if retire_hunt:
+                try:
+                    set_hunt_lifecycle(
+                        workspace=workspace,
+                        hunt_id=h_id,
+                        new_status="retired",
+                        reason=reason,
+                        actor=actor,
+                    )
+                except Exception as exc:
+                    log.warning("Could not update lifecycle to retired for %s: %s", h_id, exc)
+
+            undeployments = undeploy_queries_for_hunt(
+                workspace=workspace,
+                hunt_id=h_id,
+                dry_run=dry_run,
+                target=target,
+            )
+
+            for res in undeployments:
+                total_queries += 1
+                f_name = str(res.get("file", ""))
+                tgt = str(res.get("target", "unknown")).lower()
+                rem_id = str(res.get("remote_id") or "")
+                ok = res.get("ok", False)
+
+                if ok:
+                    total_decommissioned += 1
+
+                res_record = {
+                    "hunt_id": h_id,
+                    "file": f_name,
+                    "target": tgt,
+                    "remote_id": rem_id,
+                    "status": res.get("status"),
+                    "ok": ok,
+                    "detail": res.get("detail", ""),
+                    "reason": reason,
+                    "actor": actor,
+                    "retired_hunt": retire_hunt,
+                }
+                all_results.append(res_record)
+
+                if not dry_run and ok:
+                    with conn:
+                        # Mark existing query version as decommissioned
+                        cur = conn.execute(
+                            """
+                            UPDATE query_versions
+                            SET status = 'decommissioned'
+                            WHERE hunt_id = ? AND LOWER(target) = ? AND file_name = ?
+                            """,
+                            (h_id, tgt, f_name),
+                        )
+                        if cur.rowcount == 0:
+                            # Record baseline row if not tracked before
+                            conn.execute(
+                                """
+                                INSERT INTO query_versions (
+                                    hunt_id, target, file_name, remote_id, version,
+                                    query_hash, query_content, deployed_at, deployed_by, status
+                                ) VALUES (?, ?, ?, ?, 1, '', '', ?, ?, 'decommissioned')
+                                """,
+                                (h_id, tgt, f_name, rem_id, now_iso, actor),
+                            )
+
+                        # Insert decommission event into drift_events
+                        conn.execute(
+                            """
+                            INSERT INTO drift_events (
+                                sweep_id, timestamp, hunt_id, target, file_name,
+                                remote_id, event_type, previous_status, new_status,
+                                local_query, remote_query, drift_diff, detail, actor
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                None,
+                                now_iso,
+                                h_id,
+                                tgt,
+                                f_name,
+                                rem_id,
+                                "decommissioned",
+                                "active",
+                                "decommissioned",
+                                None,
+                                None,
+                                None,
+                                f"Decommissioned: {reason}",
+                                actor,
+                            ),
+                        )
+    finally:
+        conn.close()
+
+    summary = {
+        "hunt_id": hunt_id,
+        "total_hunts": len(hunts),
+        "total_queries": total_queries,
+        "total_decommissioned": total_decommissioned,
+        "dry_run": dry_run,
+        "reason": reason,
+        "actor": actor,
+        "retired_hunt": retire_hunt,
+        "decommissioned_at": now_iso,
+        "results": all_results,
+    }
+
+    # Refresh audit state cache
+    try:
+        audit_workspace_queries(workspace, target=target, dry_run=dry_run, trigger=f"decommission:{actor}")
+    except Exception as exc:
+        log.warning("Could not refresh drift state after decommissioning: %s", exc)
+
+    return summary
+
+
 def save_drift_state(workspace: Path, state_data: dict[str, Any]) -> Path:
     """Persist latest drift audit state cache under .hecate/siem/drift_state.json."""
     cache_path = workspace / ".hecate" / "siem" / "drift_state.json"
@@ -325,6 +579,7 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
                 total_hunts INTEGER NOT NULL,
                 total_queries INTEGER NOT NULL,
                 in_sync_count INTEGER NOT NULL,
+                decommissioned_count INTEGER NOT NULL DEFAULT 0,
                 drifted_count INTEGER NOT NULL,
                 missing_count INTEGER NOT NULL,
                 error_count INTEGER NOT NULL,
@@ -374,6 +629,14 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_query_versions_lookup ON query_versions(hunt_id, target, file_name);
             """
         )
+
+    # Backwards-compatible schema migration
+    try:
+        with conn:
+            conn.execute("ALTER TABLE audit_sweeps ADD COLUMN decommissioned_count INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     return conn
 
 
@@ -383,7 +646,7 @@ def record_audit_sweep(
     trigger: str = "cli",
     target_filter: str | None = None,
 ) -> int:
-    """Record an audit sweep and associated drift/missing events into SQLite history."""
+    """Record an audit sweep and associated drift/missing/decommission events into SQLite history."""
     conn = init_drift_db(workspace)
     now_iso = report.get("audited_at") or datetime.now(UTC).isoformat()
     try:
@@ -392,14 +655,15 @@ def record_audit_sweep(
                 """
                 INSERT INTO audit_sweeps (
                     timestamp, total_hunts, total_queries, in_sync_count,
-                    drifted_count, missing_count, error_count, dry_run, target, trigger
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    decommissioned_count, drifted_count, missing_count, error_count, dry_run, target, trigger
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now_iso,
                     report.get("total_hunts", 0),
                     report.get("total_queries", 0),
                     report.get("in_sync_count", 0),
+                    report.get("decommissioned_count", 0),
                     report.get("drifted_count", 0),
                     report.get("missing_count", 0),
                     report.get("error_count", 0),
@@ -464,6 +728,35 @@ def record_audit_sweep(
                             None,
                             None,
                             item.get("detail"),
+                            trigger,
+                        ),
+                    )
+
+            pending_by_hunt = report.get("pending_decommission_by_hunt", {})
+            for hunt_id, items in pending_by_hunt.items():
+                for item in items:
+                    conn.execute(
+                        """
+                        INSERT INTO drift_events (
+                            sweep_id, timestamp, hunt_id, target, file_name,
+                            remote_id, event_type, previous_status, new_status,
+                            local_query, remote_query, drift_diff, detail, actor
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            sweep_id,
+                            now_iso,
+                            hunt_id,
+                            item.get("target", "unknown"),
+                            item.get("file", ""),
+                            item.get("remote_id"),
+                            "pending_decommission",
+                            "active",
+                            "pending_decommission",
+                            item.get("local_query"),
+                            item.get("remote_query"),
+                            item.get("drift_diff"),
+                            item.get("detail", "Hunt retired but rule active on SIEM"),
                             trigger,
                         ),
                     )
@@ -686,6 +979,7 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
                     COUNT(CASE WHEN event_type = 'drift_detected' THEN 1 END) as drift_count,
                     COUNT(CASE WHEN event_type = 'missing_remote' THEN 1 END) as missing_count,
                     COUNT(CASE WHEN event_type = 'reconciled' THEN 1 END) as reconciled_count,
+                    COUNT(CASE WHEN event_type = 'decommissioned' THEN 1 END) as decommissioned_count,
                     COUNT(CASE WHEN event_type = 'deploy_failed' THEN 1 END) as failed_count,
                     COUNT(*) as total_events
                 FROM drift_events
@@ -731,6 +1025,8 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
 
     total_queries = 0
     in_sync_count = 0
+    decommissioned_count = 0
+    pending_decommission_count = 0
     drifted_count = 0
     missing_count = 0
     sync_pct = 100.0
@@ -739,23 +1035,31 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
     if latest_sweep:
         total_queries = latest_sweep.get("total_queries", 0)
         in_sync_count = latest_sweep.get("in_sync_count", 0)
+        decommissioned_count = latest_sweep.get("decommissioned_count", 0)
         drifted_count = latest_sweep.get("drifted_count", 0)
         missing_count = latest_sweep.get("missing_count", 0)
         last_audited = latest_sweep.get("timestamp", "")
     elif cached_state:
         total_queries = cached_state.get("total_queries", 0)
         in_sync_count = cached_state.get("in_sync_count", 0)
+        decommissioned_count = cached_state.get("decommissioned_count", 0)
+        pending_decommission_count = cached_state.get("pending_decommission_count", 0)
         drifted_count = cached_state.get("drifted_count", 0)
         missing_count = cached_state.get("missing_count", 0)
         last_audited = cached_state.get("audited_at", "")
 
+    active_queries = max(1, total_queries - decommissioned_count)
     if total_queries > 0:
-        sync_pct = (in_sync_count / total_queries) * 100.0
+        sync_pct = (in_sync_count / active_queries) * 100.0
+        if sync_pct > 100.0:
+            sync_pct = 100.0
 
     return {
         "sync_health_pct": round(sync_pct, 1),
         "total_queries": total_queries,
         "in_sync_count": in_sync_count,
+        "decommissioned_count": decommissioned_count,
+        "pending_decommission_count": pending_decommission_count,
         "drifted_count": drifted_count,
         "missing_count": missing_count,
         "last_audited": last_audited,
@@ -763,6 +1067,7 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
         "sweeps_conducted": sweeps_count,
         "drift_incidents_period": events_stats["drift_count"] if events_stats else 0,
         "reconciliations_period": events_stats["reconciled_count"] if events_stats else 0,
+        "decommissions_period": events_stats["decommissioned_count"] if events_stats else 0,
         "failed_reconciliations_period": events_stats["failed_count"] if events_stats else 0,
         "tracked_query_versions": versions_count,
         "target_drift_breakdown": target_map,
@@ -782,17 +1087,24 @@ def build_siem_markdown_report(
     total_h = report.get("total_hunts", 0)
     total_q = report.get("total_queries", 0)
     in_sync = report.get("in_sync_count", 0)
+    decommissioned = report.get("decommissioned_count", 0)
+    pending_decom = report.get("pending_decommission_count", 0)
     drifted = report.get("drifted_count", 0)
     missing = report.get("missing_count", 0)
     errors = report.get("error_count", 0)
     dry_run = report.get("dry_run", True)
     audited_at = str(report.get("audited_at") or datetime.now(UTC).isoformat())
 
-    sync_pct = round((in_sync / total_q) * 100.0, 1) if total_q > 0 else 100.0
+    active_q = max(1, total_q - decommissioned)
+    sync_pct = round((in_sync / active_q) * 100.0, 1) if total_q > 0 else 100.0
+    if sync_pct > 100.0:
+        sync_pct = 100.0
     mode_str = "Simulated (Dry-Run)" if dry_run else "Live SIEM API"
 
     if drifted > 0:
         badge = f"⚠️ **DRIFT DETECTED** ({drifted} query{'s' if drifted != 1 else ''})"
+    elif pending_decom > 0:
+        badge = f"⚠️ **DECOMMISSION PENDING** ({pending_decom} query{'s' if pending_decom != 1 else ''})"
     elif missing > 0:
         badge = f"⚠️ **MISSING ON REMOTE** ({missing} query{'s' if missing != 1 else ''})"
     elif errors > 0:
@@ -814,6 +1126,8 @@ def build_siem_markdown_report(
         f"| **Total Hunts** | `{total_h}` | Monitored threat hunts |",
         f"| **Total Queries** | `{total_q}` | Transpiled query files |",
         f"| **In Sync** | `{in_sync}` | `{sync_pct}%` matching git HEAD |",
+        f"| **Decommissioned** | `{decommissioned}` | Cleanly decommissioned/archived |",
+        f"| **Pending Decommission** | `{pending_decom}` | {'⚠️ Active query on remote for retired hunt' if pending_decom > 0 else '🟢 None'} |",
         f"| **Drifted** | `{drifted}` | {'⚠️ Needs reconciliation' if drifted > 0 else '🟢 Zero drift'} |",
         f"| **Missing on Remote** | `{missing}` | {'⚠️ Unindexed on target SIEM' if missing > 0 else '🟢 All deployed'} |",
         f"| **Errors** | `{errors}` | {'❌ API or transpilation error' if errors > 0 else '🟢 None'} |",
@@ -826,10 +1140,12 @@ def build_siem_markdown_report(
             tgt = str(res.get("target") or "unknown")
             st = str(res.get("status") or "unknown")
             if tgt not in target_counts:
-                target_counts[tgt] = {"total": 0, "in_sync": 0, "drifted": 0, "missing": 0, "error": 0}
+                target_counts[tgt] = {"total": 0, "in_sync": 0, "decommissioned": 0, "drifted": 0, "missing": 0, "error": 0}
             target_counts[tgt]["total"] += 1
             if st == "in_sync":
                 target_counts[tgt]["in_sync"] += 1
+            elif st == "decommissioned":
+                target_counts[tgt]["decommissioned"] += 1
             elif st == "drift_detected":
                 target_counts[tgt]["drifted"] += 1
             elif st == "missing_remote":
@@ -841,20 +1157,39 @@ def build_siem_markdown_report(
         lines.extend([
             "### 🎯 Target Platform Breakdown",
             "",
-            "| Target Backend | Total Queries | In Sync | Drifted | Missing | Health |",
-            "| :--- | :---: | :---: | :---: | :---: | :--- |",
+            "| Target Backend | Total Queries | In Sync | Decommissioned | Drifted | Missing | Health |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
         ])
         for tgt, counts in sorted(target_counts.items()):
-            h_pct = round((counts["in_sync"] / counts["total"]) * 100, 1) if counts["total"] > 0 else 100.0
+            active_tgt = max(1, counts["total"] - counts["decommissioned"])
+            h_pct = round((counts["in_sync"] / active_tgt) * 100, 1) if active_tgt > 0 else 100.0
             if counts["drifted"] > 0:
                 h_badge = "🔴 Drifted"
             elif counts["missing"] > 0:
                 h_badge = "🟡 Missing"
             else:
-                h_badge = "🟢 100% In Sync"
+                h_badge = "🟢 In Sync"
             lines.append(
-                f"| `{tgt}` | `{counts['total']}` | `{counts['in_sync']}` | `{counts['drifted']}` | `{counts['missing']}` | {h_badge} (`{h_pct}%`) |"
+                f"| `{tgt}` | `{counts['total']}` | `{counts['in_sync']}` | `{counts['decommissioned']}` | `{counts['drifted']}` | `{counts['missing']}` | {h_badge} (`{h_pct}%`) |"
             )
+        lines.append("")
+
+    pending_by_hunt = report.get("pending_decommission_by_hunt", {})
+    if pending_by_hunt:
+        lines.extend([
+            "### ⚠️ Pending Remote Decommissioning (Retired Hunts with Active Queries)",
+            "",
+            "> ⚠️ *The following queries belong to retired hunts but remain active on remote SIEM consoles:*",
+            "",
+        ])
+        for hunt_id, res_list in sorted(pending_by_hunt.items()):
+            for res in res_list:
+                file_name = res.get("file", "")
+                tgt = res.get("target", "")
+                remote_id = res.get("remote_id", "")
+                lines.append(
+                    f"- ⚠️ **{hunt_id} / {tgt}**: `{file_name}` (Remote ID: `{remote_id}`) — Run `hecate-runner decommission-queries {hunt_id} --live` to cleanly remove."
+                )
         lines.append("")
 
     drifted_by_hunt = report.get("drifted_by_hunt", {})

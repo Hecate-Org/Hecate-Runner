@@ -29,6 +29,18 @@ def mock_workspace(tmp_path: Path) -> Path:
     q_dir.mkdir(parents=True)
     (q_dir / "process__chmod.spl").write_text('Image="*/chmod"', encoding="utf-8")
     (q_dir / "process__chmod.kql").write_text("ProcessEvents | where Image has 'chmod'", encoding="utf-8")
+
+    h_dir = ws / "hunts" / "2026" / "Q4"
+    h_dir.mkdir(parents=True)
+    (h_dir / "H-0007.md").write_text(
+        "---\n"
+        "hunt_id: H-0007\n"
+        "title: 'Test Hunt for Chmod'\n"
+        "status: planning\n"
+        "---\n\n"
+        "# H-0007: Test Hunt\n",
+        encoding="utf-8",
+    )
     return ws
 
 
@@ -358,7 +370,7 @@ def test_build_siem_markdown_report_in_sync() -> None:
     assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in md
     assert "IN SYNC (100%)" in md
     assert "| **Total Hunts** | `2` |" in md
-    assert "| `splunk_spl` | `2` | `2` | `0` | `0` | 🟢 100% In Sync (`100.0%`) |" in md
+    assert "| `splunk_spl` | `2` | `2` | `0` | `0` | `0` | 🟢 In Sync (`100.0%`) |" in md
     assert "No active drift detected across targets." in md
 
 
@@ -455,4 +467,237 @@ def test_cli_deploy_queries_all(mock_workspace: Path) -> None:
         assert "SIEM & EDR Query Deployment (All Hunts)" in res.output
         assert summary_file.exists()
         assert "## 🚀 SIEM Detection-as-Code Deployment" in summary_file.read_text(encoding="utf-8")
+
+
+def test_hunt_lifecycle_transitions(mock_workspace: Path) -> None:
+    from hecate_runner.lifecycle import (
+        get_hunt_lifecycle,
+        normalize_lifecycle_state,
+        set_hunt_lifecycle,
+    )
+
+    assert normalize_lifecycle_state("active") == "active"
+    assert normalize_lifecycle_state("draft") == "planning"
+    assert normalize_lifecycle_state("archived") == "retired"
+    assert normalize_lifecycle_state("test") == "testing"
+
+    # Initial state of H-0007
+    lc = get_hunt_lifecycle(mock_workspace, "H-0007")
+    assert lc["found"] is True
+    assert lc["status"] in ("planning", "active")
+
+    # Transition to deprecated
+    dep_res = set_hunt_lifecycle(
+        mock_workspace,
+        "H-0007",
+        "deprecated",
+        reason="Superceded by H-0010",
+        actor="secops_lead",
+    )
+    assert dep_res["ok"] is True
+    assert dep_res["status"] == "deprecated"
+    assert dep_res["deprecation_reason"] == "Superceded by H-0010"
+    assert dep_res["deprecated_by"] == "secops_lead"
+    assert dep_res["deprecated_at"] is not None
+
+    # Transition to retired
+    ret_res = set_hunt_lifecycle(
+        mock_workspace,
+        "H-0007",
+        "retired",
+        reason="Decommissioning production rules",
+        actor="lead_hunter",
+    )
+    assert ret_res["ok"] is True
+    assert ret_res["status"] == "retired"
+    assert ret_res["retirement_reason"] == "Decommissioning production rules"
+    assert ret_res["retired_by"] == "lead_hunter"
+    assert ret_res["is_retired"] is True
+
+
+def test_decommission_hunt_queries(mock_workspace: Path) -> None:
+    import sqlite3
+    from hecate_runner.siem_drift import (
+        decommission_hunt_queries,
+        get_drift_db_path,
+        record_query_version,
+    )
+
+    # First record an active query version
+    record_query_version(
+        mock_workspace,
+        hunt_id="H-0007",
+        target="splunk_spl",
+        file_name="process__chmod.spl",
+        query_content='Image="*/chmod"',
+        remote_id="Hecate_H-0007_chmod",
+        deployed_by="ci",
+    )
+
+    # Run query decommissioning
+    res = decommission_hunt_queries(
+        mock_workspace,
+        hunt_id="H-0007",
+        dry_run=False,
+        target="splunk_spl",
+        reason="Threat actor dormant",
+        actor="analyst_alice",
+        retire_hunt=True,
+    )
+
+    assert res["total_decommissioned"] >= 1
+    assert res["retired_hunt"] is True
+
+    # Verify query_versions is updated to decommissioned
+    db_path = get_drift_db_path(mock_workspace)
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM query_versions WHERE hunt_id = 'H-0007' AND target = 'splunk_spl'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "decommissioned"
+
+        # Verify decommission event recorded in drift_events
+        ev = conn.execute(
+            "SELECT event_type, actor, detail FROM drift_events WHERE hunt_id = 'H-0007' AND event_type = 'decommissioned'"
+        ).fetchone()
+        assert ev is not None
+        assert ev[0] == "decommissioned"
+        assert ev[1] == "analyst_alice"
+        assert "Threat actor dormant" in ev[2]
+    finally:
+        conn.close()
+
+
+def test_audit_workspace_with_decommissioned_queries(mock_workspace: Path) -> None:
+    from unittest import mock
+    from hecate_runner.siem_drift import (
+        audit_workspace_queries,
+        build_siem_markdown_report,
+        decommission_hunt_queries,
+    )
+
+    # Decommission H-0007 and retire hunt
+    decommission_hunt_queries(
+        mock_workspace,
+        hunt_id="H-0007",
+        dry_run=False,
+        target="splunk_spl",
+        reason="Campaign concluded",
+        actor="analyst_bob",
+        retire_hunt=True,
+    )
+
+    # Mock sync check to simulate that the remote query is now missing from SIEM
+    with mock.patch("hecate_runner.siem_drift.sync_queries_for_hunt") as mock_sync:
+        mock_sync.return_value = [
+            {
+                "file": "process__chmod.spl",
+                "target": "splunk_spl",
+                "status": "missing_remote",
+                "ok": False,
+                "remote_id": "Hecate_H-0007_chmod",
+                "detail": "Rule not found on remote SIEM",
+            }
+        ]
+
+        report = audit_workspace_queries(mock_workspace, target="splunk_spl", dry_run=False)
+
+        # Because hunt is retired / decommissioned, missing_remote is recognized as decommissioned!
+        assert report["decommissioned_count"] == 1
+        assert report["missing_count"] == 0
+        assert report["drifted_count"] == 0
+
+        h_queries = report["hunts"]["H-0007"]
+        assert h_queries[0]["status"] == "decommissioned"
+        assert h_queries[0]["is_decommissioned"] is True
+
+        md = build_siem_markdown_report(report)
+        assert "| **Decommissioned** | `1` |" in md
+        assert "✅ **IN SYNC (100%)**" in md
+
+
+def test_audit_workspace_pending_decommission(mock_workspace: Path) -> None:
+    from unittest import mock
+    from hecate_runner.lifecycle import set_hunt_lifecycle
+    from hecate_runner.siem_drift import audit_workspace_queries, build_siem_markdown_report
+
+    # Retire the hunt in git
+    set_hunt_lifecycle(mock_workspace, "H-0007", "retired", reason="Retiring", actor="lead")
+
+    # Remote SIEM still has the rule running (in_sync)
+    with mock.patch("hecate_runner.siem_drift.sync_queries_for_hunt") as mock_sync:
+        mock_sync.return_value = [
+            {
+                "file": "process__chmod.spl",
+                "target": "splunk_spl",
+                "status": "in_sync",
+                "ok": True,
+                "remote_id": "Hecate_H-0007_chmod",
+                "detail": "Search exists on remote SIEM",
+            }
+        ]
+
+        report = audit_workspace_queries(mock_workspace, target="splunk_spl", dry_run=False)
+
+        assert report["pending_decommission_count"] == 1
+        assert report["in_sync_count"] == 0
+        h_queries = report["hunts"]["H-0007"]
+        assert h_queries[0]["status"] == "pending_decommission"
+
+        md = build_siem_markdown_report(report)
+        assert "⚠️ **DECOMMISSION PENDING**" in md
+        assert "Pending Remote Decommissioning" in md
+
+
+def test_cli_decommission_and_lifecycle(mock_workspace: Path) -> None:
+    from typer.testing import CliRunner
+    from hecate_runner.cli import app
+    from unittest import mock
+
+    runner = CliRunner()
+    summary_file = mock_workspace / "decom_summary.md"
+
+    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace), "GITHUB_STEP_SUMMARY": str(summary_file)}):
+        # View lifecycle
+        res_view = runner.invoke(app, ["hunt-lifecycle", "H-0007"])
+        assert res_view.exit_code == 0
+        assert "Hunt Lifecycle Metadata: H-0007" in res_view.output
+
+        # Update lifecycle to deprecated
+        res_dep = runner.invoke(
+            app,
+            [
+                "hunt-lifecycle",
+                "H-0007",
+                "deprecated",
+                "--reason",
+                "Under migration",
+                "--actor",
+                "eng_dan",
+            ],
+        )
+        assert res_dep.exit_code == 0
+        assert "deprecated" in res_dep.output
+
+        # Decommission queries
+        res_decom = runner.invoke(
+            app,
+            [
+                "decommission-queries",
+                "H-0007",
+                "--dry-run",
+                "--reason",
+                "Decommissioning for sprint end",
+                "--actor",
+                "eng_dan",
+                "--github-step-summary",
+            ],
+        )
+        assert res_decom.exit_code == 0
+        assert "SIEM Detection Query Decommissioning" in res_decom.output
+        assert summary_file.exists()
+        assert "SIEM Detection Query Decommissioning" in summary_file.read_text(encoding="utf-8")
+
 

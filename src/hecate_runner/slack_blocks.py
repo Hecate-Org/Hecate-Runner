@@ -946,8 +946,12 @@ def build_siem_drift_alert_card(
     interactive: bool = True,
 ) -> list[dict[str, Any]]:
     """Build an interactive alert card notifying analysts of query drift or missing rules."""
+    active_drifted = [q for q in drifted_queries if q.get("status") != "decommissioned"]
+    if not active_drifted:
+        return []
+
     query_lines = []
-    for q in drifted_queries[:5]:
+    for q in active_drifted[:5]:
         tgt = q.get("target", "unknown")
         fname = q.get("file", "")
         st = q.get("status", "drift_detected")
@@ -962,8 +966,8 @@ def build_siem_drift_alert_card(
             line += "\n  • " + " | ".join(diff_preview)
         query_lines.append(line)
 
-    if len(drifted_queries) > 5:
-        query_lines.append(f"_...and {len(drifted_queries) - 5} more query(s)_")
+    if len(active_drifted) > 5:
+        query_lines.append(f"_...and {len(active_drifted) - 5} more query(s)_")
 
     body_text = (
         f"🚨 *SIEM Detection Drift Detected for `{hunt_id}`*\n\n"
@@ -1038,6 +1042,7 @@ def build_siem_status_card(
     total_q = metrics.get("total_queries", 0)
     drifted = metrics.get("drifted_count", 0)
     missing = metrics.get("missing_count", 0)
+    decommissioned = metrics.get("decommissioned_count", 0)
     versions = metrics.get("tracked_query_versions", 0)
     sweeps = metrics.get("sweeps_conducted", 0)
     reconciled = metrics.get("reconciliations_period", 0)
@@ -1057,9 +1062,17 @@ def build_siem_status_card(
         tgt = evt.get("target", "")
         ev_type = evt.get("event_type", "")
         actor = evt.get("actor", "system")
-        icon = "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+        icon = (
+            "✅"
+            if ev_type == "reconciled"
+            else ("🧹" if ev_type == "decommissioned" else ("⚠️" if ev_type == "drift_detected" else "ℹ️"))
+        )
         recent_rows.append(f"{icon} `{ts}` *{h_id}* ({tgt}): `{ev_type}` by `{actor}`")
     timeline_text = "\n".join(recent_rows) if recent_rows else "No recent drift/reconciliation events."
+
+    drift_missing_text = f"`{drifted}` drifted, `{missing}` missing"
+    if decommissioned:
+        drift_missing_text += f", `{decommissioned}` decommissioned"
 
     blocks: list[dict[str, Any]] = [
         {
@@ -1079,7 +1092,7 @@ def build_siem_status_card(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Drifted / Missing:*\n`{drifted}` drifted, `{missing}` missing",
+                    "text": f"*Drifted / Missing:*\n{drift_missing_text}",
                 },
                 {
                     "type": "mrkdwn",
