@@ -19,6 +19,8 @@ def test_build_slash_help_card():
     assert "/hecate status" in text
     assert "/hecate hunt" in text
     assert "/hecate deploy" in text
+    assert "/hecate undeploy" in text
+    assert "/hecate sync" in text
     assert "/hecate rerun" in text
 
 

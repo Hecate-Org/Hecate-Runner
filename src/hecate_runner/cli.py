@@ -873,6 +873,182 @@ def deploy_queries_cmd(
                 console.print_json(data=summary)
 
 
+@app.command("undeploy-queries")
+def undeploy_queries_cmd(
+    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0868) to undeploy queries for.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--live", help="Simulate undeployment (default) or delete live via API."
+        ),
+    ] = True,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Specific target platform (e.g. sentinel_kql, splunk_spl)."),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v", help="Show full HTTP request summaries."
+        ),
+    ] = False,
+) -> None:
+    """Undeploy/delete hunt queries from target SIEM and EDR platforms."""
+    settings = Settings()
+    query_dir = settings.hecate_workspace / "queries" / hunt_id
+    if not query_dir.exists():
+        console.print(f"[red]Query directory not found:[/red] {query_dir}")
+        raise typer.Exit(code=1)
+
+    from hecate_runner.slack_bot import undeploy_queries_for_hunt
+
+    table = Table(
+        title=f"SIEM & EDR Query Undeployment for {hunt_id}",
+        show_header=True,
+        header_style="bold red",
+    )
+    table.add_column("File")
+    table.add_column("Target")
+    table.add_column("Status")
+    table.add_column("Remote ID")
+    table.add_column("Detail")
+
+    undeployments = undeploy_queries_for_hunt(
+        settings.hecate_workspace,
+        hunt_id,
+        dry_run=dry_run,
+        target=target,
+    )
+    undeployed_count = 0
+    for res in undeployments:
+        status = res.get("status", "")
+        if status in {"undeployed", "not_found", "dry_run"}:
+            status_color = "green" if status == "undeployed" else ("cyan" if status == "not_found" else "blue")
+        else:
+            status_color = "red"
+        table.add_row(
+            str(res.get("file", "")),
+            str(res.get("target", "")),
+            f"[{status_color}]{status}[/{status_color}]",
+            str(res.get("remote_id") or ""),
+            str(res.get("detail", "")),
+        )
+        if res.get("ok"):
+            undeployed_count += 1
+
+    console.print(table)
+    mode_str = "simulated (dry-run)" if dry_run else "live"
+    console.print(f"[bold]{undeployed_count}[/bold] query(s) processed in {mode_str} mode.")
+
+    if verbose:
+        for res in undeployments:
+            summary = res.get("request_summary")
+            if summary:
+                console.print(
+                    f"\n[bold red]── Teardown Contract: {res.get('target')} ({res.get('file')}) ──[/bold red]"
+                )
+                console.print_json(data=summary)
+
+
+@app.command("sync-queries")
+def sync_queries_cmd(
+    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0868) to sync check queries for.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--live", help="Simulate sync check (default) or query live SIEM."
+        ),
+    ] = True,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Specific target platform (e.g. sentinel_kql, splunk_spl)."),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v", help="Show query drift diffs and full summaries."
+        ),
+    ] = False,
+) -> None:
+    """Check synchronization and detect query drift against target SIEM and EDR platforms."""
+    settings = Settings()
+    query_dir = settings.hecate_workspace / "queries" / hunt_id
+    if not query_dir.exists():
+        console.print(f"[red]Query directory not found:[/red] {query_dir}")
+        raise typer.Exit(code=1)
+
+    from hecate_runner.slack_bot import sync_queries_for_hunt
+
+    table = Table(
+        title=f"SIEM & EDR Query Synchronization & Drift for {hunt_id}",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("File")
+    table.add_column("Target")
+    table.add_column("Status")
+    table.add_column("Remote ID")
+    table.add_column("Detail")
+
+    syncs = sync_queries_for_hunt(
+        settings.hecate_workspace,
+        hunt_id,
+        dry_run=dry_run,
+        target=target,
+    )
+    in_sync_count = 0
+    drift_count = 0
+    missing_count = 0
+
+    for res in syncs:
+        status = res.get("status", "")
+        if status in {"in_sync", "dry_run"}:
+            status_color = "green" if status == "in_sync" else "blue"
+            if status == "in_sync":
+                in_sync_count += 1
+        elif status == "drift_detected":
+            status_color = "yellow"
+            drift_count += 1
+        elif status == "missing_remote":
+            status_color = "magenta"
+            missing_count += 1
+        else:
+            status_color = "red"
+
+        table.add_row(
+            str(res.get("file", "")),
+            str(res.get("target", "")),
+            f"[{status_color}]{status}[/{status_color}]",
+            str(res.get("remote_id") or ""),
+            str(res.get("detail", "")),
+        )
+
+    console.print(table)
+    mode_str = "simulated (dry-run)" if dry_run else "live"
+    console.print(
+        f"[bold]{len(syncs)}[/bold] query(s) evaluated in {mode_str} mode "
+        f"([green]{in_sync_count} in sync[/green], "
+        f"[yellow]{drift_count} drifted[/yellow], "
+        f"[magenta]{missing_count} missing[/magenta])."
+    )
+
+    if verbose or drift_count > 0:
+        for res in syncs:
+            drift_diff = res.get("drift_diff")
+            if drift_diff:
+                console.print(
+                    f"\n[bold yellow]── Query Drift Detected: {res.get('target')} ({res.get('file')}) ──[/bold yellow]"
+                )
+                console.print(drift_diff)
+            elif verbose:
+                summary = res.get("request_summary")
+                if summary:
+                    console.print(
+                        f"\n[bold cyan]── Sync Request: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
+                    )
+                    console.print_json(data=summary)
+
+
 # --- BAS Commands ----------------------------------------------------------
 app.command("bas-check")(bas_check_cmd)
 app.command("bas-install-procedures")(bas_install_procedures_cmd)

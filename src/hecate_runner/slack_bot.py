@@ -84,6 +84,135 @@ def deploy_queries_for_hunt(
     return results
 
 
+def undeploy_queries_for_hunt(
+    workspace: Path,
+    hunt_id: str,
+    dry_run: bool = True,
+    target: str | None = None,
+) -> list[dict[str, Any]]:
+    """Undeploy or simulate teardown of hunt queries from target SIEM/EDR platforms."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+        load_dotenv(workspace / ".env", override=False)
+    except ImportError:
+        pass
+
+    query_dir = workspace / "queries" / hunt_id
+    if not query_dir.exists():
+        log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
+        return []
+
+    from hecate_agent.api import undeploy_transpiled_query
+
+    query_exts = {
+        ".kql": "sentinel_kql",
+        ".cql": "crowdstrike_cql",
+        ".leql": "rapid7_leql",
+        ".s1ql": "sentinelone_s1ql",
+        ".spl": "splunk_spl",
+        ".eql": "elastic_eql",
+    }
+
+    results: list[dict[str, Any]] = []
+    for q_file in sorted(query_dir.iterdir()):
+        tgt = query_exts.get(q_file.suffix.lower())
+        if not tgt:
+            continue
+        if target and target.lower() != tgt.lower():
+            continue
+
+        q_text = q_file.read_text(encoding="utf-8").strip()
+        title = q_file.stem.replace("__", " - ").replace("_", " ").title()
+        res = undeploy_transpiled_query(
+            target=tgt,
+            hunt_id=hunt_id,
+            title=title,
+            query=q_text,
+            dry_run=dry_run,
+        )
+        results.append(
+            {
+                "file": q_file.name,
+                "target": tgt,
+                "status": res.get("status"),
+                "ok": res.get("ok", False),
+                "remote_id": res.get("remote_id"),
+                "detail": res.get("detail", ""),
+                "request_summary": res.get("request_summary", {}),
+            }
+        )
+
+    return results
+
+
+def sync_queries_for_hunt(
+    workspace: Path,
+    hunt_id: str,
+    dry_run: bool = True,
+    target: str | None = None,
+) -> list[dict[str, Any]]:
+    """Verify synchronization and detect drift for hunt queries against target SIEM/EDR."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+        load_dotenv(workspace / ".env", override=False)
+    except ImportError:
+        pass
+
+    query_dir = workspace / "queries" / hunt_id
+    if not query_dir.exists():
+        log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
+        return []
+
+    from hecate_agent.api import sync_transpiled_query
+
+    query_exts = {
+        ".kql": "sentinel_kql",
+        ".cql": "crowdstrike_cql",
+        ".leql": "rapid7_leql",
+        ".s1ql": "sentinelone_s1ql",
+        ".spl": "splunk_spl",
+        ".eql": "elastic_eql",
+    }
+
+    results: list[dict[str, Any]] = []
+    for q_file in sorted(query_dir.iterdir()):
+        tgt = query_exts.get(q_file.suffix.lower())
+        if not tgt:
+            continue
+        if target and target.lower() != tgt.lower():
+            continue
+
+        q_text = q_file.read_text(encoding="utf-8").strip()
+        title = q_file.stem.replace("__", " - ").replace("_", " ").title()
+        res = sync_transpiled_query(
+            target=tgt,
+            query=q_text,
+            hunt_id=hunt_id,
+            title=title,
+            dry_run=dry_run,
+        )
+        results.append(
+            {
+                "file": q_file.name,
+                "target": tgt,
+                "status": res.get("status"),
+                "ok": res.get("ok", False),
+                "remote_id": res.get("remote_id"),
+                "detail": res.get("detail", ""),
+                "local_query": res.get("local_query", ""),
+                "remote_query": res.get("remote_query"),
+                "drift_diff": res.get("drift_diff"),
+                "request_summary": res.get("request_summary", {}),
+            }
+        )
+
+    return results
+
+
 def promote_hunt(workspace: Path, hunt_id: str) -> dict[str, Any]:
     """Promote a planning hunt to active status in the workspace."""
     matches = sorted((workspace / "hunts").glob(f"**/{hunt_id}.md"))
@@ -452,6 +581,96 @@ class SlackBotService:
                 rows_text = "\n".join(rows)
                 msg = (
                     f"🔍 *SIEM & EDR Query Deployment for `{hunt_id}`*\n"
+                    f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_id}>\n\n"
+                    f"{rows_text}"
+                )
+                respond(text=msg)
+                return
+
+            if subcmd == "undeploy":
+                if len(tokens) < 2:
+                    respond(
+                        text=(
+                            "⚠️ *Usage:* `/hecate undeploy <hunt_id> [target]`\n"
+                            "• Example: `/hecate undeploy H-0868`\n"
+                            "• Example: `/hecate undeploy H-0868 splunk_spl`"
+                        )
+                    )
+                    return
+
+                hunt_id = tokens[1].upper()
+                target = tokens[2].lower() if len(tokens) > 2 else None
+                is_dry_run = getattr(self.settings, "siem_deploy_dry_run", True)
+                mode_str = "Simulated (Dry-Run)" if is_dry_run else "Live Teardown"
+
+                undeployments = undeploy_queries_for_hunt(
+                    self.settings.hecate_workspace,
+                    hunt_id,
+                    dry_run=is_dry_run,
+                    target=target,
+                )
+                if not undeployments:
+                    respond(text=f"⚠️ *No queries found for `{hunt_id}`* under `queries/{hunt_id}`.")
+                    return
+
+                rows = []
+                for d in undeployments:
+                    icon = "✅" if d.get("ok") else "❌"
+                    tgt = d.get("target")
+                    st = d.get("status")
+                    rem_id = f" (`{d.get('remote_id')}`)" if d.get("remote_id") else ""
+                    rows.append(f"{icon} *{tgt}:* `{st}`{rem_id}")
+
+                rows_text = "\n".join(rows)
+                msg = (
+                    f"🗑️ *SIEM & EDR Query Undeployment for `{hunt_id}`*\n"
+                    f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_id}>\n\n"
+                    f"{rows_text}"
+                )
+                respond(text=msg)
+                return
+
+            if subcmd == "sync":
+                if len(tokens) < 2:
+                    respond(
+                        text=(
+                            "⚠️ *Usage:* `/hecate sync <hunt_id> [target]`\n"
+                            "• Example: `/hecate sync H-0868`\n"
+                            "• Example: `/hecate sync H-0868 splunk_spl`"
+                        )
+                    )
+                    return
+
+                hunt_id = tokens[1].upper()
+                target = tokens[2].lower() if len(tokens) > 2 else None
+                is_dry_run = getattr(self.settings, "siem_deploy_dry_run", True)
+                mode_str = "Simulated (Dry-Run)" if is_dry_run else "Live API Sync"
+
+                syncs = sync_queries_for_hunt(
+                    self.settings.hecate_workspace,
+                    hunt_id,
+                    dry_run=is_dry_run,
+                    target=target,
+                )
+                if not syncs:
+                    respond(text=f"⚠️ *No queries found for `{hunt_id}`* under `queries/{hunt_id}`.")
+                    return
+
+                rows = []
+                for s in syncs:
+                    icon = (
+                        "✅"
+                        if s.get("status") in {"in_sync", "dry_run"}
+                        else ("⚠️" if s.get("status") == "drift_detected" else "❌")
+                    )
+                    tgt = s.get("target")
+                    st = s.get("status")
+                    rem_id = f" (`{s.get('remote_id')}`)" if s.get("remote_id") else ""
+                    rows.append(f"{icon} *{tgt}:* `{st}`{rem_id}")
+
+                rows_text = "\n".join(rows)
+                msg = (
+                    f"🔄 *SIEM & EDR Query Synchronization & Drift Check for `{hunt_id}`*\n"
                     f"*Mode:* `{mode_str}` | *Initiated by:* <@{user_id}>\n\n"
                     f"{rows_text}"
                 )

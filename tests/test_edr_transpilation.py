@@ -189,3 +189,55 @@ def test_cli_deploy_queries_command(tmp_path: Path):
         assert "splunk_spl" in result.output
         assert "sentinel_kql" in result.output
         assert "dry_run" in result.output
+
+
+def test_cli_undeploy_queries_command(tmp_path: Path):
+    from unittest import mock
+
+    from typer.testing import CliRunner
+
+    from hecate_runner.cli import app
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    queries_dir = workspace / "queries" / "H-9999"
+    queries_dir.mkdir(parents=True)
+    (queries_dir / "process__rule.spl").write_text('Image="*\\cmd.exe"', encoding="utf-8")
+    (queries_dir / "process__rule.kql").write_text(
+        "DeviceProcessEvents | where FileName == 'cmd.exe'", encoding="utf-8"
+    )
+
+    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(workspace)}):
+        result = runner.invoke(app, ["undeploy-queries", "H-9999", "--dry-run"])
+        assert result.exit_code == 0
+        assert "SIEM & EDR Query Undeployment for H-9999" in result.output
+        assert "splunk_spl" in result.output
+        assert "sentinel_kql" in result.output
+        assert "dry_run" in result.output
+
+
+def test_cli_sync_queries_command(tmp_path: Path):
+    from unittest import mock
+
+    from typer.testing import CliRunner
+
+    from hecate_runner.cli import app
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    queries_dir = workspace / "queries" / "H-9999"
+    queries_dir.mkdir(parents=True)
+    (queries_dir / "process__rule.spl").write_text('Image="*\\cmd.exe"', encoding="utf-8")
+    (queries_dir / "process__rule.kql").write_text(
+        "DeviceProcessEvents | where FileName == 'cmd.exe'", encoding="utf-8"
+    )
+
+    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(workspace)}):
+        result = runner.invoke(app, ["sync-queries", "H-9999", "--dry-run"])
+        assert result.exit_code == 0
+        assert "SIEM & EDR Query Synchronization & Drift for H-9999" in result.output
+        assert "splunk_spl" in result.output
+        assert "sentinel_kql" in result.output
+        assert "dry_run" in result.output

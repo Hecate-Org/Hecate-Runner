@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 MOCK_TECHNIQUE_CATALOG: dict[str, list[str]] = {
     "T1059.001": ["ability-powershell-download-cradle", "ability-powershell-base64-exec"],
     "T1059.003": ["ability-cmd-obfuscated-echo", "ability-cmd-whoami-recon"],
+    "T1059.007": ["ability-wscript-socgholish-js-exec"],
     "T1003.001": ["ability-lsass-comsvcs-minidump"],
     "T1562.008": ["aws.defense-evasion.cloudtrail-stop"],
     "T1098.001": ["aws.persistence.create-admin-access-key"],
@@ -94,8 +95,16 @@ class MockBASProvider(BASProvider):
         cleanup_error = "Mock cleanup failure simulated" if self.simulate_cleanup_failure else None
 
         # Synthesize realistic telemetry metadata
-        is_psh = "powershell" in ability_id
         is_cloud = any(c in ability_id.lower() for c in ("aws", "gcp", "azure", "cloudtrail"))
+        is_psh = "powershell" in ability_id or request.technique_id == "T1059.001"
+        is_js = (
+            "wscript" in ability_id
+            or "cscript" in ability_id
+            or "javascript" in ability_id
+            or request.technique_id == "T1059.007"
+        )
+        is_windows = request.platform == "windows" or is_psh or is_js
+
         if is_cloud:
             category = "cloud"
             product = (
@@ -103,9 +112,38 @@ class MockBASProvider(BASProvider):
                 if "aws" in ability_id.lower()
                 else ("azure" if "azure" in ability_id.lower() else "gcp")
             )
+            event_type = "CloudTrail"
+            process_name = ""
+            image = ""
+            cmdline = ""
+        elif is_js:
+            category = "process_creation"
+            product = "windows"
+            event_type = "Sysmon Event ID 1"
+            process_name = "wscript.exe"
+            image = "C:\\Windows\\System32\\wscript.exe"
+            cmdline = "wscript.exe C:\\Users\\victim\\Downloads\\update.js"
+        elif is_psh:
+            category = "process_creation"
+            product = "windows"
+            event_type = "Sysmon Event ID 1"
+            process_name = "powershell.exe"
+            image = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+            cmdline = f"powershell.exe -ExecutionPolicy Bypass -Command mock_detonation --technique {request.technique_id}"
+        elif is_windows:
+            category = "process_creation"
+            product = "windows"
+            event_type = "Sysmon Event ID 1"
+            process_name = "cmd.exe"
+            image = "C:\\Windows\\System32\\cmd.exe"
+            cmdline = f"cmd.exe /c echo mock_detonation --technique {request.technique_id}"
         else:
             category = "process_creation"
-            product = "windows" if is_psh else "linux"
+            product = "linux"
+            event_type = "Sysmon Event ID 1"
+            process_name = "bash"
+            image = "/bin/bash"
+            cmdline = f"/bin/bash -c mock_detonation --technique {request.technique_id}"
 
         telemetry = [
             {
@@ -113,19 +151,11 @@ class MockBASProvider(BASProvider):
                 "product": product,
                 "data_source": category,
                 "technique_id": request.technique_id,
-                "event_type": "Sysmon Event ID 1" if not is_cloud else "CloudTrail",
-                "process_name": "powershell.exe" if is_psh else "bash",
-                "Image": (
-                    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-                    if is_psh
-                    else "/bin/bash"
-                ),
-                "CommandLine": (
-                    f"powershell.exe -ExecutionPolicy Bypass -Command mock_detonation --technique {request.technique_id}"
-                    if is_psh
-                    else f"/bin/bash -c mock_detonation --technique {request.technique_id}"
-                ),
-                "command_line": f"mock_detonation --technique {request.technique_id}",
+                "event_type": event_type,
+                "process_name": process_name,
+                "Image": image,
+                "CommandLine": cmdline,
+                "command_line": cmdline or f"mock_detonation --technique {request.technique_id}",
                 "timestamp_utc": start_time.isoformat(),
             }
         ]

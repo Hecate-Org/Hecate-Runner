@@ -803,6 +803,8 @@ def build_slash_help_card() -> list[dict[str, Any]]:
                     "• `/hecate status` — View pipeline status, active hunts, quota & metrics\n"
                     "• `/hecate hunt <topic_or_cve>` — Launch an immediate ad-hoc hunt cycle (e.g. `/hecate hunt Akira Ransomware`)\n"
                     "• `/hecate deploy <hunt_id> [target]` — Deploy or simulate queries across SIEM/EDRs (e.g. `/hecate deploy H-0868 sentinel_kql`)\n"
+                    "• `/hecate undeploy <hunt_id> [target]` — Teardown/delete queries from SIEM/EDRs (e.g. `/hecate undeploy H-0868 splunk_spl`)\n"
+                    "• `/hecate sync <hunt_id> [target]` — Check synchronization and query drift against SIEM/EDRs\n"
                     "• `/hecate rerun <hunt_id>` — Replay purple-team adversary emulation and validate Sigma rules\n"
                     "• `/hecate tune <hunt_id> <instruction>` — Interactively tune Sigma rule (e.g. `/hecate tune H-0868 exclude svchost.exe with parent services.exe`)\n"
                     "• `/hecate help` — Show this command reference guide"
