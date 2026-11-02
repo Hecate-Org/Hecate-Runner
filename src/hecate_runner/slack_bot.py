@@ -28,6 +28,14 @@ def deploy_queries_for_hunt(
     target: str | None = None,
 ) -> list[dict[str, Any]]:
     """Deploy or simulate deployment of hunt queries to target SIEM/EDR platforms."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+        load_dotenv(workspace / ".env", override=False)
+    except ImportError:
+        pass
+
     query_dir = workspace / "queries" / hunt_id
     if not query_dir.exists():
         log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
