@@ -345,11 +345,17 @@ class SplunkQueryProvider(QueryProvider):
         self.timeout_sec = timeout_sec
 
     def execute(self, query: ProposedQuery) -> QueryResult:
+        query_text = query.query_text.strip()
+        if not query_text.startswith("|") and not query_text.startswith("index="):
+            clean_q = query_text.removeprefix("search ").strip()
+            if "index=" not in clean_q:
+                query_text = f"index=* | spath | search {clean_q}"
+
         cmd = [
             str(self.hecate_bin),
             "splunk",
             "search",
-            query.query_text,
+            query_text,
             "--earliest",
             f"-{query.time_range_days}d",
             "--latest",

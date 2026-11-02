@@ -180,7 +180,23 @@ class DetectionVerifier:
             notes.append(
                 f"Received {len(events_to_evaluate)} telemetry event(s) for rule evaluation."
             )
-        if backend in {"lab_process", "lab_fusion"}:
+
+        # Forward telemetry to live SIEM if provider is configured and not mock
+        if self.query_provider and self.query_provider.name != "mock" and events_to_evaluate:
+            try:
+                from hecate_runner.bas.forwarder import forward_events_to_splunk
+
+                forwarded_count = forward_events_to_splunk(events_to_evaluate)
+                if forwarded_count > 0:
+                    notes.append(
+                        f"Forwarded {forwarded_count} sensor event(s) to live {self.query_provider.name.upper()} index."
+                    )
+            except Exception as fwd_exc:
+                notes.append(f"SIEM telemetry forwarding error: {fwd_exc}")
+
+        if backend in {"lab_process", "lab_fusion"} and (
+            not self.query_provider or self.query_provider.name == "mock"
+        ):
             notes.append(
                 "Independent Linux lab process sensor; local Sigma evaluation, no SIEM alert verification."
             )
@@ -231,12 +247,13 @@ class DetectionVerifier:
             poll_start = time.time()
             query_matched = False
             last_err = ""
+            active_backend = self.query_provider.name
 
             while (time.time() - poll_start) < self.max_wait_sec:
                 try:
                     q_prop = ProposedQuery(
                         hunt_id=hunt_id,
-                        data_source=f"bas_detection_{backend}",
+                        data_source=f"bas_detection_{active_backend}",
                         query_text=candidate_query,
                         time_range_days=1,
                         limit=50,
@@ -249,8 +266,9 @@ class DetectionVerifier:
                             rule_triggered = True
                             telemetry_arrived = True
                             matched_count = q_res.row_count
+                            backend = active_backend
                             notes.append(
-                                f"SIEM query matched {matched_count} event(s) in {backend}."
+                                f"Live {active_backend.upper()} SIEM query matched {matched_count} event(s)."
                             )
                             break
                     else:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import nullcontext
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -304,6 +304,16 @@ def bas_verify_cmd(
         str | None,
         typer.Option("--account-id", "-a", help="Target cloud account ID (must be allowlisted)."),
     ] = None,
+    technique: Annotated[
+        str | None,
+        typer.Option("--technique", "-t", help="Specific ATT&CK Technique ID to verify."),
+    ] = None,
+    use_siem: Annotated[
+        bool,
+        typer.Option(
+            "--siem/--no-siem", help="Verify against live SIEM (e.g. Splunk) query provider."
+        ),
+    ] = True,
     write_back: Annotated[
         bool,
         typer.Option(
@@ -313,6 +323,9 @@ def bas_verify_cmd(
     ] = True,
 ) -> None:
     """Run closed-loop live adversary emulation & detection verification against a hunt draft."""
+    import os
+    import shlex
+
     import yaml
 
     from hecate_runner.bas import (
@@ -321,9 +334,18 @@ def bas_verify_cmd(
         get_bas_provider,
         normalize_platform,
     )
+    from hecate_runner.bas.approved import APPROVED_PROCEDURES
     from hecate_runner.bas.verifier import DetectionVerifier
 
     settings = _get_settings()
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+        load_dotenv(settings.hecate_workspace / ".env", override=False)
+    except ImportError:
+        pass
+
     resolved_provider = provider_name or getattr(settings, "bas_mode", "mock")
 
     # Locate hunt markdown
@@ -351,13 +373,23 @@ def bas_verify_cmd(
     techniques = fm.get("techniques") or []
     if isinstance(techniques, str):
         techniques = [techniques]
-    if not techniques:
+    if not techniques and not technique:
         console.print(
             f"[bold yellow]Hunt {hunt_id} has no mapped ATT&CK techniques in frontmatter.[/bold yellow]"
         )
         raise typer.Exit(code=1)
 
-    technique_id = str(techniques[0])
+    if technique:
+        technique_id = technique.upper()
+    else:
+        # Prefer a technique from the hunt that has an approved lab procedure
+        approved_match = next((t for t in techniques if t in APPROVED_PROCEDURES), None)
+        technique_id = (
+            approved_match if approved_match else (str(techniques[0]) if techniques else "T1033")
+        )
+
+    proc = APPROVED_PROCEDURES.get(technique_id)
+
     platforms = fm.get("platform") or []
     if isinstance(platforms, str):
         platforms = [platforms]
@@ -387,35 +419,101 @@ def bas_verify_cmd(
         console.print(f"[bold red]Provider / Safety Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    # Find candidate Sigma rule file
+    # Find candidate Sigma rule file and SIEM query
     query_dir = settings.hecate_workspace / "queries" / hunt_id
     sigma_files = sorted(query_dir.glob("*.yml")) + sorted(query_dir.glob("*.yaml"))
     sigma_yaml = ""
+    candidate_query = None
+
     if sigma_files:
         sigma_yaml = sigma_files[0].read_text(encoding="utf-8")
+
+    # If an approved procedure is used, formulate rule and SPL query
+    if proc:
+        rule_def = {
+            "title": f"BAS Detection Verification: {proc.command}",
+            "status": "test",
+            "logsource": {"product": "linux", "category": "process_creation"},
+            "tags": ["attack." + proc.technique_id.lower()],
+            "detection": {
+                "selection": {
+                    "Image|endswith": "/" + proc.argv[0],
+                    "CommandLine": shlex.join(proc.argv),
+                },
+                "condition": "selection",
+            },
+        }
+        sigma_yaml = yaml.safe_dump(rule_def)
+        candidate_query = f'Image="*/{proc.argv[0]}" CommandLine="{shlex.join(proc.argv)}"'
+    else:
+        spl_files = sorted(query_dir.glob("*.spl"))
+        if spl_files:
+            candidate_query = spl_files[0].read_text(encoding="utf-8").strip()
+
+    siem_provider = None
+    if use_siem:
+        splunk_host = os.getenv("SPLUNK_HOST") or os.getenv("SPLUNK_URL")
+        if splunk_host or settings.query_provider == "splunk":
+            from hecate_runner.query_execution import SplunkQueryProvider
+
+            siem_provider = SplunkQueryProvider(settings.hecate_bin, settings.hecate_workspace)
 
     det_req = DetonationRequest(
         hunt_id=hunt_id,
         technique_id=technique_id,
+        ability_id=proc.ability_id if proc else None,
         platform=norm_platform,
         target=target,
-        timeout_sec=60,
+        timeout_sec=120 if proc else 60,
     )
 
     console.print(
         f"[bold cyan]Running BAS verification for {hunt_id}[/bold cyan] against technique [bold]{technique_id}[/bold] "
         f"using [bold]{resolved_provider.upper()}[/bold] on {target.environment}..."
     )
+    if candidate_query and siem_provider:
+        console.print(
+            f"[cyan]Candidate SIEM Query ({siem_provider.name}):[/cyan] {candidate_query}"
+        )
+
+    sensor = None
+    if resolved_provider == "caldera" and target.environment == "lab" and norm_platform == "linux":
+        from hecate_runner.bas.sensor import LabProcessSensor
+
+        try:
+            sensor = LabProcessSensor(settings.bas_sensor_container, settings.bas_linux_host)
+            sensor.preflight()
+        except Exception as sensor_exc:
+            console.print(f"[yellow]Sensor preflight notice: {sensor_exc}[/yellow]")
+            sensor = None
 
     try:
         det_result = provider.detonate(det_req)
     except Exception as exc:
         console.print(f"[bold red]Detonation failed with exception:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
-    verifier = DetectionVerifier()
+
+    raw_events: list[dict[str, Any]] = []
+    if sensor and det_result.success:
+        if proc:
+            if hasattr(sensor, "collect_fused"):
+                raw_events = sensor.collect_fused(
+                    det_result, proc.argv, expected_files=proc.expected_files
+                )
+            else:
+                raw_events = sensor.collect(det_result, proc.argv)
+        else:
+            raw_events = det_result.telemetry_signatures
+    else:
+        raw_events = det_result.telemetry_signatures
+
+    verifier = DetectionVerifier(query_provider=siem_provider, max_wait_sec=30)
     res = verifier.verify_detonation(
         detonation=det_result,
         rule_yaml=sigma_yaml,
+        candidate_query=candidate_query,
+        backend=siem_provider.name if siem_provider else "mock",
+        raw_events=raw_events,
     )
 
     table = Table(
@@ -427,13 +525,17 @@ def bas_verify_cmd(
     table.add_column("Value")
 
     table.add_row("Status", f"[bold]{res.status.value.upper()}[/bold]")
-    table.add_row("Provider", res.provider.upper())
+    table.add_row("BAS Provider", res.provider.upper())
     table.add_row("Technique", res.technique_id)
     table.add_row("Telemetry Arrived", f"{'Yes' if res.telemetry_arrived else 'No'}")
     table.add_row(
         "Rule Triggered",
         f"{'Yes' if res.rule_triggered else 'No'} ({res.matched_events_count} hits)",
     )
+    if siem_provider:
+        table.add_row("SIEM Backend", siem_provider.name.upper())
+    if candidate_query:
+        table.add_row("Query Tested", candidate_query)
     table.add_row("Time Window", f"{res.window_start_utc} to {res.window_end_utc}")
     table.add_row("Duration", f"{det_result.duration_seconds:.2f}s")
     if res.notes:
@@ -445,6 +547,7 @@ def bas_verify_cmd(
         fm["bas_verified"] = res.status.value == "verified_true_positive"
         fm["bas_provider"] = res.provider
         fm["bas_status"] = res.status.value
+        fm["bas_backend"] = res.backend
         fm["bas_detection_triggered"] = res.rule_triggered
         new_fm = yaml.safe_dump(fm, sort_keys=False)
         updated_content = f"---\n{new_fm}---\n" + fm_parts[2].lstrip()
