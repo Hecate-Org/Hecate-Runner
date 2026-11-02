@@ -929,6 +929,21 @@ def deploy_queries_cmd(
             )
             if res.get("ok"):
                 total_deployed += 1
+                if not dry_run:
+                    from hecate_runner.siem_drift import record_query_version
+
+                    q_file = settings.hecate_workspace / "queries" / h_id / str(res.get("file", ""))
+                    q_content = q_file.read_text(encoding="utf-8") if q_file.exists() else ""
+                    if q_content:
+                        record_query_version(
+                            settings.hecate_workspace,
+                            hunt_id=h_id,
+                            target=str(res.get("target", "")),
+                            file_name=str(res.get("file", "")),
+                            query_content=q_content,
+                            remote_id=str(res.get("remote_id") or ""),
+                            deployed_by="cli",
+                        )
 
     console.print(table)
     mode_str = "simulated (dry-run)" if dry_run else "live"
