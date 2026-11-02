@@ -1493,7 +1493,7 @@ class Orchestrator:
                     log.debug("Native EDR query generation for %s skipped (%s)", r_path.name, t_err)
 
         if getattr(self.settings, "siem_deploy_enabled", False):
-            self._deploy_native_queries(req, result.rules, out_dir)
+            req.siem_deployments = self._deploy_native_queries(req, result.rules, out_dir)
         try:
             req.sigma_rule_dir = str(out_dir.relative_to(self.settings.hecate_workspace))
         except ValueError:  # out_dir outside the workspace -- show it whole

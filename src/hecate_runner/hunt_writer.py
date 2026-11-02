@@ -80,6 +80,8 @@ class DraftHuntRequest:
     claim_evidence: list[dict[str, str]] = field(default_factory=list)
     #: Incremental campaign updates / dossier revision history
     campaign_updates: list[dict[str, Any]] = field(default_factory=list)
+    #: Automated SIEM and EDR query deployment receipts
+    siem_deployments: list[dict[str, Any]] = field(default_factory=list)
 
 
 #: Ceiling on the CTI blurb embedded in a draft. Generous on purpose: the
@@ -1325,6 +1327,26 @@ def _render_soc_triage_playbook(req: DraftHuntRequest) -> str:
     )
 
 
+def _render_siem_deployments(req: DraftHuntRequest) -> str:
+    """Render automated SIEM/EDR query deployment receipts."""
+    if not req.siem_deployments:
+        return ""
+    lines = [
+        "### Automated SIEM & EDR Query Deployments\n",
+        "| Platform Target | Dialect | Status | Remote Identifier | Detail |",
+        "| :--- | :--- | :--- | :--- | :--- |",
+    ]
+    for d in req.siem_deployments:
+        tgt = d.get("target", "unknown")
+        dialect = tgt.split("_")[-1].upper() if "_" in tgt else tgt
+        status = d.get("status", "unknown")
+        remote_id = d.get("remote_id") or "—"
+        detail = d.get("detail", "")
+        lines.append(f"| `{tgt}` | `{dialect}` | `{status}` | `{remote_id}` | {detail} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_draft(req: DraftHuntRequest) -> str:
     """Return the full markdown content for a draft hunt."""
     hyp = req.hypothesis
@@ -1513,6 +1535,7 @@ Source CTI:
 {_render_sigma_section(req)}{_render_review_gaps(req)}
 {_render_atomic_tests(techniques, platforms=req.platforms)}
 {_render_bas_verification(req)}
+{_render_siem_deployments(req)}
 ---
 
 ## KEEP: Findings & Response
