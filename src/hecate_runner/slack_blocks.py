@@ -801,6 +801,7 @@ def build_slash_help_card() -> list[dict[str, Any]]:
                 "text": (
                     "*Autonomous Threat Hunting & Detection Engineering Commands:*\n\n"
                     "• `/hecate status` — View pipeline status, active hunts, quota & metrics\n"
+                    "• `/hecate pending` — Review planning hunts and approve or reject them\n"
                     "• `/hecate hunt <topic_or_cve>` — Launch an immediate ad-hoc hunt cycle (e.g. `/hecate hunt Akira Ransomware`)\n"
                     "• `/hecate deploy <hunt_id> [target]` — Deploy or simulate queries across SIEM/EDRs (e.g. `/hecate deploy H-0868 sentinel_kql`)\n"
                     "• `/hecate undeploy <hunt_id> [target]` — Teardown/delete queries from SIEM/EDRs (e.g. `/hecate undeploy H-0868 splunk_spl`)\n"
@@ -826,6 +827,214 @@ def build_slash_help_card() -> list[dict[str, Any]]:
         },
     ]
     return [{"color": COLOR_INFO, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+# Two blocks per hunt; Slack rejects messages with more than 50 blocks.
+_PENDING_HUNTS_SHOWN = 20
+
+
+def build_pending_hunts_card(
+    hunts: list[dict[str, Any]], *, notice: str = ""
+) -> list[dict[str, Any]]:
+    """Build the /hecate pending review queue with Approve / Reject buttons per hunt."""
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"🗂️ Hunts Awaiting Review ({len(hunts)})",
+                "emoji": True,
+            },
+        }
+    ]
+    if notice:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": notice}})
+    if not hunts:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "✅ No hunts are waiting for review."},
+            }
+        )
+
+    for hunt in hunts[:_PENDING_HUNTS_SHOWN]:
+        hunt_id = hunt["hunt_id"]
+        techniques = hunt.get("techniques") or []
+        technique_text = ", ".join(f"`{t}`" for t in techniques[:6])
+        if len(techniques) > 6:
+            technique_text += f" +{len(techniques) - 6} more"
+        details = [
+            f"*Drafted:* {hunt.get('date') or 'unknown'}",
+            f"*Research:* `{hunt['research_id']}`" if hunt.get("research_id") else "",
+            f"*Techniques:* {technique_text}" if technique_text else "",
+        ]
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*`{hunt_id}`* {defang_ioc(hunt.get('title') or '(untitled)')}\n"
+                        + " • ".join(d for d in details if d)
+                    ),
+                },
+            }
+        )
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"pending_review_{hunt_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
+                        "style": "primary",
+                        "action_id": "hecate_pending_approve",
+                        "value": hunt_id,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🚫 Reject", "emoji": True},
+                        "style": "danger",
+                        "action_id": "hecate_pending_reject",
+                        "value": hunt_id,
+                    },
+                ],
+            }
+        )
+
+    footer = (
+        "🤖 *Hecate Review Queue* | Approve sets `active` and opens the publication PR; "
+        "Reject sets `suppressed`"
+    )
+    if len(hunts) > _PENDING_HUNTS_SHOWN:
+        footer = (
+            f"Showing the oldest {_PENDING_HUNTS_SHOWN} of {len(hunts)}; "
+            "review these to see the rest. " + footer
+        )
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
+    color = COLOR_WARNING if hunts else COLOR_SUCCESS
+    return [{"color": color, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def build_approve_hunt_modal(
+    hunt_id: str, private_metadata: str, *, destination: str | None
+) -> dict[str, Any]:
+    """Modal that approves a planning hunt and, when publishing is on, signs off its release.
+
+    With a destination, submitting is step one of two: the publisher opens a PR
+    there, and approving that PR on GitHub is step two.
+    """
+    blocks: list[dict[str, Any]] = []
+    if destination is None:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"`{hunt_id}` will move from `planning` to `active`. Publishing is off.",
+                },
+            }
+        )
+    else:
+        blocks += [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Step 1 of 2.* `{hunt_id}` moves to `active` and the publisher opens a "
+                        f"pull request on `{destination}`, a public repository.\n"
+                        "*Step 2:* approve that pull request on GitHub; it then merges itself."
+                    ),
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "release_checks",
+                "label": {"type": "plain_text", "text": "Release checks"},
+                "element": {
+                    "type": "checkboxes",
+                    "action_id": "checks",
+                    "options": [
+                        {
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "*No private data:* no customer, internal or personal data",
+                            },
+                            "value": "privacy",
+                        },
+                        {
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "*Republishing allowed:* the source's license or terms "
+                                "permit the quoted material",
+                            },
+                            "value": "redistribution",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "release_rights",
+                "label": {"type": "plain_text", "text": "Basis for republishing the source"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "For example: MIT-licensed public repository; author credited and linked.",
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "rights",
+                    "min_length": 20,
+                    "max_length": 500,
+                },
+            },
+        ]
+    return {
+        "type": "modal",
+        "callback_id": "hecate_approve_hunt_modal",
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": f"Approve {hunt_id}"},
+        "submit": {
+            "type": "plain_text",
+            "text": "Approve" if destination is None else "Approve & publish",
+        },
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
+
+
+def build_reject_hunt_modal(hunt_id: str, private_metadata: str) -> dict[str, Any]:
+    """Modal asking for the reason a planning hunt is rejected."""
+    return {
+        "type": "modal",
+        "callback_id": "hecate_reject_hunt_modal",
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": f"Reject {hunt_id}"},
+        "submit": {"type": "plain_text", "text": "Reject"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"`{hunt_id}` will be set to `suppressed`. The reason is saved in its frontmatter.",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "reject_reason",
+                "label": {"type": "plain_text", "text": "Reason"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "reason",
+                    "multiline": True,
+                    "max_length": 500,
+                },
+            },
+        ],
+    }
 
 
 def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
@@ -1001,7 +1210,11 @@ def build_siem_drift_alert_card(
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "⚡ Reconcile in SIEM", "emoji": True},
+                        "text": {
+                            "type": "plain_text",
+                            "text": "⚡ Reconcile in SIEM",
+                            "emoji": True,
+                        },
                         "style": "primary",
                         "action_id": "hecate_reconcile_drift",
                         "value": hunt_id,
@@ -1065,10 +1278,16 @@ def build_siem_status_card(
         icon = (
             "✅"
             if ev_type == "reconciled"
-            else ("🧹" if ev_type == "decommissioned" else ("⚠️" if ev_type == "drift_detected" else "ℹ️"))
+            else (
+                "🧹"
+                if ev_type == "decommissioned"
+                else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+            )
         )
         recent_rows.append(f"{icon} `{ts}` *{h_id}* ({tgt}): `{ev_type}` by `{actor}`")
-    timeline_text = "\n".join(recent_rows) if recent_rows else "No recent drift/reconciliation events."
+    timeline_text = (
+        "\n".join(recent_rows) if recent_rows else "No recent drift/reconciliation events."
+    )
 
     drift_missing_text = f"`{drifted}` drifted, `{missing}` missing"
     if decommissioned:
@@ -1168,7 +1387,9 @@ def build_siem_history_card(
             ev_type = ev.get("event_type", "")
             actor = ev.get("actor", "system")
             f_name = ev.get("file_name", "")
-            icon = "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+            icon = (
+                "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+            )
             line = f"{icon} *{ts}* — `{h_id}` / `{tgt}`\n• File: `{f_name}` | Event: `{ev_type}` | Actor: `{actor}`"
             diff = ev.get("drift_diff")
             if diff:

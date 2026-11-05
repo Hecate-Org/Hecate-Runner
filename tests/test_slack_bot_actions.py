@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -221,12 +222,19 @@ def test_slack_bot_action_handlers_execution(tmp_path: Path):
         "channel": {"id": "C12345"},
     }
 
-    # 1. Test approve handler
+    # 1. Approve opens the review modal instead of promoting on the click
     l_approve = _get_listener("hecate_approve_hunt")
-    l_approve.ack_function(ack=ack_mock, body=body, say=say_mock)
+    client_mock = MagicMock()
+    l_approve.ack_function(ack=ack_mock, body={**body, "trigger_id": "T1"}, client=client_mock)
     assert ack_mock.called
-    assert say_mock.called
-    assert "status: active" in hunt_file.read_text(encoding="utf-8")
+    view = client_mock.views_open.call_args[1]["view"]
+    assert view["callback_id"] == "hecate_approve_hunt_modal"
+    assert json.loads(view["private_metadata"]) == {
+        "hunt_id": "H-0104",
+        "channel": "C12345",
+        "thread_ts": "1710000000.000100",
+    }
+    assert "status: planning" in hunt_file.read_text(encoding="utf-8")
 
     # 2. Test deploy queries handler
     ack_mock.reset_mock()

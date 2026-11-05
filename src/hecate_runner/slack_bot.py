@@ -9,14 +9,22 @@ Enables bidirectional human-in-the-loop (HITL) SecOps operations:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.config import Settings
-from hecate_runner.slack_blocks import build_runner_status_card, build_slash_help_card
+from hecate_runner.slack_blocks import (
+    build_approve_hunt_modal,
+    build_pending_hunts_card,
+    build_reject_hunt_modal,
+    build_runner_status_card,
+    build_slash_help_card,
+)
 
 log = logging.getLogger(__name__)
 
@@ -267,12 +275,9 @@ def park_hunt(
     hunt_path = matches[0]
     content = hunt_path.read_text(encoding="utf-8")
 
-    updated_content, _ = re.subn(
-        r"^status:.*$",
-        "status: suppressed",
-        content,
-        flags=re.MULTILINE,
-    )
+    updated_content = _update_frontmatter(content, {"status": "suppressed"})
+    if updated_content is None:
+        return {"ok": False, "hunt_id": hunt_id, "error": f"No frontmatter in {hunt_path}"}
     atomic_write_text(hunt_path, updated_content)
     log.info("Hunt %s suppressed in %s", hunt_id, hunt_path)
     return {
@@ -282,6 +287,131 @@ def park_hunt(
         "reason": reason,
         "path": str(hunt_path),
     }
+
+
+def _update_frontmatter(content: str, values: dict[str, str]) -> str | None:
+    """Set top-level frontmatter keys without touching the body.
+
+    Hunt bodies embed Sigma rules with their own `status:` lines, so edits must
+    stay between the opening and closing `---`. Returns None without frontmatter.
+    """
+    lines = content.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
+    if end is None:
+        return None
+
+    remaining = dict(values)
+    head = lines[1:end]
+    for i, line in enumerate(head):
+        key = line.split(":", 1)[0]
+        if ":" in line and key in remaining:
+            head[i] = f"{key}: {remaining.pop(key)}"
+    head.extend(f"{key}: {value}" for key, value in remaining.items())
+    return "\n".join([lines[0], *head, *lines[end:]])
+
+
+def list_pending_hunts(workspace: Path) -> list[dict[str, Any]]:
+    """Hunts whose frontmatter status is `planning`, oldest ID first."""
+    from hecate_runner.lifecycle import parse_hunt_frontmatter
+
+    pending = []
+    for path in sorted((workspace / "hunts").glob("**/H-*.md")):
+        try:
+            fm, _, _ = parse_hunt_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            log.warning("Could not read hunt %s: %s", path, exc)
+            continue
+        if str(fm.get("status") or "").strip().lower() != "planning":
+            continue
+        techniques = fm.get("techniques") or []
+        pending.append(
+            {
+                "hunt_id": str(fm.get("hunt_id") or path.stem),
+                "title": str(fm.get("title") or ""),
+                "date": str(fm.get("date") or ""),
+                "techniques": [str(t) for t in techniques] if isinstance(techniques, list) else [],
+                "research_id": str(fm.get("spawned_from") or ""),
+                "path": str(path),
+            }
+        )
+    return pending
+
+
+def review_hunt(
+    workspace: Path, hunt_id: str, *, approve: bool, reviewer: str, reason: str = ""
+) -> dict[str, Any]:
+    """Approve (active) or reject (suppressed) a planning hunt and record the reviewer.
+
+    Refuses hunts that are no longer `planning`, so a stale Slack button cannot
+    reverse a decision someone else already made.
+    """
+    from hecate_runner.lifecycle import find_hunt_path, parse_hunt_frontmatter
+
+    hunt_path = find_hunt_path(workspace, hunt_id)
+    if hunt_path is None:
+        return {"ok": False, "hunt_id": hunt_id, "error": f"Hunt file not found for {hunt_id}"}
+
+    content = hunt_path.read_text(encoding="utf-8")
+    fm, _, _ = parse_hunt_frontmatter(content)
+    current = str(fm.get("status") or "").strip()
+    if current.lower() != "planning":
+        return {
+            "ok": False,
+            "hunt_id": hunt_id,
+            "error": f"{hunt_id} is `{current or 'unknown'}`, not awaiting review",
+        }
+
+    status = "active" if approve else "suppressed"
+    updated = _update_frontmatter(
+        content,
+        {
+            "status": status,
+            "review_decision": "approved" if approve else "rejected",
+            "reviewed_by": json.dumps(reviewer),
+            "reviewed_at": json.dumps(datetime.now(UTC).isoformat(timespec="seconds")),
+            "review_reason": json.dumps(reason.strip()),
+        },
+    )
+    if updated is None:
+        return {"ok": False, "hunt_id": hunt_id, "error": f"No frontmatter in {hunt_path}"}
+    atomic_write_text(hunt_path, updated)
+    log.info("Hunt %s %s via Slack by %s", hunt_id, status, reviewer)
+    return {"ok": True, "hunt_id": hunt_id, "status": status, "path": str(hunt_path)}
+
+
+def publish_reviewed_hunt(
+    settings: Settings, hunt_id: str, *, reviewer: str, rights_note: str
+) -> dict[str, Any]:
+    """Record the release sign-off for the hunt's current snapshot and open its PR.
+
+    The sign-off is bound to the snapshot's digest, so it must be taken after
+    the review decision is written into the hunt's frontmatter.
+    """
+    from hecate_runner.github_publisher import _snapshot_bundle, enqueue_hunt, sync_outbox
+    from hecate_runner.public_review import approve_public_review, prepare_public_review
+
+    try:
+        files, _ = _snapshot_bundle(settings, hunt_id)
+        approve_public_review(
+            settings,
+            files,
+            expected_digest=prepare_public_review(settings, files)["digest"],
+            reviewer=reviewer,
+            rights_note=rights_note,
+            privacy_checked=True,
+            redistribution_checked=True,
+        )
+        if enqueue_hunt(settings, hunt_id) == "awaiting_review":
+            return {"ok": False, "error": "the release sign-off did not match the queued snapshot"}
+        result = next((r for r in sync_outbox(settings) if r.hunt_id == hunt_id), None)
+    except Exception as exc:
+        log.warning("Publishing %s after review failed: %s", hunt_id, exc)
+        return {"ok": False, "error": str(exc)}
+    if result is None or not result.pr_url:
+        return {"ok": False, "error": "queued, but the publisher has not opened a pull request yet"}
+    return {"ok": True, "pr_url": result.pr_url, "pr_number": result.pr_number}
 
 
 def replay_hunt_purple_team(workspace: Path, hunt_id: str) -> dict[str, Any]:
@@ -396,31 +526,16 @@ class SlackBotService:
             return
 
         @self._app.action("hecate_approve_hunt")
-        def handle_approve(ack: Any, body: dict[str, Any], say: Any) -> None:
+        def handle_approve(ack: Any, body: dict[str, Any], client: Any) -> None:
             ack()
-            action = body.get("actions", [{}])[0]
-            hunt_id = str(action.get("value") or "").strip()
-            thread_ts = body.get("message", {}).get("ts") or body.get("container", {}).get(
-                "message_ts"
-            )
-            user_info = body.get("user", {})
-            user_name = user_info.get("username") or user_info.get("name") or "analyst"
-
-            log.info("Slack HITL action: approve hunt %s by %s", hunt_id, user_name)
-            res = promote_hunt(self.settings.hecate_workspace, hunt_id)
-            if res.get("ok"):
-                already_str = " (was already active)" if res.get("already_promoted") else ""
-                msg = (
-                    f"🚀 *Hunt `{hunt_id}` Approved & Promoted!*{already_str}\n"
-                    f"• *Reviewer:* <@{user_info.get('id', user_name)}>\n"
-                    f"• *Status:* `active`\n"
-                    f"• *Workspace File:* `{res.get('path')}`\n"
-                    f"• *Provenance Audit:* Verified mathematically grounded."
-                )
-            else:
-                msg = f"❌ *Failed to promote `{hunt_id}`:* {res.get('error')}"
-
-            say(text=msg, thread_ts=thread_ts)
+            hunt_id = str(body.get("actions", [{}])[0].get("value") or "").strip()
+            message = body.get("message", {})
+            metadata = {
+                "hunt_id": hunt_id,
+                "channel": (body.get("channel") or {}).get("id"),
+                "thread_ts": message.get("ts") or body.get("container", {}).get("message_ts"),
+            }
+            _open_approve_modal(client, body["trigger_id"], hunt_id, metadata)
 
         @self._app.action("hecate_deploy_queries")
         def handle_deploy(ack: Any, body: dict[str, Any], say: Any) -> None:
@@ -577,6 +692,166 @@ class SlackBotService:
 
             say(text=msg, thread_ts=thread_ts)
 
+        def _reviewer(user: dict[str, Any]) -> str:
+            name = user.get("username") or user.get("name") or ""
+            return f"slack:{user.get('id', 'unknown')}" + (f" ({name})" if name else "")
+
+        def _review_notice(res: dict[str, Any], user_id: str) -> str:
+            if not res.get("ok"):
+                return f"⚠️ {res.get('error')}"
+            verb = "approved" if res.get("status") == "active" else "rejected"
+            return (
+                f"{'✅' if verb == 'approved' else '🚫'} `{res['hunt_id']}` {verb} by <@{user_id}>"
+            )
+
+        def _open_approve_modal(
+            client: Any, trigger_id: str, hunt_id: str, metadata: dict[str, Any]
+        ) -> None:
+            destination = (
+                self.settings.github_publishing_repository
+                if self.settings.github_publishing_enabled
+                else None
+            )
+            client.views_open(
+                trigger_id=trigger_id,
+                view=build_approve_hunt_modal(
+                    hunt_id, json.dumps(metadata), destination=destination
+                ),
+            )
+
+        @self._app.action("hecate_pending_approve")
+        def handle_pending_approve(ack: Any, body: dict[str, Any], client: Any) -> None:
+            ack()
+            hunt_id = str(body.get("actions", [{}])[0].get("value") or "").strip()
+            metadata = {"hunt_id": hunt_id, "response_url": body.get("response_url")}
+            _open_approve_modal(client, body["trigger_id"], hunt_id, metadata)
+
+        @self._app.view("hecate_approve_hunt_modal")
+        def handle_approve_submission(
+            ack: Any, body: dict[str, Any], view: dict[str, Any], client: Any
+        ) -> None:
+            metadata = json.loads(view.get("private_metadata") or "{}")
+            hunt_id = str(metadata.get("hunt_id") or "")
+            values = view.get("state", {}).get("values", {})
+            publishing = self.settings.github_publishing_enabled
+            rights = ""
+            if publishing:
+                checked = {
+                    option.get("value")
+                    for option in values.get("release_checks", {})
+                    .get("checks", {})
+                    .get("selected_options")
+                    or []
+                }
+                rights = str(
+                    values.get("release_rights", {}).get("rights", {}).get("value") or ""
+                ).strip()
+                errors = {}
+                if checked != {"privacy", "redistribution"}:
+                    errors["release_checks"] = "Both checks are required to publish."
+                if len(rights) < 20:
+                    errors["release_rights"] = "Say why the source can be republished."
+                if errors:
+                    ack(response_action="errors", errors=errors)
+                    return
+
+            user = body.get("user", {})
+            reviewer = _reviewer(user)
+            res = review_hunt(
+                self.settings.hecate_workspace, hunt_id, approve=True, reviewer=reviewer
+            )
+            if not res.get("ok"):
+                block = "release_checks" if publishing else None
+                if block:
+                    ack(response_action="errors", errors={block: str(res.get("error"))})
+                else:
+                    ack()
+                    _post_review_result(client, metadata, f"⚠️ {res.get('error')}")
+                return
+            ack()
+
+            notice = _review_notice(res, str(user.get("id", "")))
+            if publishing:
+                published = publish_reviewed_hunt(
+                    self.settings, hunt_id, reviewer=reviewer, rights_note=rights
+                )
+                if published["ok"]:
+                    notice += (
+                        f"\n*Step 2:* approve <{published['pr_url']}|PR #{published['pr_number']}>"
+                        " on GitHub to publish it."
+                    )
+                else:
+                    notice += (
+                        f"\n⚠️ Not published: {published['error']}. "
+                        f"Retry with `hecate-runner publish {hunt_id}`."
+                    )
+            _post_review_result(client, metadata, notice)
+
+        def _post_review_result(client: Any, metadata: dict[str, Any], notice: str) -> None:
+            if response_url := metadata.get("response_url"):
+                from slack_sdk.webhook import WebhookClient
+
+                WebhookClient(response_url).send(
+                    replace_original=True,
+                    attachments=build_pending_hunts_card(
+                        list_pending_hunts(self.settings.hecate_workspace), notice=notice
+                    ),
+                )
+            elif metadata.get("channel"):
+                client.chat_postMessage(
+                    channel=metadata["channel"], thread_ts=metadata.get("thread_ts"), text=notice
+                )
+
+        @self._app.action("hecate_pending_reject")
+        def handle_pending_reject(ack: Any, body: dict[str, Any], client: Any) -> None:
+            ack()
+            hunt_id = str(body.get("actions", [{}])[0].get("value") or "").strip()
+            metadata = json.dumps({"hunt_id": hunt_id, "response_url": body.get("response_url")})
+            client.views_open(
+                trigger_id=body["trigger_id"], view=build_reject_hunt_modal(hunt_id, metadata)
+            )
+
+        @self._app.view("hecate_reject_hunt_modal")
+        def handle_reject_submission(ack: Any, body: dict[str, Any], view: dict[str, Any]) -> None:
+            metadata = json.loads(view.get("private_metadata") or "{}")
+            hunt_id = str(metadata.get("hunt_id") or "")
+            reason = str(
+                view.get("state", {})
+                .get("values", {})
+                .get("reject_reason", {})
+                .get("reason", {})
+                .get("value")
+                or ""
+            ).strip()
+            if not reason:
+                ack(response_action="errors", errors={"reject_reason": "Give a reason."})
+                return
+
+            user = body.get("user", {})
+            res = review_hunt(
+                self.settings.hecate_workspace,
+                hunt_id,
+                approve=False,
+                reviewer=_reviewer(user),
+                reason=reason,
+            )
+            if not res.get("ok"):
+                ack(response_action="errors", errors={"reject_reason": str(res.get("error"))})
+                return
+            ack()
+
+            response_url = metadata.get("response_url")
+            if response_url:
+                from slack_sdk.webhook import WebhookClient
+
+                WebhookClient(response_url).send(
+                    replace_original=True,
+                    attachments=build_pending_hunts_card(
+                        list_pending_hunts(self.settings.hecate_workspace),
+                        notice=_review_notice(res, str(user.get("id", ""))),
+                    ),
+                )
+
         @self._app.command("/hecate")
         def handle_hecate_command(ack: Any, body: dict[str, Any], respond: Any) -> None:
             ack()
@@ -596,6 +871,11 @@ class SlackBotService:
             if subcmd == "status":
                 card = build_runner_status_card(self.settings)
                 respond(attachments=card)
+                return
+
+            if subcmd in {"pending", "review"}:
+                hunts = list_pending_hunts(self.settings.hecate_workspace)
+                respond(attachments=build_pending_hunts_card(hunts))
                 return
 
             if subcmd == "deploy":
