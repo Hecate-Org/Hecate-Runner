@@ -118,7 +118,7 @@ class TestClientCandidates:
         # A stand-in module, so these tests do not depend on which Hecate
         # version the test environment has installed.
         module = types.ModuleType("hecate_agent.core.technique_candidates")
-        module.candidate_techniques = func  # type: ignore[attr-defined]
+        module.named_techniques = func  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "hecate_agent.core.technique_candidates", module)
 
     def test_returns_what_hecate_matched(

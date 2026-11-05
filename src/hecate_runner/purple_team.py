@@ -80,8 +80,24 @@ BENIGN_SAMPLE: list[dict[str, Any]] = [
 
 #: Roles and statuses that are not this intrusion's infrastructure.
 _NOT_INFRASTRUCTURE = {"historical", "target"}
+#: Hash roles no process or module event carries: a token or revision ID, a
+#: hash of something only in memory or only on the wire. H-0018's hash rule
+#: "validated" against Node-RED flow revision IDs replayed as process hashes.
+_NOT_A_FILE_HASH = {"non_file", "memory_only", "network_content"}
+#: Artifact statuses the source does not tie to this intrusion; a PoC README's
+#: own files and test output are demoted to "unknown".
+_NOT_THIS_INTRUSION = {"historical", "unknown"}
 _HASH_LABELS = {"md5": "MD5", "sha1": "SHA1", "sha256": "SHA256", "imphash": "IMPHASH"}
 _REGISTRY_CATEGORIES = ("registry_set", "registry_add", "registry_event")
+
+
+def _posted(path: str, text: str) -> bool:
+    """Whether the source shows ``path`` requested with POST: "deploy a new flow through `POST /flows`"."""
+    if not path or not text:
+        return False
+    return bool(
+        re.search(rf"\bPOST\s+[`'\"]?(?:https?://[^\s/]+)?{re.escape(path)}(?![\w/.-])", text)
+    )
 
 
 def replay_events(
@@ -151,7 +167,7 @@ def replay_events(
                     "sc-status": "200",
                 },
             )
-        elif rtype in _HASH_LABELS:
+        elif rtype in _HASH_LABELS and getattr(record, "role", "") not in _NOT_A_FILE_HASH:
             hashes = f"{_HASH_LABELS[rtype]}={value}"
             add("process_creation", {"Hashes": hashes})
             add("image_load", {"Hashes": hashes})
@@ -161,7 +177,7 @@ def replay_events(
     for artifact in artifacts:
         value = str(getattr(artifact, "value", "") or "").strip()
         kind = str(getattr(artifact, "kind", "") or "")
-        if not value or getattr(artifact, "status", "") == "historical":
+        if not value or getattr(artifact, "status", "") in _NOT_THIS_INTRUSION:
             continue
         if kind == "file_path":
             add("file_event", {"TargetFilename": value})
@@ -185,7 +201,7 @@ def replay_events(
                         "sc-status": "200",
                     },
                 )
-        elif kind in ("url", "uri_path", "endpoint", "web_path"):
+        elif kind in ("url", "uri_path", "url_path", "endpoint", "web_path"):
             path = value.split("?")[0]
             query = value.split("?", 1)[1] if "?" in value else ""
             add(
@@ -193,6 +209,7 @@ def replay_events(
                 {
                     "cs-method": "POST"
                     if any(w in value.lower() for w in ("api", "upload", "audit", "login", "auth"))
+                    or _posted(path, cti_text)
                     else "GET",
                     "cs-uri-stem": path if path.startswith("/") else f"/{path}",
                     **({"cs-uri-query": query} if query else {}),

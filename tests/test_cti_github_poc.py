@@ -122,15 +122,112 @@ Target port is 8443.
     artifacts = provider._extract_poc_artifacts(repo_data, readme)
     assert artifacts["cve"] == "CVE-2026-7777"
     assert "Remote Code Execution" in artifacts["vuln_type"]
-    assert len(artifacts["commands"]) >= 1
-    assert "python3 exploit.py" in artifacts["commands"][0]
-    assert "8443" in artifacts["ports"]
+    assert [c for c, _ in artifacts["commands"]] == [
+        "python3 exploit.py -u https://target:8443/api/v2/cmdb -c id"
+    ]
+    assert [e for e, _ in artifacts["endpoints"]] == ["/api/v2/cmdb"]
+    assert "8443" in [p for p, _ in artifacts["ports"]]
 
     blurb = provider._build_blurb(repo_data, artifacts)
-    assert "Title: Proof-of-Concept Exploit Weaponization: CVE-2026-7777" in blurb
+    assert "Title: GitHub repository referencing CVE-2026-7777" in blurb
     assert "Source: GitHub PoC Monitor (rapid7/CVE-2026-7777-poc)" in blurb
-    assert "python3 exploit.py" in blurb
-    assert "T1190 (Exploit Public-Facing Application)" in blurb
+    assert "python3 exploit.py -u https://target:8443/api/v2/cmdb -c id" in blurb
+    assert "MITRE ATT&CK Techniques: T1190 (Exploit Public-Facing Application)" in blurb
+    assert "T1059" not in blurb
+
+
+def _artifacts(readme: str, full_name: str = "someone/CVE-2026-1111-poc", desc: str = ""):
+    provider = GitHubPocProvider(workspace=Path("/nonexistent"))
+    repo = {
+        "full_name": full_name,
+        "html_url": f"https://github.com/{full_name}",
+        "description": desc,
+    }
+    artifacts = provider._extract_poc_artifacts(repo, readme)
+    return artifacts, provider._build_blurb(repo, artifacts)
+
+
+def test_no_command_is_invented_when_readme_has_none() -> None:
+    artifacts, blurb = _artifacts(
+        "# Draft\n\n```sh\n$ make\n$ git push origin main\n```\n",
+        full_name="researcher/intra-handshake-fail",
+        desc="Early Attestation Considered Very Harmful (CVE-2026-100833)",
+    )
+
+    assert artifacts["commands"] == []
+    assert artifacts["endpoints"] == []
+    assert "exploit.py" not in blurb
+    assert "quotes no runnable command" in blurb
+    assert artifacts["vuln_type"] == "Unclassified"
+    assert "MITRE ATT&CK Techniques:" not in blurb
+    assert "functional" not in blurb.lower()
+
+
+def test_fences_pair_correctly_after_non_shell_block() -> None:
+    readme = (
+        "```php\n$msg = preg_replace('/%%(.+?)%%/i', '', $msg);\n```\n\n"
+        "Payload:\n\n```text\n<%%x%%?php echo 1; ?>\n```\n\n"
+        "```bash\npython3 poc.py https://wordpress.lab\n```\n"
+    )
+    artifacts, _ = _artifacts(readme)
+    assert [c for c, _ in artifacts["commands"]] == ["python3 poc.py https://wordpress.lab"]
+
+
+def test_repo_names_reference_links_and_loopback_are_not_targets() -> None:
+    readme = (
+        "[stars](https://github.com/someone/CVE-2026-1111-poc/stargazers)\n\n"
+        "```bash\n"
+        "python3 poc.py https://victim.lab --http-proxy http://127.0.0.1:8080\n"
+        "# docs: https://example.org/docs/hardening\n"
+        "```\n\n"
+        "```text\n[+] wrote https://victim.lab/cve_test.php\n```\n"
+    )
+    artifacts, _ = _artifacts(readme)
+
+    assert [e for e, _ in artifacts["endpoints"]] == ["/cve_test.php"]
+    assert artifacts["ports"] == []
+
+
+def test_lab_setup_commands_are_skipped_and_exploit_ranked_first() -> None:
+    readme = (
+        "```bash\npython3 setup.py\npython3 setup.py --teardown\n"
+        "python3 check.py http://192.0.2.10:1880\n```\n\n"
+        "```bash\npython3 poc.py http://192.0.2.10:1880 --cmd id    # runs `id`\n```\n\n"
+        "The admin API listens on TCP/1880. Exploit sends `POST /flows`.\n"
+    )
+    artifacts, blurb = _artifacts(readme, desc="Node-RED unauthenticated RCE")
+
+    assert [c for c, _ in artifacts["commands"]] == [
+        "python3 poc.py http://192.0.2.10:1880 --cmd id",
+        "python3 check.py http://192.0.2.10:1880",
+    ]
+    assert [p for p, _ in artifacts["ports"]] == ["1880"]
+    assert "/flows" in [e for e, _ in artifacts["endpoints"]]
+    assert '"The admin API listens on TCP/1880. Exploit sends `POST /flows`."' in blurb
+
+
+def test_commands_quoted_only_in_usage_sections_are_not_marked_active() -> None:
+    """H-0019's blurb listed the tester's own `python3 poc.py` run as active."""
+    readme = (
+        "## Usage\n\n```bash\npython3 poc.py http://192.0.2.10:1880\n```\n\n"
+        "## Downstream Impact\n\n```bash\ncurl -s http://device:1880/flows\n```\n\n"
+        "The admin API listens on TCP/1880. Exploit sends `POST /flows`.\n"
+    )
+    _, blurb = _artifacts(readme, desc="Node-RED unauthenticated RCE")
+    assert (
+        "| `python3 poc.py http://192.0.2.10:1880` | command_line | attacker_tooling | unknown |"
+        in blurb
+    )
+    assert (
+        "| `curl -s http://device:1880/flows` | command_line | attacker_tooling | active |" in blurb
+    )
+    assert "| `/flows` | url_path | target_endpoint | active |" in blurb
+
+
+def test_cve_row_does_not_ask_for_rules() -> None:
+    _, blurb = _artifacts("```bash\n./exploit --escalate\n```\n", desc="Linux kernel LPE")
+    assert "none: an identifier, not a log observable" in blurb
+    assert "T1068 (Exploitation for Privilege Escalation)" in blurb
 
 
 def test_next_item_and_acknowledge(temp_workspace: Path) -> None:
@@ -186,3 +283,55 @@ def test_get_provider_factory(temp_workspace: Path) -> None:
     p = get_provider("github_poc", settings=settings)
     assert isinstance(p, GitHubPocProvider)
     assert p.github_token == "ghp_test12345"
+
+
+def test_technique_evidence_from_a_poc_readme_leaves_out_its_tooling_and_html() -> None:
+    """H-0018 took T1105 from the lab setup and T1059.006 from a badge's alt text."""
+    from types import SimpleNamespace
+
+    from hecate_runner.cti.base import CTIItem
+    from hecate_runner.orchestrator import Orchestrator
+
+    readme = (
+        '<p><img src="https://img.shields.io/badge/python-3.8-blue" alt="Python"></p>\n\n'
+        "## Lab setup\n\nDownloads npm-shrinkwrap.json and builds the image.\n\n"
+        "## Impact\n\nUnauthenticated remote code execution as root.\n"
+    )
+    orch = Orchestrator.__new__(Orchestrator)
+    orch._source_evidence = SimpleNamespace(text=readme)
+    text = orch._technique_text(CTIItem(content="blurb", source="github_poc"))
+    assert "remote code execution" in text
+    assert "Downloads" not in text and "Python" not in text
+    assert "Downloads" in orch._technique_text(CTIItem(content="blurb", source="blog"))
+
+
+def test_state_changing_requests_outside_usage_sections_become_reference_requests() -> None:
+    """H-0019 had no rule for its main technique: the README's `POST /flows` deploy."""
+    from hecate_runner.cti.reference_rules import reference_candidates
+
+    readme = (
+        "## Usage\n\n`POST /api/lab-reset` resets the lab.\n\n"
+        "## The Bug\n\nAnyone can read flows with `GET /flows` and deploy one through "
+        "`POST /flows`; the PoC sends POST http://127.0.0.1:1880/flows again to restore.\n"
+    )
+    artifacts, _ = _artifacts(readme, desc="Node-RED unauthenticated RCE")
+    assert artifacts["http_requests"] == [
+        {"method": "POST", "path": ["/flows"], "origin": "readme"}
+    ]
+    [rule] = reference_candidates({"http_requests": artifacts["http_requests"]})
+    assert rule["title"] == "Request the PoC README documents: POST /flows"
+    assert rule["detection"]["selection"] == {"cs-method": "POST", "cs-uri-stem": "/flows"}
+
+
+def test_the_poc_repository_itself_is_listed_without_a_rule() -> None:
+    """H-0020 shipped a high-severity proxy rule for the repository it was drafted from."""
+    from hecate_agent.core.provenance import IndicatorRecord, mark_source_pages
+
+    from hecate_runner.hunt_writer import _rule_placements
+
+    record = IndicatorRecord(
+        value="https://github.com/al4n4n/CVE-2026-58115", type="url", source="cti"
+    )
+    assert _rule_placements(record.to_dict()) == "proxy"
+    mark_source_pages([record], ["https://github.com/al4n4n/CVE-2026-58115"])
+    assert _rule_placements(record.to_dict()) == "none: the source's own page, not an indicator"

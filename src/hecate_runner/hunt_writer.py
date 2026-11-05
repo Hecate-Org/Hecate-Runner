@@ -555,6 +555,7 @@ _RULE_PLACEMENT_NOTE = {
     "historical": "none: historical, not this intrusion",
     "non_file": "none: a token, key or certificate fingerprint, not the hash of a file",
     "target": "none: an address the actor targeted, not infrastructure a host connects to",
+    "source_page": "none: the source's own page, not an indicator",
 }
 
 
@@ -1396,7 +1397,8 @@ def render_draft(req: DraftHuntRequest) -> str:
         "customer_deliverables: []\n"
         f"tags: {json.dumps(_draft_tags(hyp.is_threat_report, hyp.is_indicator_only))}\n"
         + (
-            f"purple_team_validated: {str(req.purple_team_rules_validated > 0).lower()}\n"
+            # Every evaluated rule, not any: H-0016 read "validated" with 2 of 12.
+            f"purple_team_validated: {str(req.purple_team_rules_validated == req.purple_team_rules_evaluated).lower()}\n"
             f"purple_team_rules_evaluated: {req.purple_team_rules_evaluated}\n"
             f"purple_team_rules_validated: {req.purple_team_rules_validated}\n"
             f"purple_team_rules_tuned: {req.purple_team_rules_tuned}\n"

@@ -27,7 +27,8 @@ def template_requests(requests: list[dict[str, Any]]) -> list[dict[str, str]]:
                 or not re.fullmatch("[A-Z]+", method)
             ):
                 continue
-            output.append({"method": method, "uri": uri})
+            origin = request.get("origin")
+            output.append({"method": method, "uri": uri, **({"origin": origin} if origin else {})})
     return output
 
 
@@ -89,10 +90,15 @@ def reference_candidates(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         selection = {"cs-method": request["method"], "cs-uri-stem": path}
         if query:
             selection["cs-uri-query"] = query
+        label = (
+            "Request the PoC README documents"
+            if request.get("origin") == "readme"
+            else "Nuclei reference request"
+        )
         output.append(
             {
                 "category": "webserver",
-                "title": f"Nuclei reference request: {request['method']} {uri}"[:110],
+                "title": f"{label}: {request['method']} {uri}"[:110],
                 "detection": {"selection": selection, "condition": "selection"},
                 "level": "medium",
                 "command": f"{request['method']} {uri}",

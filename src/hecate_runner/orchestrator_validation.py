@@ -38,6 +38,8 @@ def run_purple_team_validation(
 
     techniques: list[str] = []
     for e in orch._technique_evidence or []:
+        if e.get("status") in ("capability", "negated", "context"):
+            continue  # recorded as dropped from the hunt, so not emulated for it
         tid = str(e.get("technique_id") or "").strip().upper()
         if tid and tid not in techniques:
             techniques.append(tid)

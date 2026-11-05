@@ -235,8 +235,20 @@ class Orchestrator:
         """
         texts = [("cti", item.content)]
         if self._source_evidence is not None and self._source_evidence.text:
-            texts.append(("primary source", self._source_evidence.text))
+            source = self._source_evidence.text
+            if item.source == "github_poc":
+                # Its usage and lab sections are the tester's, not the target's,
+                # and its HTML header is badges and nav links: alt="Python" on
+                # a version badge proposed T1059.006.
+                from hecate_agent.core.command_rules import without_tooling_sections
+
+                source = re.sub(r"<[^>]+>", " ", without_tooling_sections(source))
+            texts.append(("primary source", source))
         return texts
+
+    def _technique_text(self, item: CTIItem) -> str:
+        """The evidence texts as one, for matching technique names and phrases."""
+        return "\n".join(text for _, text in self._evidence_texts(item, None))
 
     def _gate_on_observed_use(
         self,
@@ -498,6 +510,7 @@ class Orchestrator:
             "historical": "is historical infrastructure, not this intrusion",
             "non_file": "is a token, key or certificate fingerprint, not the hash of a file",
             "target": "is an address the actor targeted, not infrastructure a host connects to",
+            "source_page": "is the source's own page, not an indicator",
         }
         out: dict[str, str] = {}
         for record in self._indicator_records:
@@ -545,6 +558,57 @@ class Orchestrator:
             else item.content
         )
         return base_text
+
+    def _command_text(self, item: CTIItem) -> str:
+        """The text whose quoted commands may become process rules.
+
+        A PoC repository's README shows its own operation: building the lab,
+        running the scanner, firing the exploit, all on the tester's machine.
+        Only its other sections can show what runs on a target, and the feed
+        blurb is left out because it quotes the usage section.
+        """
+        if item.source != "github_poc":
+            return self._primary_evidence_text(item)
+        from hecate_agent.core.command_rules import without_operator_sections
+
+        evidence = self._source_evidence
+        return without_operator_sections(evidence.text if evidence is not None else "")
+
+    def _demote_tooling_artifacts(self, item: CTIItem) -> None:
+        """Take a PoC README's own files and test output out of the active evidence.
+
+        An artifact quoted only from the README's usage, lab, file-list or
+        capture sections is the tester's (``poc.py``, the IDS test's
+        ``/tmp/suricata-test/fast.log``), so no rule should hunt for it.
+        """
+        evidence = self._source_evidence
+        if item.source != "github_poc" or evidence is None or not evidence.text:
+            return
+        from hecate_agent.core.command_rules import without_tooling_sections
+
+        def squash(text: str) -> str:
+            return " ".join(re.sub(r"[`*]", "", text).split())
+
+        kept = squash(without_tooling_sections(evidence.text))
+        demoted = []
+        for artifact in evidence.artifacts:
+            quote = squash(str(artifact.evidence or "")).rstrip("…").strip()[:80]
+            if (
+                artifact.status == "active"
+                and (quote or artifact.value)
+                and (quote or artifact.value) not in kept
+            ):
+                artifact.status = "unknown"
+                if artifact.role == "unknown":
+                    artifact.role = "attacker_tooling"
+                demoted.append(artifact.value)
+        if demoted:
+            self.trail.step(
+                "source",
+                "%d artifact(s) only in the README's usage, lab or file sections: %s",
+                len(demoted),
+                listing(demoted),
+            )
 
     def _evidence_research_text(self, research_id: str | None) -> str:
         """Return no research text for evidence checks.
@@ -686,9 +750,7 @@ class Orchestrator:
             or None
         )
         candidates: list[dict[str, Any]] = list(
-            command_candidates(
-                self._primary_evidence_text(item), platforms, primary_actor=primary_actor
-            )
+            command_candidates(self._command_text(item), platforms, primary_actor=primary_actor)
         )
         if candidates:
             self.trail.step(
@@ -1005,7 +1067,7 @@ class Orchestrator:
         # Find command candidates from gap text or primary text that match the gaps
         candidates = list(command_candidates(combined_gap_text, platforms=req.platforms))
         primary_candidates = list(
-            command_candidates(self._primary_evidence_text(item), platforms=req.platforms)
+            command_candidates(self._command_text(item), platforms=req.platforms)
         )
         for cand in primary_candidates:
             prog = cand.get("title", "").split()[0].lower()
@@ -1321,6 +1383,14 @@ class Orchestrator:
         """
         techniques = list(req.hypothesis.techniques)
         indicators = dict(item.metadata.get("indicators") or {})
+        from hecate_agent.core.provenance import mark_source_pages
+
+        own = mark_source_pages(
+            self._indicator_records,
+            [item.source_url, getattr(self._source_evidence, "url", "")],
+        )
+        if own:
+            self.trail.step("sigma", "no rules for the source's own pages: %s", listing(own))
         records = [r.to_dict() for r in self._indicator_records]
         if records:
             # The model may only use indicators a rule can observe; historical
@@ -2047,6 +2117,7 @@ class Orchestrator:
             )
         else:
             self._gather_source_evidence(item)
+            self._demote_tooling_artifacts(item)
         source_block = (
             self._source_evidence.summary_block()
             if self._source_evidence is not None and self._source_evidence.artifacts
@@ -2571,7 +2642,7 @@ class Orchestrator:
             # Research links are stripped: they cite retrieved pages, and a
             # page title is not the intel ("OAuth Traps" proposed T1546.005).
             with self.metrics.measure("technique_candidates"):
-                candidates = self.hecate.candidate_techniques(self._primary_evidence_text(item))
+                candidates = self.hecate.candidate_techniques(self._technique_text(item))
             self.trail.step(
                 "techniques",
                 "matched in the intel's wording: %s",
@@ -2612,7 +2683,7 @@ class Orchestrator:
             hypothesis.techniques = self._drop_unevidenced_techniques(
                 hypothesis.techniques,
                 protected=[*cti_techniques, *(tid for tid, _ in candidates), *observed_ids],
-                cti_text=self._primary_evidence_text(item),
+                cti_text=self._technique_text(item),
                 research_text="",
             )
 

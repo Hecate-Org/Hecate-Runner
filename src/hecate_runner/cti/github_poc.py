@@ -7,8 +7,8 @@ intelligence weeks before vulnerabilities are cataloged by CISA KEV.
 Features:
 - Primary ingestion via GitHub REST Search API (keyless or authenticated via GITHUB_TOKEN).
 - Keyless raw failover via curated nomi-sec/PoC-in-GitHub feed when Search API is rate-limited.
-- Deep artifact extraction: target software, vulnerability category (RCE, Auth Bypass, LPE),
-  network ports, endpoints, and sample execution commands from repository READMEs.
+- README artifact extraction: vulnerability category (RCE, Auth Bypass, LPE) plus the
+  commands, target paths and ports the README actually quotes, each with its source line.
 - Persistent cursor state preventing duplicate hunt drafting.
 """
 
@@ -63,7 +63,185 @@ VULN_TYPE_PATTERNS = [
     ),
 ]
 
-COMMON_EXPLOIT_PORTS = ["80", "443", "8080", "8443", "8000", "8888", "389", "445", "6379", "27017"]
+UNKNOWN_VULN_TYPE = "Unclassified"
+
+# Classes too vague to map (DoS, Unclassified) name no technique rather than a guessed one.
+VULN_TYPE_TECHNIQUES = {
+    "Remote Code Execution (RCE)": "T1190 (Exploit Public-Facing Application)",
+    "Authentication Bypass": "T1190 (Exploit Public-Facing Application)",
+    "SQL Injection (SQLi)": "T1190 (Exploit Public-Facing Application)",
+    "Server-Side Request Forgery (SSRF)": "T1190 (Exploit Public-Facing Application)",
+    "Command Injection": "T1190 (Exploit Public-Facing Application)",
+    "Path Traversal / Arbitrary File Read": "T1190 (Exploit Public-Facing Application)",
+    "Privilege Escalation (LPE)": "T1068 (Exploitation for Privilege Escalation)",
+}
+
+_GENERIC_REPO_WORDS = re.compile(
+    r"\b(poc|pocs|exploit|exploits|scanner|checker|check|rce|lpe|lab|research|analysis)\b", re.I
+)
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([\w+-]*)")
+_SHELL_FENCE_LANGS = {
+    "",
+    "bash",
+    "sh",
+    "shell",
+    "console",
+    "zsh",
+    "terminal",
+    "powershell",
+    "ps1",
+    "pwsh",
+    "cmd",
+    "bat",
+}
+_PROMPT = re.compile(r"^\s*(?:\$|>|PS[^>]*>)\s*")
+_TRAILING_COMMENT = re.compile(r"\s+#\s.*$")
+_COMMAND_PREFIXES = (
+    "python3 ",
+    "python ",
+    "curl ",
+    "wget ",
+    "bash ",
+    "sh ",
+    "./",
+    "perl ",
+    "go run ",
+    "ruby ",
+    "node ",
+    "java -jar ",
+    "nuclei ",
+)
+_LAB_COMMAND = re.compile(r"\b(setup|install|teardown|requirements|venv|build)\b", re.I)
+_EXPLOIT_COMMAND = re.compile(r"\b(poc|exploit|exp|pwn|rce|attack)\b", re.I)
+_URL = re.compile(r"\bhttps?://(<[^>\s]+>|[^\s/:'\"`<>]+)(?::(\d{1,5}))?(/[^\s'\"`<>)\]]*)?", re.I)
+_REQUEST_LINE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/[^\s'\"`<>,;)\]]*)")
+_PORT_PHRASE = re.compile(r"\b(?:tcp|udp)/(\d{2,5})\b|\bport\s+(\d{2,5})\b", re.I)
+_LOOPBACK_HOST = re.compile(r"^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])$", re.I)
+# Hosts READMEs link for reference; paths on them are documentation, not targets.
+_REFERENCE_HOSTS = (
+    "github.com",
+    "githubusercontent.com",
+    "github.io",
+    "githubassets.com",
+    "shields.io",
+    "nvd.nist.gov",
+    "cve.org",
+    "mitre.org",
+    "ietf.org",
+    "pypi.org",
+    "npmjs.com",
+)
+
+
+def _cell(text: str, limit: int = 200) -> str:
+    text = " ".join(str(text).split()).replace("|", "\\|")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _code_blocks(readme: str) -> list[tuple[str, list[str]]]:
+    """Fenced code blocks as (language, lines), pairing each opening fence with its close."""
+    blocks: list[tuple[str, list[str]]] = []
+    fence: str | None = None
+    lang = ""
+    body: list[str] = []
+    for line in readme.splitlines():
+        match = _FENCE.match(line)
+        if fence is None:
+            if match:
+                fence, lang, body = match.group(1), match.group(2).lower(), []
+        elif (
+            match
+            and not match.group(2)
+            and match.group(1)[0] == fence[0]
+            and len(match.group(1)) >= len(fence)
+        ):
+            blocks.append((lang, body))
+            fence = None
+        else:
+            body.append(line)
+    return blocks
+
+
+def _readme_commands(blocks: list[tuple[str, list[str]]]) -> list[tuple[str, str]]:
+    """Up to three runnable commands from shell blocks, exploit invocations first, lab setup skipped."""
+    found: dict[str, str] = {}
+    for lang, body in blocks:
+        if lang not in _SHELL_FENCE_LANGS:
+            continue
+        for raw in body:
+            command = _TRAILING_COMMENT.sub("", _PROMPT.sub("", raw)).strip()
+            if (
+                command.startswith(_COMMAND_PREFIXES)
+                and len(command) < 160
+                and not _LAB_COMMAND.search(command)
+            ):
+                found.setdefault(command, raw.strip())
+    ranked = sorted(found.items(), key=lambda item: not _EXPLOIT_COMMAND.search(item[0]))
+    return ranked[:3]
+
+
+def _is_comment(line: str) -> bool:
+    return line.lstrip().startswith(("#", "//"))
+
+
+def _is_target_host(host: str) -> bool:
+    host = host.lower()
+    if _LOOPBACK_HOST.match(host):
+        return False
+    return not any(host == ref or host.endswith("." + ref) for ref in _REFERENCE_HOSTS)
+
+
+def _readme_endpoints(readme: str, blocks: list[tuple[str, list[str]]]) -> list[tuple[str, str]]:
+    """Target request paths: HTTP request lines anywhere, or URL paths on target hosts in code."""
+    found: dict[str, str] = {}
+    for line in readme.splitlines():
+        for match in _REQUEST_LINE.finditer(line):
+            path = match.group(1).rstrip(".,:`?")
+            if len(path) > 1:
+                found.setdefault(path, line.strip())
+    for _, body in blocks:
+        for line in body:
+            if _is_comment(line):
+                continue
+            for match in _URL.finditer(line):
+                path = (match.group(3) or "").rstrip(".,:`?")
+                if len(path) > 1 and _is_target_host(match.group(1)):
+                    found.setdefault(path, line.strip())
+    return list(found.items())[:4]
+
+
+#: A request line the README quotes: "deploy a new flow through `POST /flows`".
+_REQUEST_RE = re.compile(
+    r"(?<![\w/])(POST|PUT|PATCH|DELETE)\s+`?(?:https?://[^\s/`]+)?(/[\w\-./]*[\w/])(?![\w/])"
+)
+
+
+def _readme_requests(text: str) -> list[dict[str, Any]]:
+    """State-changing requests ``text`` shows sent to the target, for literal webserver rules.
+
+    A bare GET (``GET /settings``) is every page load of the product's own UI,
+    so only requests that change the target are taken.
+    """
+    seen: dict[tuple[str, str], None] = {}
+    for match in _REQUEST_RE.finditer(text):
+        seen.setdefault((match[1], match[2]), None)
+    return [{"method": m, "path": [p], "origin": "readme"} for m, p in seen]
+
+
+def _readme_ports(readme: str, blocks: list[tuple[str, list[str]]]) -> list[tuple[str, str]]:
+    """Target ports: explicit ports on target URLs in code, or 'TCP/n' / 'port n' in prose."""
+    found: dict[str, str] = {}
+    for _, body in blocks:
+        for line in body:
+            if _is_comment(line):
+                continue
+            for match in _URL.finditer(line):
+                if match.group(2) and _is_target_host(match.group(1)):
+                    found.setdefault(match.group(2), line.strip())
+    for line in readme.splitlines():
+        for match in _PORT_PHRASE.finditer(line):
+            found.setdefault(match.group(1) or match.group(2), line.strip())
+    return [(p, ev) for p, ev in found.items() if 0 < int(p) < 65536][:3]
 
 
 @dataclass
@@ -250,122 +428,87 @@ class GitHubPocProvider(CTIProvider):
         return ""
 
     def _extract_poc_artifacts(self, repo_data: dict[str, Any], readme: str) -> dict[str, Any]:
-        """Extract software name, vulnerability type, sample execution syntax, and target ports."""
-        combined_text = (
-            f"{repo_data.get('full_name', '')}\n{repo_data.get('description', '')}\n{readme}"
-        )
+        """Extract the CVE, vulnerability class, and README-quoted commands, paths and ports.
 
-        # 1. Target CVE(s)
-        cves = sorted(set(CVE_REGEX.findall(combined_text)))
-        primary_cve = cves[0].upper() if cves else "CVE-UNKNOWN"
+        Commands, endpoints and ports come only from the README, each with the
+        line it was quoted from. Nothing is synthesized when the README has none.
+        """
+        name_and_desc = f"{repo_data.get('full_name', '')}\n{repo_data.get('description', '')}"
+        combined_text = f"{name_and_desc}\n{readme}"
+
+        # 1. Target CVE(s), preferring the one the repository is named or described for
+        cves = list(dict.fromkeys(c.upper() for c in CVE_REGEX.findall(combined_text)))
+        primary_cve = cves[0] if cves else "CVE-UNKNOWN"
 
         # 2. Vulnerability Category
-        vuln_type = "Exploit / Proof-of-Concept"
+        vuln_type = UNKNOWN_VULN_TYPE
         for name, pattern in VULN_TYPE_PATTERNS:
             if pattern.search(combined_text):
                 vuln_type = name
                 break
 
-        # 3. Detect Target Software from repo name or text
+        # 3. Target software from the repo name, minus CVE IDs and generic PoC words
         repo_name = repo_data.get("full_name", "").split("/")[-1]
-        clean_name = re.sub(r"cve[-_]?\d{4}[-_]?\d+", "", repo_name, flags=re.I).strip("-_")
-        software = clean_name if len(clean_name) > 2 else "Public-Facing Application"
+        clean_name = re.sub(r"cve[-_]?\d{4}[-_]?\d+", "", repo_name, flags=re.I)
+        clean_name = _GENERIC_REPO_WORDS.sub("", clean_name.replace("_", "-"))
+        clean_name = re.sub(r"-{2,}", "-", clean_name).strip("-_. ")
+        software = clean_name if len(clean_name) > 2 else ""
 
-        # 4. Extract sample execution command lines from markdown code blocks
-        commands: list[str] = []
-        code_blocks = re.findall(
-            r"```(?:bash|sh|python|powershell|cmd)?\s*\n([\s\S]*?)\n```", readme, re.I
-        )
-        for block in code_blocks:
-            for line in block.splitlines():
-                line_str = line.strip()
-                if (
-                    any(
-                        line_str.startswith(prefix)
-                        for prefix in (
-                            "python",
-                            "python3",
-                            "curl",
-                            "bash",
-                            "./",
-                            "perl",
-                            "go run",
-                            "ruby",
-                        )
-                    )
-                    and len(line_str) < 160
-                    and line_str not in commands
-                ):
-                    commands.append(line_str)
-                    if len(commands) >= 3:
-                        break
-            if len(commands) >= 3:
-                break
+        from hecate_agent.core.command_rules import without_operator_sections
 
-        # Fallback command if none found
-        if not commands:
-            commands.append(f"python3 exploit.py -t http://<target>:8080 --cve {primary_cve}")
-
-        # 5. Extract endpoints/ports
-        ports: list[str] = []
-        for port in COMMON_EXPLOIT_PORTS:
-            if re.search(rf":{port}\b", combined_text) or re.search(
-                rf"\bport\s+{port}\b", combined_text, re.I
-            ):
-                ports.append(port)
-
-        endpoints = re.findall(r"(/[a-zA-Z0-9_\-\.\/]{3,50})", combined_text)
-        clean_endpoints = [
-            ep
-            for ep in endpoints
-            if not ep.startswith("/usr")
-            and not ep.startswith("/bin")
-            and not ep.endswith(".md")
-            and not ep.endswith(".py")
-        ][:2]
-
+        blocks = _code_blocks(readme)
+        commands = _readme_commands(blocks)
+        # A command quoted only in the usage, lab or scanner sections is the
+        # tester's own run, not something seen on a target.
+        on_target = " ".join(without_operator_sections(readme).split())
         return {
             "cve": primary_cve,
             "all_cves": cves,
             "software": software,
             "vuln_type": vuln_type,
             "commands": commands,
-            "ports": ports[:3],
-            "endpoints": clean_endpoints,
+            "tester_commands": [c for c, ev in commands if " ".join(ev.split()) not in on_target],
+            "http_requests": _readme_requests(without_operator_sections(readme)),
+            "endpoints": _readme_endpoints(readme, blocks),
+            "ports": _readme_ports(readme, blocks),
             "readme_excerpt": readme[:1000].strip(),
         }
 
     def _build_blurb(self, repo_data: dict[str, Any], artifacts: dict[str, Any]) -> str:
-        """Render a structured markdown CTI blurb from the PoC repository."""
+        """Render a CTI blurb that claims no more than the repository shows."""
         cve = artifacts["cve"]
         software = artifacts["software"]
         vuln_type = artifacts["vuln_type"]
         repo_url = repo_data.get("html_url")
         full_name = repo_data.get("full_name")
         desc = repo_data.get("description") or artifacts.get(
-            "readme_excerpt", "Public exploit code published."
+            "readme_excerpt", "No description provided."
         )
         stars = repo_data.get("stars", 0)
 
-        # Select ATT&CK technique based on vuln category
-        if "Privilege" in vuln_type or "LPE" in vuln_type:
-            technique_id = "T1068"
-            technique_name = "Exploitation for Privilege Escalation"
-        else:
-            technique_id = "T1190"
-            technique_name = "Exploit Public-Facing Application"
+        technique = VULN_TYPE_TECHNIQUES.get(vuln_type)
+        tags = ["exploit-repository", "github", cve.lower()]
+        short = re.search(r"\(([^)]+)\)", vuln_type)
+        if short:
+            tags.append(short.group(1).lower())
 
+        classified = (
+            f"Keyword matching on its name, description and README suggests **{vuln_type}**"
+            + (f" in **{software}**." if software else ".")
+            if vuln_type != UNKNOWN_VULN_TYPE
+            else "Keyword matching found no vulnerability class in its name, description or README."
+        )
         lines = [
-            f"Title: Proof-of-Concept Exploit Weaponization: {cve} affecting {software}",
+            f"Title: GitHub repository referencing {cve}" + (f" ({software})" if software else ""),
             f"Source: GitHub PoC Monitor ({full_name})",
             f"URL: {repo_url}",
-            "Adversary/Attribution: Weaponized Public Exploit / Security Researchers",
-            f"Tags: exploit, poc, weaponization, {cve.lower()}, rce, github",
+            "Adversary/Attribution: Unattributed; a public repository, not observed attacker activity",
+            f"Tags: {', '.join(tags)}",
             "",
             "### Threat Context",
-            f"A functional Proof-of-Concept (PoC) exploit for **{cve}** has been released on GitHub ({full_name}). "
-            f"The vulnerability is characterized as **{vuln_type}** targeting **{software}**. "
-            "Public exploit availability significantly compresses the window between disclosure and widespread in-the-wild automated exploitation.",
+            f"A public GitHub repository ({full_name}) references **{cve}**. {classified} "
+            "Whether it contains a working exploit has not been verified, and its publication "
+            "is not evidence of exploitation in the wild.",
             "",
             "Repository Details:",
             f"- **Repository:** [{full_name}]({repo_url}) ({stars} stars)",
@@ -373,52 +516,54 @@ class GitHubPocProvider(CTIProvider):
             f"- **Vulnerability Class:** {vuln_type}",
             f"- **Description:** {desc}",
             "",
-            "### Primary Source Evidence",
+            "### README Excerpts",
             "",
-            "| Artifact | Kind | Role | Status | Evidence |",
-            "|---|---|---|---|---|",
         ]
 
-        # Primary command artifact
-        for cmd in artifacts["commands"]:
-            lines.append(
-                f'| `{cmd}` | command_line | execution | active | "PoC invocation syntax: {cmd}" |'
-            )
-
-        # Endpoints
-        for ep in artifacts["endpoints"]:
-            lines.append(
-                f'| `{ep}` | url_path | target_endpoint | active | "Exploitation target path: {ep}" |'
-            )
-
-        # Ports
-        for port in artifacts["ports"]:
-            lines.append(
-                f'| `{port}` | port | network_target | active | "Target listener port: {port}" |'
-            )
-
-        lines.extend(
+        tester = set(artifacts.get("tester_commands") or ())
+        rows = (
             [
-                "",
-                "**Indicators by role** (the feed's indicators, typed against the report):",
-                "",
-                "| Indicator | Type | Role | Status | Confidence | Rules |",
-                "|---|---|---|---|---|---|",
-                f"| `{cve}` | cve | vulnerability | active | high | process_creation, network_connection |",
+                (
+                    cmd,
+                    "command_line",
+                    "attacker_tooling",
+                    "unknown" if cmd in tester else "active",
+                    ev,
+                )
+                for cmd, ev in artifacts["commands"]
             ]
+            + [
+                (ep, "url_path", "target_endpoint", "active", ev)
+                for ep, ev in artifacts["endpoints"]
+            ]
+            + [(port, "port", "network_target", "active", ev) for port, ev in artifacts["ports"]]
         )
-
-        for cmd in artifacts["commands"]:
+        if rows:
+            lines += [
+                "Each artifact below is quoted verbatim from the repository README.",
+                "",
+                "| Artifact | Kind | Role | Status | Evidence |",
+                "|---|---|---|---|---|",
+            ]
+            for value, kind, role, status, evidence in rows:
+                lines.append(
+                    f'| `{_cell(value)}` | {kind} | {role} | {status} | "{_cell(evidence)}" |'
+                )
+        else:
             lines.append(
-                f"| `{cmd}` | command_line | execution | active | high | process_creation |"
+                "The README quotes no runnable command, target request path or target port."
             )
 
-        lines.extend(
-            [
-                "",
-                f"{ATTACK_TECHNIQUE_LINE} {technique_id} ({technique_name}), T1059 (Command and Scripting Interpreter)",
-            ]
-        )
+        lines += [
+            "",
+            "**Indicators by role** (the feed's indicators, typed against the report):",
+            "",
+            "| Indicator | Type | Role | Status | Confidence | Rules |",
+            "|---|---|---|---|---|---|",
+            f"| `{cve}` | cve | vulnerability | active | high | none: an identifier, not a log observable |",
+        ]
+        if technique:
+            lines += ["", f"{ATTACK_TECHNIQUE_LINE} {technique}"]
 
         return "\n".join(lines)
 
@@ -449,8 +594,13 @@ class GitHubPocProvider(CTIProvider):
                     "repo_full_name": cand["full_name"],
                     "stars": cand.get("stars", 0),
                     "vuln_type": artifacts["vuln_type"],
+                    **(
+                        {"http_requests": artifacts["http_requests"]}
+                        if artifacts["http_requests"]
+                        else {}
+                    ),
                 },
-                title=f"PoC: {cve} - {software} ({cand['full_name']})",
+                title=f"PoC: {cve} - {software or 'unspecified software'} ({cand['full_name']})",
                 source_url=cand["html_url"],
             )
 

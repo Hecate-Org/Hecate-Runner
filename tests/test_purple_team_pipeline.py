@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import yaml
 from hecate_agent.core.provenance import IndicatorRecord
 
@@ -201,6 +202,22 @@ def test_the_draft_claims_only_what_the_replay_showed(sample_hypothesis: Hypothe
     assert "0 false positives" not in md
 
 
+@pytest.mark.parametrize(("validated", "flag"), [(2, "false"), (12, "true")])
+def test_the_hunt_is_validated_only_when_every_evaluated_rule_is(
+    sample_hypothesis: HypothesisResult, validated: int, flag: str
+) -> None:
+    """H-0016 carried purple_team_validated: true with 2 of 12 rules validated."""
+    req = DraftHuntRequest(
+        hunt_id="H-0999",
+        threat_intel="x",
+        hypothesis=sample_hypothesis,
+        generated_at=datetime(2026, 10, 23, tzinfo=UTC),
+        purple_team_rules_evaluated=12,
+        purple_team_rules_validated=validated,
+    )
+    assert f"purple_team_validated: {flag}\n" in render_draft(req)
+
+
 def test_an_attack_source_replays_as_inbound_traffic() -> None:
     records = [
         IndicatorRecord(value="45.153.212.101", type="ipv4", role="inbound", status="active")
@@ -353,3 +370,30 @@ detection:
     assert outcome.status == "validated"
     assert outcome.true_positives >= 1
     assert outcome.false_positives == 0
+
+
+def test_hashes_that_are_not_file_hashes_are_not_replayed_as_processes() -> None:
+    """H-0018's hash rule "validated" against Node-RED flow revision IDs."""
+    rev = "781d7e7c1a2f4b3c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c"
+    events = replay_events(
+        [IndicatorRecord(value=rev, type="sha256", role="non_file", status="active")], []
+    )
+    assert not any(rev in str(e) for e in events.get("process_creation", []))
+
+
+def test_artifacts_not_tied_to_the_intrusion_are_not_replayed() -> None:
+    """A PoC README's own test output (fast.log) is demoted, so it cannot validate a rule."""
+    events = replay_events(
+        [],
+        [SimpleNamespace(value="/tmp/suricata-test/fast.log", kind="file_path", status="unknown")],
+    )
+    assert "file_event" not in events
+
+
+def test_a_path_the_source_shows_posted_replays_as_a_post() -> None:
+    events = replay_events(
+        [],
+        [SimpleNamespace(value="/flows", kind="url_path", status="active")],
+        cti_text="The attacker deploys a new flow through `POST /flows` with no token.",
+    )
+    assert {"cs-method": "POST", "cs-uri-stem": "/flows"}.items() <= events["webserver"][0].items()

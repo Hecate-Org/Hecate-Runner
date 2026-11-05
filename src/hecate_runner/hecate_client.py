@@ -407,11 +407,11 @@ class HecateClient:
         Hecate that predates the module or when ATT&CK data cannot be read.
         """
         try:
-            from hecate_agent.core.technique_candidates import candidate_techniques
+            from hecate_agent.core.technique_candidates import named_techniques
         except ImportError:
             return []
         try:
-            found = self._with_context(candidate_techniques, text)
+            found = self._with_context(named_techniques, text)
         except Exception as exc:  # candidates are an aid; never fatal
             log.warning("Candidate technique matching failed (%s); continuing without it", exc)
             return []
