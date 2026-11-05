@@ -122,8 +122,10 @@ def evaluate_promotion(
     metadata = _load_frontmatter(text)
     if metadata.get("hunt_id") != hunt_id:
         raise ValueError("hunt frontmatter ID does not match its filename")
-    if metadata.get("status") != "planning":
-        raise ValueError("only status: planning bundles can be promoted")
+    status = metadata.get("status")
+    approved = status == "active" and metadata.get("review_decision") == "approved"
+    if status != "planning" and not approved:
+        raise ValueError("only planning or review-approved active bundles can be promoted")
 
     facts = parse_hunt_file(text)
     if facts.hunt_id != hunt_id:
