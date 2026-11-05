@@ -848,7 +848,9 @@ def publish_sync(
 
 @app.command("deploy-queries")
 def deploy_queries_cmd(
-    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0868) or 'all' to deploy all hunt queries.")],
+    hunt_id: Annotated[
+        str, typer.Argument(help="Hunt ID (e.g. H-0868) or 'all' to deploy all hunt queries.")
+    ],
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -884,7 +886,9 @@ def deploy_queries_cmd(
 
     target_hunts: list[str] = []
     if hunt_id.lower() == "all":
-        target_hunts = sorted([d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")])
+        target_hunts = sorted(
+            [d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")]
+        )
     else:
         target_dir = queries_root / hunt_id
         if not target_dir.exists():
@@ -893,7 +897,9 @@ def deploy_queries_cmd(
         target_hunts = [hunt_id]
 
     table = Table(
-        title="SIEM & EDR Query Deployment (All Hunts)" if hunt_id.lower() == "all" else f"SIEM & EDR Query Deployment for {hunt_id}",
+        title="SIEM & EDR Query Deployment (All Hunts)"
+        if hunt_id.lower() == "all"
+        else f"SIEM & EDR Query Deployment for {hunt_id}",
         show_header=True,
         header_style="bold cyan",
     )
@@ -976,7 +982,9 @@ def deploy_queries_cmd(
                 f"| `{h_id}` | `{res.get('file')}` | `{res.get('target')}` | {st} | `{(res.get('remote_id') or '')[:25]}` |"
             )
         if len(all_deployments) > 30:
-            md_lines.append(f"| ... | *({len(all_deployments) - 30} additional queries deployed)* | | | |")
+            md_lines.append(
+                f"| ... | *({len(all_deployments) - 30} additional queries deployed)* | | | |"
+            )
         md_lines.append("")
         with summary_path.open("a", encoding="utf-8") as f:
             f.write("\n".join(md_lines) + "\n")
@@ -984,11 +992,14 @@ def deploy_queries_cmd(
 
 @app.command("decommission-queries")
 def decommission_queries_cmd(
-    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0011) to decommission queries for, or 'all'.")],
+    hunt_id: Annotated[
+        str, typer.Argument(help="Hunt ID (e.g. H-0011) to decommission queries for, or 'all'.")
+    ],
     dry_run: Annotated[
         bool,
         typer.Option(
-            "--dry-run/--live", help="Simulate decommissioning (default) or delete live from remote SIEM APIs."
+            "--dry-run/--live",
+            help="Simulate decommissioning (default) or delete live from remote SIEM APIs.",
         ),
     ] = True,
     target: Annotated[
@@ -997,11 +1008,15 @@ def decommission_queries_cmd(
     ] = None,
     reason: Annotated[
         str,
-        typer.Option("--reason", "-r", help="Analyst rationale and sign-off for query decommissioning."),
+        typer.Option(
+            "--reason", "-r", help="Analyst rationale and sign-off for query decommissioning."
+        ),
     ] = "Decommissioned via Query Lifecycle Management",
     actor: Annotated[
         str,
-        typer.Option("--actor", "-a", help="Analyst or system identifier signing off on decommissioning."),
+        typer.Option(
+            "--actor", "-a", help="Analyst or system identifier signing off on decommissioning."
+        ),
     ] = "analyst",
     retire_hunt: Annotated[
         bool,
@@ -1019,9 +1034,7 @@ def decommission_queries_cmd(
     ] = False,
     verbose: Annotated[
         bool,
-        typer.Option(
-            "--verbose", "-v", help="Show full HTTP request summaries."
-        ),
+        typer.Option("--verbose", "-v", help="Show full HTTP request summaries."),
     ] = False,
 ) -> None:
     """Decommission and undeploy hunt queries from target SIEM & EDR platforms with audit provenance."""
@@ -1070,7 +1083,7 @@ def decommission_queries_cmd(
         f"(sign-off: [cyan]{actor}[/cyan] — '{reason}')."
     )
     if retire_hunt:
-        console.print(f"[bold green]✔ Hunt lifecycle status transitioned to 'retired'.[/bold green]")
+        console.print("[bold green]✔ Hunt lifecycle status transitioned to 'retired'.[/bold green]")
 
     if verbose:
         for res in summary.get("results", []):
@@ -1116,9 +1129,7 @@ def undeploy_queries_cmd(
     ] = None,
     verbose: Annotated[
         bool,
-        typer.Option(
-            "--verbose", "-v", help="Show full HTTP request summaries."
-        ),
+        typer.Option("--verbose", "-v", help="Show full HTTP request summaries."),
     ] = False,
 ) -> None:
     """Undeploy/delete hunt queries from target SIEM and EDR platforms."""
@@ -1149,7 +1160,9 @@ def undeploy_queries_cmd(
     for res in summary.get("results", []):
         status = str(res.get("status", ""))
         if status in {"undeployed", "not_found", "dry_run"}:
-            status_color = "green" if status == "undeployed" else ("cyan" if status == "not_found" else "blue")
+            status_color = (
+                "green" if status == "undeployed" else ("cyan" if status == "not_found" else "blue")
+            )
         else:
             status_color = "red"
         table.add_row(
@@ -1181,7 +1194,9 @@ def hunt_lifecycle_cmd(
     hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0011).")],
     status: Annotated[
         str | None,
-        typer.Argument(help="Optional new lifecycle state: planning, testing, active, deprecated, retired."),
+        typer.Argument(
+            help="Optional new lifecycle state: planning, testing, active, deprecated, retired."
+        ),
     ] = None,
     reason: Annotated[
         str,
@@ -1259,12 +1274,12 @@ def hunt_lifecycle_cmd(
 
 @app.command("sync-queries")
 def sync_queries_cmd(
-    hunt_id: Annotated[str, typer.Argument(help="Hunt ID (e.g. H-0868) to sync check queries for.")],
+    hunt_id: Annotated[
+        str, typer.Argument(help="Hunt ID (e.g. H-0868) to sync check queries for.")
+    ],
     dry_run: Annotated[
         bool,
-        typer.Option(
-            "--dry-run/--live", help="Simulate sync check (default) or query live SIEM."
-        ),
+        typer.Option("--dry-run/--live", help="Simulate sync check (default) or query live SIEM."),
     ] = True,
     target: Annotated[
         str | None,
@@ -1272,9 +1287,7 @@ def sync_queries_cmd(
     ] = None,
     verbose: Annotated[
         bool,
-        typer.Option(
-            "--verbose", "-v", help="Show query drift diffs and full summaries."
-        ),
+        typer.Option("--verbose", "-v", help="Show query drift diffs and full summaries."),
     ] = False,
 ) -> None:
     """Check synchronization and detect query drift against target SIEM and EDR platforms."""
@@ -1382,7 +1395,9 @@ def audit_siem_cmd(
     ] = "table",
     output_markdown: Annotated[
         Path | None,
-        typer.Option("--output-markdown", "-o", help="Write GitHub Flavored Markdown report to a file."),
+        typer.Option(
+            "--output-markdown", "-o", help="Write GitHub Flavored Markdown report to a file."
+        ),
     ] = None,
     github_step_summary: Annotated[
         bool,
@@ -1459,9 +1474,7 @@ def audit_siem_cmd(
                     status_color = "green" if status == "in_sync" else "blue"
                 elif status == "decommissioned":
                     status_color = "cyan"
-                elif status == "pending_decommission":
-                    status_color = "yellow"
-                elif status == "drift_detected":
+                elif status == "pending_decommission" or status == "drift_detected":
                     status_color = "yellow"
                 elif status == "missing_remote":
                     status_color = "magenta"
@@ -1478,7 +1491,9 @@ def audit_siem_cmd(
 
         console.print(table)
         decom_str = f", [cyan]{decommissioned} decommissioned[/cyan]" if decommissioned > 0 else ""
-        pending_str = f", [yellow]{pending_decom} pending decommission[/yellow]" if pending_decom > 0 else ""
+        pending_str = (
+            f", [yellow]{pending_decom} pending decommission[/yellow]" if pending_decom > 0 else ""
+        )
         console.print(
             f"\n[bold]Audit Summary:[/bold] {total_h} hunt(s), {total_q} queries evaluated "
             f"([green]{in_sync} in sync[/green]{decom_str}{pending_str}, "
@@ -1677,9 +1692,7 @@ def drift_history_cmd(
             color = "green"
         elif ev_type == "decommissioned":
             color = "cyan"
-        elif ev_type == "pending_decommission":
-            color = "yellow"
-        elif ev_type == "drift_detected":
+        elif ev_type == "pending_decommission" or ev_type == "drift_detected":
             color = "yellow"
         elif ev_type == "missing_remote":
             color = "magenta"
@@ -1721,6 +1734,7 @@ def siem_status_cmd(
     """Display comprehensive SIEM Detection-as-Code health, sync metrics, and audit summary."""
     settings = Settings()
     from rich.panel import Panel
+
     from hecate_runner.siem_drift import get_drift_history, get_siem_drift_metrics
 
     metrics = get_siem_drift_metrics(settings.hecate_workspace, days=days)

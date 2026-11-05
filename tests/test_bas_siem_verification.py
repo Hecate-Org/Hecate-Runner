@@ -27,12 +27,18 @@ def mock_siem_workspace(tmp_path: Path) -> Path:
     # Mock H-0011 queries
     query_dir = ws / "queries" / "H-0011"
     query_dir.mkdir(parents=True)
-    spl_file = query_dir / "process_creation__execution_of_comsvcs_dll_minidump_via_rundll32_exe_for_lsass.spl"
+    spl_file = (
+        query_dir
+        / "process_creation__execution_of_comsvcs_dll_minidump_via_rundll32_exe_for_lsass.spl"
+    )
     spl_file.write_text(
         'Image="*\\rundll32.exe" CommandLine="*comsvcs.dll*" CommandLine="*MiniDump*"',
         encoding="utf-8",
     )
-    yml_file = query_dir / "process_creation__execution_of_comsvcs_dll_minidump_via_rundll32_exe_for_lsass.yml"
+    yml_file = (
+        query_dir
+        / "process_creation__execution_of_comsvcs_dll_minidump_via_rundll32_exe_for_lsass.yml"
+    )
     yml_file.write_text(
         "title: MiniDump via comsvcs.dll\ntags:\n  - attack.t1003.001\n",
         encoding="utf-8",
@@ -173,14 +179,16 @@ def test_siem_verifier_live_execution_mocked(mock_siem_workspace: Path, monkeypa
         {"CommandLine": "rundll32.exe comsvcs.dll MiniDump"}
     ]
 
-    with patch("hecate_agent.core.splunk_client.create_client_from_env", return_value=mock_client):
-        with patch("hecate_runner.bas.siem_verifier.forward_events_to_splunk", return_value=1):
-            verifier = SiemAlertVerifier(mock_siem_workspace)
-            res = verifier.verify_detonation_alert(
-                detonation=det,
-                hunt_id="H-0011",
-                siem_target="splunk",
-            )
+    with (
+        patch("hecate_agent.core.splunk_client.create_client_from_env", return_value=mock_client),
+        patch("hecate_runner.bas.siem_verifier.forward_events_to_splunk", return_value=1),
+    ):
+        verifier = SiemAlertVerifier(mock_siem_workspace)
+        res = verifier.verify_detonation_alert(
+            detonation=det,
+            hunt_id="H-0011",
+            siem_target="splunk",
+        )
 
     assert res.status == "verified_true_positive"
     assert res.rule_triggered is True

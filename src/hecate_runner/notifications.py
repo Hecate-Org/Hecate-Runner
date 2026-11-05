@@ -457,9 +457,7 @@ def notify_siem_drift(
         return False, "Slack not configured"
 
     target_channel = (
-        channel
-        or settings.slack_channel_detection_engineering
-        or settings.slack_channel_hunts_exec
+        channel or settings.slack_channel_detection_engineering or settings.slack_channel_hunts_exec
     )
     text = f"⚠️ *SIEM Detection Drift Detected for `{hunt_id}`*"
     attachments = build_siem_drift_alert_card(

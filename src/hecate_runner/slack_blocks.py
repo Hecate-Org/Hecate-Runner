@@ -1281,7 +1281,7 @@ def build_siem_status_card(
             else (
                 "🧹"
                 if ev_type == "decommissioned"
-                else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+                else ("⚠️" if ev_type == "drift_detected" else "ℹ️")  # noqa: RUF001
             )
         )
         recent_rows.append(f"{icon} `{ts}` *{h_id}* ({tgt}): `{ev_type}` by `{actor}`")
@@ -1388,7 +1388,7 @@ def build_siem_history_card(
             actor = ev.get("actor", "system")
             f_name = ev.get("file_name", "")
             icon = (
-                "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")
+                "✅" if ev_type == "reconciled" else ("⚠️" if ev_type == "drift_detected" else "ℹ️")  # noqa: RUF001
             )
             line = f"{icon} *{ts}* — `{h_id}` / `{tgt}`\n• File: `{f_name}` | Event: `{ev_type}` | Actor: `{actor}`"
             diff = ev.get("drift_diff")

@@ -572,7 +572,7 @@ class Orchestrator:
         from hecate_agent.core.command_rules import without_operator_sections
 
         evidence = self._source_evidence
-        return without_operator_sections(evidence.text if evidence is not None else "")
+        return str(without_operator_sections(evidence.text if evidence is not None else ""))
 
     def _demote_tooling_artifacts(self, item: CTIItem) -> None:
         """Take a PoC README's own files and test output out of the active evidence.

@@ -16,7 +16,6 @@ from hecate_runner.siem_drift import (
     load_drift_state,
     reconcile_all_drifted_queries,
     reconcile_hunt_queries,
-    save_drift_state,
 )
 from hecate_runner.slack_blocks import build_siem_drift_alert_card
 
@@ -28,7 +27,9 @@ def mock_workspace(tmp_path: Path) -> Path:
     q_dir = ws / "queries" / "H-0007"
     q_dir.mkdir(parents=True)
     (q_dir / "process__chmod.spl").write_text('Image="*/chmod"', encoding="utf-8")
-    (q_dir / "process__chmod.kql").write_text("ProcessEvents | where Image has 'chmod'", encoding="utf-8")
+    (q_dir / "process__chmod.kql").write_text(
+        "ProcessEvents | where Image has 'chmod'", encoding="utf-8"
+    )
 
     h_dir = ws / "hunts" / "2026" / "Q4"
     h_dir.mkdir(parents=True)
@@ -137,7 +138,7 @@ def test_notify_siem_drift(mock_workspace: Path):
         mock_resp.status_code = 200
         mock_post.return_value = mock_resp
 
-        ok, detail = notify_siem_drift(settings, "H-0007", drifted)
+        ok, _detail = notify_siem_drift(settings, "H-0007", drifted)
         assert ok is True
 
 
@@ -161,7 +162,7 @@ def test_cli_reconcile_queries_command(mock_workspace: Path):
 
 
 def test_siem_history_sqlite_records_sweeps_and_events(mock_workspace: Path):
-    from hecate_runner.siem_drift import get_drift_history, get_drift_db_path
+    from hecate_runner.siem_drift import get_drift_db_path, get_drift_history
 
     # Trigger audit sweep
     res = audit_workspace_queries(mock_workspace, dry_run=True, trigger="cli")
@@ -242,12 +243,12 @@ def test_siem_drift_metrics(mock_workspace: Path):
 
 
 def test_build_siem_status_and_history_cards(mock_workspace: Path):
+    from hecate_runner.siem_drift import get_drift_history, get_siem_drift_metrics
     from hecate_runner.slack_blocks import (
         build_runner_status_card,
         build_siem_history_card,
         build_siem_status_card,
     )
-    from hecate_runner.siem_drift import get_drift_history, get_siem_drift_metrics
 
     audit_workspace_queries(mock_workspace, dry_run=True)
     settings = Settings(hecate_workspace=mock_workspace)
@@ -257,11 +258,17 @@ def test_build_siem_status_and_history_cards(mock_workspace: Path):
 
     status_card = build_siem_status_card(settings, metrics, history)
     assert len(status_card) == 1
-    assert any("Detection-as-Code SIEM Health" in b.get("text", {}).get("text", "") for b in status_card[0]["blocks"])
+    assert any(
+        "Detection-as-Code SIEM Health" in b.get("text", {}).get("text", "")
+        for b in status_card[0]["blocks"]
+    )
 
     hist_card = build_siem_history_card("H-0007", history)
     assert len(hist_card) == 1
-    assert any("SIEM Drift & Versioning History" in b.get("text", {}).get("text", "") for b in hist_card[0]["blocks"])
+    assert any(
+        "SIEM Drift & Versioning History" in b.get("text", {}).get("text", "")
+        for b in hist_card[0]["blocks"]
+    )
 
     runner_card = build_runner_status_card(settings)
     assert len(runner_card) == 1
@@ -282,9 +289,7 @@ def test_cli_drift_history_and_siem_status_and_query_versions(mock_workspace: Pa
         deployed_by="analyst1",
     )
     audit_workspace_queries(mock_workspace, dry_run=True)
-    reconcile_hunt_queries(
-        mock_workspace, "H-0007", dry_run=False, force=True, actor="analyst1"
-    )
+    reconcile_hunt_queries(mock_workspace, "H-0007", dry_run=False, force=True, actor="analyst1")
 
     runner = CliRunner()
     with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace)}):
@@ -305,6 +310,7 @@ def test_cli_drift_history_and_siem_status_and_query_versions(mock_workspace: Pa
 
 def test_slack_slash_commands_siem_status_and_history(mock_workspace: Path):
     from slack_bolt import App
+
     from hecate_runner.slack_bot import SlackBotService
     from tests.test_slack_slash_commands import _get_command_listener
 
@@ -333,7 +339,12 @@ def test_slack_slash_commands_siem_status_and_history(mock_workspace: Path):
     respond_mock.reset_mock()
     cmd_listener.ack_function(
         ack=ack_mock,
-        body={"command": "/hecate", "text": "history H-0007", "user_id": "U123", "channel_id": "C123"},
+        body={
+            "command": "/hecate",
+            "text": "history H-0007",
+            "user_id": "U123",
+            "channel_id": "C123",
+        },
         respond=respond_mock,
     )
     assert ack_mock.called
@@ -419,14 +430,18 @@ def test_build_siem_markdown_report_with_drift() -> None:
 
 
 def test_cli_audit_siem_markdown_and_fail_on_drift(mock_workspace: Path) -> None:
-    from typer.testing import CliRunner
-    from hecate_runner.cli import app
     from unittest import mock
+
+    from typer.testing import CliRunner
+
+    from hecate_runner.cli import app
 
     runner = CliRunner()
     with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace)}):
         # Clean in-sync run: should succeed
-        res = runner.invoke(app, ["audit-siem", "--format", "markdown", "--dry-run", "--fail-on-drift"])
+        res = runner.invoke(
+            app, ["audit-siem", "--format", "markdown", "--dry-run", "--fail-on-drift"]
+        )
         assert res.exit_code == 0
         assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in res.output
 
@@ -450,18 +465,25 @@ def test_cli_audit_siem_markdown_and_fail_on_drift(mock_workspace: Path) -> None
             assert res_out.exit_code == 0
             assert out_file.exists()
             assert summary_file.exists()
-            assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in out_file.read_text(encoding="utf-8")
+            assert "## 🛡️ SIEM Detection-as-Code GitOps Report" in out_file.read_text(
+                encoding="utf-8"
+            )
 
 
 def test_cli_deploy_queries_all(mock_workspace: Path) -> None:
-    from typer.testing import CliRunner
-    from hecate_runner.cli import app
     from unittest import mock
+
+    from typer.testing import CliRunner
+
+    from hecate_runner.cli import app
 
     runner = CliRunner()
     summary_file = mock_workspace / "deploy_summary.md"
 
-    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace), "GITHUB_STEP_SUMMARY": str(summary_file)}):
+    with mock.patch.dict(
+        "os.environ",
+        {"HECATE_WORKSPACE": str(mock_workspace), "GITHUB_STEP_SUMMARY": str(summary_file)},
+    ):
         res = runner.invoke(app, ["deploy-queries", "all", "--dry-run", "--github-step-summary"])
         assert res.exit_code == 0
         assert "SIEM & EDR Query Deployment (All Hunts)" in res.output
@@ -517,6 +539,7 @@ def test_hunt_lifecycle_transitions(mock_workspace: Path) -> None:
 
 def test_decommission_hunt_queries(mock_workspace: Path) -> None:
     import sqlite3
+
     from hecate_runner.siem_drift import (
         decommission_hunt_queries,
         get_drift_db_path,
@@ -572,6 +595,7 @@ def test_decommission_hunt_queries(mock_workspace: Path) -> None:
 
 def test_audit_workspace_with_decommissioned_queries(mock_workspace: Path) -> None:
     from unittest import mock
+
     from hecate_runner.siem_drift import (
         audit_workspace_queries,
         build_siem_markdown_report,
@@ -620,6 +644,7 @@ def test_audit_workspace_with_decommissioned_queries(mock_workspace: Path) -> No
 
 def test_audit_workspace_pending_decommission(mock_workspace: Path) -> None:
     from unittest import mock
+
     from hecate_runner.lifecycle import set_hunt_lifecycle
     from hecate_runner.siem_drift import audit_workspace_queries, build_siem_markdown_report
 
@@ -652,14 +677,19 @@ def test_audit_workspace_pending_decommission(mock_workspace: Path) -> None:
 
 
 def test_cli_decommission_and_lifecycle(mock_workspace: Path) -> None:
-    from typer.testing import CliRunner
-    from hecate_runner.cli import app
     from unittest import mock
+
+    from typer.testing import CliRunner
+
+    from hecate_runner.cli import app
 
     runner = CliRunner()
     summary_file = mock_workspace / "decom_summary.md"
 
-    with mock.patch.dict("os.environ", {"HECATE_WORKSPACE": str(mock_workspace), "GITHUB_STEP_SUMMARY": str(summary_file)}):
+    with mock.patch.dict(
+        "os.environ",
+        {"HECATE_WORKSPACE": str(mock_workspace), "GITHUB_STEP_SUMMARY": str(summary_file)},
+    ):
         # View lifecycle
         res_view = runner.invoke(app, ["hunt-lifecycle", "H-0007"])
         assert res_view.exit_code == 0
@@ -699,5 +729,3 @@ def test_cli_decommission_and_lifecycle(mock_workspace: Path) -> None:
         assert "SIEM Detection Query Decommissioning" in res_decom.output
         assert summary_file.exists()
         assert "SIEM Detection Query Decommissioning" in summary_file.read_text(encoding="utf-8")
-
-

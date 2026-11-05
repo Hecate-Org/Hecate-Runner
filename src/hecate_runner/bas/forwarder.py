@@ -49,6 +49,7 @@ def forward_events_to_splunk(
 
     try:
         from pathlib import Path
+
         from dotenv import load_dotenv
 
         load_dotenv(override=False)
@@ -81,7 +82,7 @@ def forward_events_to_splunk(
     data = "\n".join(payload_lines)
 
     headers = {"Content-Type": "application/json"}
-    auth = None
+    auth: tuple[str, str] | httpx._client.UseClientDefault = httpx.USE_CLIENT_DEFAULT
     if splunk_token:
         auth_val = (
             splunk_token

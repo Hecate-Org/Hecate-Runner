@@ -199,7 +199,9 @@ def bas_detonate_cmd(
     ] = True,
     siem_target: Annotated[
         str,
-        typer.Option("--siem-target", help="Target SIEM platform for live verification (splunk, mock)."),
+        typer.Option(
+            "--siem-target", help="Target SIEM platform for live verification (splunk, mock)."
+        ),
     ] = "splunk",
     siem_query: Annotated[
         str | None,
@@ -530,7 +532,9 @@ def bas_verify_cmd(
         if splunk_host or settings.query_provider == "splunk":
             from hecate_runner.query_execution import SplunkQueryProvider
 
-            siem_provider = SplunkQueryProvider(settings.hecate_bin, settings.hecate_workspace)
+            siem_provider = SplunkQueryProvider(
+                settings.hecate_bin_resolved, settings.hecate_workspace
+            )
 
     det_req = DetonationRequest(
         hunt_id=hunt_id,

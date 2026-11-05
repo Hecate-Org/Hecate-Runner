@@ -617,7 +617,7 @@ class SlackBotService:
 
             if not results:
                 say(
-                    text=f"ℹ️ *No drifted queries to reconcile for `{hunt_id}`* (already in sync).",
+                    text=f"ℹ️ *No drifted queries to reconcile for `{hunt_id}`* (already in sync).",  # noqa: RUF001
                     thread_ts=thread_ts,
                 )
                 return
@@ -1087,14 +1087,14 @@ class SlackBotService:
                 return
 
             if subcmd in {"history", "drift-history"}:
-                hunt_id = tokens[1].upper() if len(tokens) > 1 else None
+                history_hunt = tokens[1].upper() if len(tokens) > 1 else None
                 from hecate_runner.siem_drift import get_drift_history
                 from hecate_runner.slack_blocks import build_siem_history_card
 
                 history = get_drift_history(
-                    self.settings.hecate_workspace, hunt_id=hunt_id, limit=10
+                    self.settings.hecate_workspace, hunt_id=history_hunt, limit=10
                 )
-                card = build_siem_history_card(hunt_id, history)
+                card = build_siem_history_card(history_hunt, history)
                 respond(attachments=card)
                 return
 

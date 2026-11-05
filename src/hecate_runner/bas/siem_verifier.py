@@ -8,6 +8,7 @@ and persists provenance records into SQLite and durable BAS run evidence.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -133,7 +134,11 @@ class SiemAlertVerifier:
                 stem = yf.stem.lower()
                 try:
                     content = yf.read_text(encoding="utf-8")
-                    if clean_tech in stem or short_tech in stem or technique_id.lower() in content.lower():
+                    if (
+                        clean_tech in stem
+                        or short_tech in stem
+                        or technique_id.lower() in content.lower()
+                    ):
                         matched_yml = yf
                         companion_spl = yf.with_suffix(".spl")
                         if companion_spl.exists():
@@ -325,7 +330,7 @@ class SiemAlertVerifier:
                 query_used=query_text,
                 search_job_id="mock-job-sid-0001",
                 sample_events=telemetry_events[:1],
-                notes=notes + ["Mock SIEM provider: simulated closed-loop alert verification."],
+                notes=[*notes, "Mock SIEM provider: simulated closed-loop alert verification."],
             )
             self._persist_result(result)
             return result
@@ -474,10 +479,8 @@ class SiemAlertVerifier:
             state_file = root / "state.json"
             state_data: dict[str, Any] = {}
             if state_file.exists():
-                try:
+                with contextlib.suppress(Exception):
                     state_data = json.loads(state_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
 
             state_data.update(
                 {

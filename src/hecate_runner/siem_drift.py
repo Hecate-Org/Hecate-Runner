@@ -51,7 +51,10 @@ def get_tracked_query_statuses(workspace: Path) -> dict[tuple[str, str, str], st
                        AND qv.version = latest.max_ver
                 """
             ).fetchall()
-            return {(r["hunt_id"].upper(), r["target"].lower(), r["file_name"]): r["status"] for r in rows}
+            return {
+                (r["hunt_id"].upper(), r["target"].lower(), r["file_name"]): r["status"]
+                for r in rows
+            }
     except Exception as exc:
         log.debug("Could not retrieve tracked query statuses: %s", exc)
         return {}
@@ -412,7 +415,9 @@ def decommission_hunt_queries(
     """
     queries_root = workspace / "queries"
     if hunt_id.lower() == "all":
-        hunts = sorted([d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")])
+        hunts = sorted(
+            [d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")]
+        )
     else:
         hunts = [hunt_id]
 
@@ -534,7 +539,9 @@ def decommission_hunt_queries(
 
     # Refresh audit state cache
     try:
-        audit_workspace_queries(workspace, target=target, dry_run=dry_run, trigger=f"decommission:{actor}")
+        audit_workspace_queries(
+            workspace, target=target, dry_run=dry_run, trigger=f"decommission:{actor}"
+        )
     except Exception as exc:
         log.warning("Could not refresh drift state after decommissioning: %s", exc)
 
@@ -555,7 +562,8 @@ def load_drift_state(workspace: Path) -> dict[str, Any] | None:
     if not cache_path.exists():
         return None
     try:
-        return json.loads(cache_path.read_text(encoding="utf-8"))
+        cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
+        return cached
     except Exception as exc:
         log.warning("Failed to read drift state file at %s: %s", cache_path, exc)
         return None
@@ -656,7 +664,9 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
     # Backwards-compatible schema migration
     try:
         with conn:
-            conn.execute("ALTER TABLE audit_sweeps ADD COLUMN decommissioned_count INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE audit_sweeps ADD COLUMN decommissioned_count INTEGER NOT NULL DEFAULT 0"
+            )
     except sqlite3.OperationalError:
         pass
 
@@ -817,7 +827,7 @@ def record_query_version(
             )
             row = cur.fetchone()
             if row:
-                latest_version, latest_hash = row[0], row[1]
+                latest_version, latest_hash = int(row[0]), row[1]
                 if latest_hash == q_hash:
                     return latest_version
                 new_version = latest_version + 1
@@ -1190,8 +1200,12 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
         "target_drift_breakdown": target_map,
         "top_drifted_hunts": top_hunts,
         "bas_verified_alerts_count": val_stats["verified_count"] if val_stats else 0,
-        "avg_detection_latency_sec": round(float(val_stats["avg_latency_sec"] or 0.0), 3) if (val_stats and val_stats["avg_latency_sec"] is not None) else 0.0,
-        "last_detection_latency_sec": round(float(latest_val["detection_latency_sec"] or 0.0), 3) if (latest_val and latest_val["detection_latency_sec"] is not None) else 0.0,
+        "avg_detection_latency_sec": round(float(val_stats["avg_latency_sec"] or 0.0), 3)
+        if (val_stats and val_stats["avg_latency_sec"] is not None)
+        else 0.0,
+        "last_detection_latency_sec": round(float(latest_val["detection_latency_sec"] or 0.0), 3)
+        if (latest_val and latest_val["detection_latency_sec"] is not None)
+        else 0.0,
         "last_verified_hunt": str(latest_val["hunt_id"]) if latest_val else "",
         "last_verified_technique": str(latest_val["technique_id"]) if latest_val else "",
     }
@@ -1226,7 +1240,9 @@ def build_siem_markdown_report(
     if drifted > 0:
         badge = f"⚠️ **DRIFT DETECTED** ({drifted} query{'s' if drifted != 1 else ''})"
     elif pending_decom > 0:
-        badge = f"⚠️ **DECOMMISSION PENDING** ({pending_decom} query{'s' if pending_decom != 1 else ''})"
+        badge = (
+            f"⚠️ **DECOMMISSION PENDING** ({pending_decom} query{'s' if pending_decom != 1 else ''})"
+        )
     elif missing > 0:
         badge = f"⚠️ **MISSING ON REMOTE** ({missing} query{'s' if missing != 1 else ''})"
     elif errors > 0:
@@ -1257,12 +1273,19 @@ def build_siem_markdown_report(
     ]
 
     target_counts: dict[str, dict[str, int]] = {}
-    for hunt_id, results in report.get("hunts", {}).items():
+    for results in report.get("hunts", {}).values():
         for res in results:
             tgt = str(res.get("target") or "unknown")
             st = str(res.get("status") or "unknown")
             if tgt not in target_counts:
-                target_counts[tgt] = {"total": 0, "in_sync": 0, "decommissioned": 0, "drifted": 0, "missing": 0, "error": 0}
+                target_counts[tgt] = {
+                    "total": 0,
+                    "in_sync": 0,
+                    "decommissioned": 0,
+                    "drifted": 0,
+                    "missing": 0,
+                    "error": 0,
+                }
             target_counts[tgt]["total"] += 1
             if st == "in_sync":
                 target_counts[tgt]["in_sync"] += 1
@@ -1276,12 +1299,14 @@ def build_siem_markdown_report(
                 target_counts[tgt]["error"] += 1
 
     if target_counts:
-        lines.extend([
-            "### 🎯 Target Platform Breakdown",
-            "",
-            "| Target Backend | Total Queries | In Sync | Decommissioned | Drifted | Missing | Health |",
-            "| :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
-        ])
+        lines.extend(
+            [
+                "### 🎯 Target Platform Breakdown",
+                "",
+                "| Target Backend | Total Queries | In Sync | Decommissioned | Drifted | Missing | Health |",
+                "| :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
+            ]
+        )
         for tgt, counts in sorted(target_counts.items()):
             active_tgt = max(1, counts["total"] - counts["decommissioned"])
             h_pct = round((counts["in_sync"] / active_tgt) * 100, 1) if active_tgt > 0 else 100.0
@@ -1298,12 +1323,14 @@ def build_siem_markdown_report(
 
     pending_by_hunt = report.get("pending_decommission_by_hunt", {})
     if pending_by_hunt:
-        lines.extend([
-            "### ⚠️ Pending Remote Decommissioning (Retired Hunts with Active Queries)",
-            "",
-            "> ⚠️ *The following queries belong to retired hunts but remain active on remote SIEM consoles:*",
-            "",
-        ])
+        lines.extend(
+            [
+                "### ⚠️ Pending Remote Decommissioning (Retired Hunts with Active Queries)",
+                "",
+                "> ⚠️ *The following queries belong to retired hunts but remain active on remote SIEM consoles:*",
+                "",
+            ]
+        )
         for hunt_id, res_list in sorted(pending_by_hunt.items()):
             for res in res_list:
                 file_name = res.get("file", "")
@@ -1316,40 +1343,48 @@ def build_siem_markdown_report(
 
     drifted_by_hunt = report.get("drifted_by_hunt", {})
     if drifted_by_hunt:
-        lines.extend([
-            "### 🔍 Drift Inspection & AST Diff",
-            "",
-            "> ⚠️ *The following queries on remote SIEM consoles have drifted from local git repository source code:*",
-            "",
-        ])
+        lines.extend(
+            [
+                "### 🔍 Drift Inspection & AST Diff",
+                "",
+                "> ⚠️ *The following queries on remote SIEM consoles have drifted from local git repository source code:*",
+                "",
+            ]
+        )
         for hunt_id, res_list in sorted(drifted_by_hunt.items()):
             for res in res_list:
                 file_name = res.get("file", "")
                 tgt = res.get("target", "")
                 remote_id = res.get("remote_id", "")
                 diff = res.get("drift_diff", "")
-                lines.extend([
-                    "<details>",
-                    f"<summary><b>⚠️ {hunt_id} / {tgt}: <code>{file_name}</code></b> (Remote ID: <code>{remote_id}</code>)</summary>",
-                    "",
-                    "```diff",
-                    diff or "- Local and remote queries differ in AST syntax or query options",
-                    "```",
-                    "",
-                    "</details>",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "<details>",
+                        f"<summary><b>⚠️ {hunt_id} / {tgt}: <code>{file_name}</code></b> (Remote ID: <code>{remote_id}</code>)</summary>",
+                        "",
+                        "```diff",
+                        diff or "- Local and remote queries differ in AST syntax or query options",
+                        "```",
+                        "",
+                        "</details>",
+                        "",
+                    ]
+                )
     else:
-        lines.extend([
-            "### 🔍 Drift Inspection",
-            "",
-            "> ✅ **All deployed SIEM queries match git-authoritative AST and search definitions.** No active drift detected across targets.",
-            "",
-        ])
+        lines.extend(
+            [
+                "### 🔍 Drift Inspection",
+                "",
+                "> ✅ **All deployed SIEM queries match git-authoritative AST and search definitions.** No active drift detected across targets.",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "---",
-        f"*Report generated by Hecate GitOps Detection Pipeline (trigger: `{trigger}`).*",
-    ])
+    lines.extend(
+        [
+            "---",
+            f"*Report generated by Hecate GitOps Detection Pipeline (trigger: `{trigger}`).*",
+        ]
+    )
 
     return "\n".join(lines)
