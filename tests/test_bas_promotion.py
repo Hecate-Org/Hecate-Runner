@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hecate_runner.promotion_policy import evaluate_promotion
@@ -102,3 +103,31 @@ def test_promotion_policy_passes_on_bas_success(tmp_path: Path) -> None:
     decision = evaluate_promotion(workspace, "H-0010")
 
     assert not any("live adversary emulation verification failed" in r for r in decision.reasons)
+
+
+def _set_status(workspace: Path, status: str, decision: str | None) -> None:
+    hunt = workspace / "hunts" / "2026" / "Q4" / "H-0010.md"
+    text = hunt.read_text(encoding="utf-8").replace("status: planning", f"status: {status}", 1)
+    if decision:
+        text = text.replace("hunt_id: H-0010", f"hunt_id: H-0010\nreview_decision: {decision}", 1)
+    hunt.write_text(text, encoding="utf-8")
+
+
+def test_a_hunt_approved_in_review_can_be_promoted(tmp_path: Path) -> None:
+    workspace = _setup_test_workspace(
+        tmp_path, bas_verified=True, bas_status="verified_true_positive"
+    )
+    _set_status(workspace, "active", "approved")
+    assert evaluate_promotion(workspace, "H-0010").hunt_id == "H-0010"
+
+
+@pytest.mark.parametrize(("status", "decision"), [("active", None), ("suppressed", "rejected")])
+def test_unreviewed_active_and_rejected_hunts_cannot_be_promoted(
+    tmp_path: Path, status: str, decision: str | None
+) -> None:
+    workspace = _setup_test_workspace(
+        tmp_path, bas_verified=True, bas_status="verified_true_positive"
+    )
+    _set_status(workspace, status, decision)
+    with pytest.raises(ValueError, match="review-approved"):
+        evaluate_promotion(workspace, "H-0010")
