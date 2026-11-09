@@ -230,28 +230,46 @@ def run_bas_validation(
             if selection is None:
                 reason = "No approved procedure exercises this hunt's Linux rule predicates."
         if reason:
-            req.bas_verification = skipped_bas(orch.settings, req.hunt_id, reason)
+            if getattr(orch.settings, "bas_fallback_to_mock", False):
+                log.info(
+                    "Live BAS unavailable (%s); falling back to AST telemetry synthesis mock verification.",
+                    reason,
+                )
+                provider_name = "mock"
+            else:
+                req.bas_verification = skipped_bas(orch.settings, req.hunt_id, reason)
+                result = req.bas_verification
+                orch.trail.step(
+                    "bas",
+                    "%s for %s: %s; telemetry=%s, rule match=%s",
+                    result["status"],
+                    req.hunt_id,
+                    result.get("reason") or "local sensor Sigma verification",
+                    result.get("telemetry_arrived", False),
+                    result.get("rule_triggered", False),
+                )
+                return
         else:
             assert selection is not None
             procedure, rule_yaml = selection
             req.bas_verification = run_approved_validation(
                 orch.settings, req.hunt_id, procedure, rule_yaml
             )
-        result = req.bas_verification
-        if result.get("rule_triggered") and result.get("status") == "verified_true_positive":
-            req.purple_team_rules_evaluated = len(rules)
-            req.purple_team_rules_validated = 1
-            req.purple_team_rules_replay_matched = 1
-        orch.trail.step(
-            "bas",
-            "%s for %s: %s; telemetry=%s, rule match=%s",
-            result["status"],
-            req.hunt_id,
-            result.get("reason") or "local sensor Sigma verification",
-            result.get("telemetry_arrived", False),
-            result.get("rule_triggered", False),
-        )
-        return
+            result = req.bas_verification
+            if result.get("rule_triggered") and result.get("status") == "verified_true_positive":
+                req.purple_team_rules_evaluated = len(rules)
+                req.purple_team_rules_validated = 1
+                req.purple_team_rules_replay_matched = 1
+            orch.trail.step(
+                "bas",
+                "%s for %s: %s; telemetry=%s, rule match=%s",
+                result["status"],
+                req.hunt_id,
+                result.get("reason") or "local sensor Sigma verification",
+                result.get("telemetry_arrived", False),
+                result.get("rule_triggered", False),
+            )
+            return
 
     if not rules:
         return
