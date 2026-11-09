@@ -127,7 +127,12 @@ def extract_primary_source_evidence(text: str) -> str:
                 continue
             if not stripped.startswith("|"):
                 continue
-            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            clean = stripped
+            if clean.startswith("|"):
+                clean = clean[1:]
+            if clean.endswith("|") and not clean.endswith(r"\|"):
+                clean = clean[:-1]
+            cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", clean)]
             if (
                 len(cells) < 5
                 or cells[0].startswith("---")
@@ -140,7 +145,8 @@ def extract_primary_source_evidence(text: str) -> str:
                 continue
             if not value or not (excerpt.startswith('"') and excerpt.endswith('"')):
                 continue
-            collected.extend((value, excerpt.strip('"')))
+            clean_excerpt = excerpt.strip('"').replace(r"\|", "|")
+            collected.extend((value, clean_excerpt))
     return "\n".join(collected)
 
 

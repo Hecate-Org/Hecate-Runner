@@ -130,6 +130,21 @@ def test_primary_source_audit_handles_multiple_evidence_headings():
     assert "stage2.ko" in recovered
 
 
+def test_primary_source_audit_handles_escaped_pipes_in_evidence():
+    text = r"""### Primary Source Evidence
+
+| Artifact | Kind | Role | Status | Evidence |
+|---|---|---|---|---|
+| `cve.example/pan-os` | url | unknown | active | "\| [PAN-OS 11.1](https://example.com) \| < 11.1.0-h3, < 11.1.1-h1 \| >= 11.1.0-h3 \|" |
+
+### Justification
+"""
+    recovered = extract_primary_source_evidence(text)
+    assert "cve.example/pan-os" in recovered
+    assert "11.1.0-h3" in recovered
+    assert "11.1.1-h1" in recovered
+
+
 # --- Frontmatter -----------------------------------------------------------
 
 
