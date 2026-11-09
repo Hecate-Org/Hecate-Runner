@@ -652,6 +652,8 @@ class OrchestratorRulesMixin:
 
         if getattr(self.settings, "siem_deploy_enabled", False):
             req.siem_deployments = self._deploy_native_queries(req, result.rules, out_dir)
+        if getattr(self.settings, "lab_hit_probe_enabled", True):
+            req.lab_probe = self._probe_lab_hits(req, out_dir)
         try:
             req.sigma_rule_dir = str(out_dir.relative_to(self.settings.hecate_workspace))
         except ValueError:  # out_dir outside the workspace -- show it whole
@@ -680,6 +682,44 @@ class OrchestratorRulesMixin:
             req.hunt_id,
             ", ".join(sorted({str(r.get("logsource_category")) for r in result.rules})),
         )
+
+    def _probe_lab_hits(self, req: DraftHuntRequest, out_dir: Path) -> dict[str, Any]:
+        """Run drafted native queries against the configured lab SIEM (COUNT-FIRST)."""
+        from hecate_runner.lab_hits import probe_lab_hits
+
+        try:
+            report = probe_lab_hits(
+                req.hunt_id,
+                out_dir,
+                provider_name=self.settings.query_provider,
+                hecate_bin=self.settings.hecate_bin_resolved,
+                workspace=self.settings.hecate_workspace,
+                max_time_range_days=self.settings.max_query_time_range_days,
+                max_limit=self.settings.max_query_limit,
+                env_overrides=self.settings.query_provider_env(),
+                window_days=getattr(self.settings, "lab_hit_probe_window_days", 1),
+                max_auto_fetch=getattr(self.settings, "auto_hunt_max_fetch", 200),
+            )
+        except Exception as exc:
+            log.warning("Lab hit probe skipped for %s (%s)", req.hunt_id, exc)
+            return {
+                "provider": self.settings.query_provider,
+                "window_days": getattr(self.settings, "lab_hit_probe_window_days", 1),
+                "status": "error",
+                "total_hits": 0,
+                "queries_run": 0,
+                "detail": str(exc)[:240],
+                "results": [],
+            }
+
+        self.trail.step(
+            "lab",
+            "probe on %s: %s (%s)",
+            report.provider,
+            report.status,
+            report.detail or "no detail",
+        )
+        return report.to_dict()
 
     def _deploy_native_queries(
         self,

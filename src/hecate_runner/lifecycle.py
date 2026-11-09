@@ -238,6 +238,7 @@ def record_hunt_execution(
     target: str,
     detail: str = "",
     events: list[dict[str, Any]] | None = None,
+    triage_report: Any | None = None,
 ) -> dict[str, Any]:
     """Update frontmatter and execution history in hunt markdown following a live sweep.
 
@@ -260,19 +261,64 @@ def record_hunt_execution(
     if outcome == "hits_detected" and matched_count > 0:
         fm["findings_count"] = int(fm.get("findings_count") or 0) + matched_count
 
+    if triage_report is not None:
+        verdict = getattr(triage_report, "verdict", "")
+        conf = getattr(triage_report, "confidence", 0.0)
+        action = getattr(triage_report, "recommended_action", "")
+        fm["latest_triage_verdict"] = verdict
+        fm["latest_triage_confidence"] = conf
+        fm["latest_recommended_action"] = action
+
+        if verdict == "true_positive":
+            fm["true_positives"] = int(fm.get("true_positives") or 0) + 1
+        elif verdict == "benign_noise":
+            fm["false_positives"] = int(fm.get("false_positives") or 0) + 1
+
     yaml_rt = _get_yaml_rt()
     stream = StringIO()
     yaml_rt.dump(fm, stream)
     new_yaml = stream.getvalue()
 
-    # Append execution summary entry to markdown body
-    exec_entry = (
-        f"\n\n### Automated Hunt Execution ({now_iso[:19].replace('T', ' ')} UTC)\n"
-        f"- **Target SIEM:** `{target}`\n"
-        f"- **Outcome:** `{outcome}`\n"
-        f"- **Matched Events:** `{matched_count}`\n"
-        f"- **Detail:** {detail}\n"
-    )
+    # Append structured execution or triage entry to markdown body
+    if triage_report is not None:
+        entities = getattr(triage_report, "extracted_entities", {}) or {}
+        hosts_str = ", ".join(f"`{h}`" for h in entities.get("hosts", [])) or "None"
+        users_str = ", ".join(f"`{u}`" for u in entities.get("users", [])) or "None"
+        procs_str = ", ".join(f"`{p}`" for p in entities.get("processes", [])) or "None"
+        parents_str = ", ".join(f"`{p}`" for p in entities.get("parent_processes", [])) or "None"
+        ips_str = ", ".join(f"`{ip}`" for ip in entities.get("ips", [])) or "None"
+        techniques_str = ", ".join(f"`{t}`" for t in getattr(triage_report, "technique_matches", [])) or "None"
+
+        verdict_icon = (
+            "🟢" if getattr(triage_report, "verdict", "") == "true_positive"
+            else ("⚠️" if getattr(triage_report, "verdict", "") == "suspicious" else "⚪")
+        )
+
+        exec_entry = (
+            f"\n\n### Automated Hunt Execution & Finding Triage ({now_iso[:19].replace('T', ' ')} UTC)\n"
+            f"- **Target SIEM:** `{target}` | **Outcome:** `{outcome}` | **Matched Events:** `{matched_count}`\n"
+            f"- **Triage Verdict:** {verdict_icon} `{getattr(triage_report, 'verdict', 'unknown')}` "
+            f"(Confidence: `{getattr(triage_report, 'confidence', 0.0) * 100:.0f}%`)\n"
+            f"- **Executive Summary:** {getattr(triage_report, 'summary', '')}\n"
+            f"- **Forensic Rationale:** {getattr(triage_report, 'rationale', '')}\n"
+            f"- **Techniques Confirmed:** {techniques_str}\n"
+            f"- **Recommended Action:** `{getattr(triage_report, 'recommended_action', 'pivot')}`\n\n"
+            f"#### Extracted Security Entities\n"
+            f"- **Hosts:** {hosts_str}\n"
+            f"- **Users:** {users_str}\n"
+            f"- **Processes:** {procs_str}\n"
+            f"- **Parent Processes:** {parents_str}\n"
+            f"- **IPs:** {ips_str}\n"
+        )
+    else:
+        exec_entry = (
+            f"\n\n### Automated Hunt Execution ({now_iso[:19].replace('T', ' ')} UTC)\n"
+            f"- **Target SIEM:** `{target}`\n"
+            f"- **Outcome:** `{outcome}`\n"
+            f"- **Matched Events:** `{matched_count}`\n"
+            f"- **Detail:** {detail}\n"
+        )
+
     new_content = f"---\n{new_yaml}---\n{body.rstrip()}\n{exec_entry}"
     atomic_write_text(hunt_path, new_content)
 
@@ -284,4 +330,5 @@ def record_hunt_execution(
         "outcome": outcome,
         "matched_count": matched_count,
         "path": str(hunt_path),
+        "triage_report": triage_report.to_dict() if hasattr(triage_report, "to_dict") else None,
     }

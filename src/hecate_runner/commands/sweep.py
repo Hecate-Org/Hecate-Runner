@@ -169,6 +169,11 @@ def sweep_approve(
         console.print(
             f"[yellow]⚠️ Telemetry Hits Detected![/yellow] {res.matched_count} event(s) matched on {res.target}."
         )
+        if res.triage_report:
+            t = res.triage_report
+            console.print(f"  • [bold]Triage Verdict:[/bold] {t.verdict} ({t.confidence*100:.0f}% confidence)")
+            console.print(f"  • [bold]Recommendation:[/bold] {t.recommended_action}")
+            console.print(f"  • [bold]Summary:[/bold] {t.summary}")
     elif res.outcome == "overmatch":
         console.print(
             f"[red]🚨 Overmatch Warning![/red] {res.matched_count} event(s) matched (exceeded auto-fetch ceiling)."
@@ -226,6 +231,11 @@ def sweep_run(
         console.print(
             f"[yellow]⚠️ Telemetry Hits Detected![/yellow] {res.matched_count} event(s) matched on {res.target}."
         )
+        if res.triage_report:
+            t = res.triage_report
+            console.print(f"  • [bold]Triage Verdict:[/bold] {t.verdict} ({t.confidence*100:.0f}% confidence)")
+            console.print(f"  • [bold]Recommendation:[/bold] {t.recommended_action}")
+            console.print(f"  • [bold]Summary:[/bold] {t.summary}")
     elif res.outcome == "overmatch":
         console.print(
             f"[red]🚨 Overmatch Warning![/red] {res.matched_count} event(s) matched (exceeded auto-fetch ceiling)."
@@ -234,3 +244,50 @@ def sweep_run(
         console.print(f"[red]✗ Sweep Execution Failed:[/red] {res.detail}")
 
     raise typer.Exit(code=0 if res.ok else 1)
+
+
+@sweep_app.command("findings")
+def sweep_findings(
+    hunt_id: Annotated[str | None, typer.Option("--hunt-id", "-h", help="Filter findings by hunt ID")] = None,
+) -> None:
+    """View triaged findings and threat classifications from the execution ledger."""
+    settings = Settings()
+    scheduler = HuntExecutionScheduler(settings=settings)
+    findings = scheduler.store.list_findings(hunt_id=hunt_id)
+
+    if not findings:
+        filter_msg = f" for '{hunt_id}'" if hunt_id else ""
+        console.print(f"[dim]No triaged findings recorded{filter_msg}.[/dim]")
+        return
+
+    table = Table(title="Hunt Execution Findings Ledger", box=box.ROUNDED)
+    table.add_column("Finding ID", style="bold cyan")
+    table.add_column("Hunt ID", style="bold yellow")
+    table.add_column("Verdict", style="white")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Action", style="magenta")
+    table.add_column("Triaged At", style="dim")
+    table.add_column("Summary", style="white")
+
+    for f in findings:
+        verdict = f["verdict"]
+        if verdict == "true_positive":
+            verdict_badge = "[bold green]True Positive[/bold green]"
+        elif verdict == "suspicious":
+            verdict_badge = "[bold yellow]Suspicious[/bold yellow]"
+        elif verdict == "benign_noise":
+            verdict_badge = "[dim]Benign Noise[/dim]"
+        else:
+            verdict_badge = "[dim]Inconclusive[/dim]"
+
+        table.add_row(
+            f["finding_id"],
+            f["hunt_id"],
+            verdict_badge,
+            f"{f['confidence'] * 100:.0f}%",
+            f["recommended_action"],
+            f["triaged_at"][:16].replace("T", " "),
+            (f["summary"][:45] + "...") if len(f["summary"]) > 45 else f["summary"],
+        )
+
+    console.print(table)

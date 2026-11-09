@@ -5,6 +5,7 @@ Tracks execution history, sliding lookback windows, and pending human approvals.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import uuid
@@ -122,6 +123,31 @@ class WatermarkStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_staged_sweeps_hunt_id ON hunt_staged_sweeps(hunt_id)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hunt_execution_findings (
+                    finding_id TEXT PRIMARY KEY,
+                    hunt_id TEXT NOT NULL,
+                    sweep_id TEXT NOT NULL,
+                    target_siem TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    summary TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    entities_json TEXT NOT NULL,
+                    technique_matches_json TEXT NOT NULL,
+                    recommended_action TEXT NOT NULL,
+                    event_count INTEGER NOT NULL DEFAULT 0,
+                    triaged_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_findings_hunt_id ON hunt_execution_findings(hunt_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_findings_sweep_id ON hunt_execution_findings(sweep_id)"
             )
 
     def get_watermark(self, hunt_id: str) -> HuntExecutionWatermark | None:
@@ -387,3 +413,99 @@ class WatermarkStore:
                     "UPDATE hunt_staged_sweeps SET status = ? WHERE sweep_id = ?",
                     (status, sweep_id),
                 )
+
+    def record_finding(self, report: Any) -> str:
+        """Persist a triaged hunt finding into the SQLite findings ledger."""
+        finding_id = f"FINDING-{report.hunt_id.upper()}-{uuid.uuid4().hex[:6]}"
+        now_iso = getattr(report, "triaged_at", "") or datetime.now(UTC).isoformat()
+        entities_json = json.dumps(getattr(report, "extracted_entities", {}))
+        techniques_json = json.dumps(getattr(report, "technique_matches", []))
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO hunt_execution_findings (
+                    finding_id, hunt_id, sweep_id, target_siem, verdict,
+                    confidence, summary, rationale, entities_json,
+                    technique_matches_json, recommended_action,
+                    event_count, triaged_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    finding_id,
+                    report.hunt_id.upper(),
+                    report.sweep_id,
+                    report.target_siem,
+                    report.verdict,
+                    report.confidence,
+                    report.summary,
+                    report.rationale,
+                    entities_json,
+                    techniques_json,
+                    report.recommended_action,
+                    report.event_count,
+                    now_iso,
+                ),
+            )
+        return finding_id
+
+    def list_findings(self, hunt_id: str | None = None) -> list[dict[str, Any]]:
+        """List findings from the ledger, newest first."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            if hunt_id:
+                cursor = conn.execute(
+                    "SELECT * FROM hunt_execution_findings WHERE hunt_id = ? ORDER BY triaged_at DESC",
+                    (hunt_id.upper(),),
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM hunt_execution_findings ORDER BY triaged_at DESC"
+                )
+            findings = []
+            for row in cursor.fetchall():
+                findings.append(
+                    {
+                        "finding_id": row["finding_id"],
+                        "hunt_id": row["hunt_id"],
+                        "sweep_id": row["sweep_id"],
+                        "target_siem": row["target_siem"],
+                        "verdict": row["verdict"],
+                        "confidence": row["confidence"],
+                        "summary": row["summary"],
+                        "rationale": row["rationale"],
+                        "extracted_entities": json.loads(row["entities_json"]),
+                        "technique_matches": json.loads(row["technique_matches_json"]),
+                        "recommended_action": row["recommended_action"],
+                        "event_count": row["event_count"],
+                        "triaged_at": row["triaged_at"],
+                    }
+                )
+            return findings
+
+    def get_finding(self, finding_id: str) -> dict[str, Any] | None:
+        """Retrieve a single finding by ID."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM hunt_execution_findings WHERE finding_id = ?",
+                (finding_id.strip(),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "finding_id": row["finding_id"],
+                "hunt_id": row["hunt_id"],
+                "sweep_id": row["sweep_id"],
+                "target_siem": row["target_siem"],
+                "verdict": row["verdict"],
+                "confidence": row["confidence"],
+                "summary": row["summary"],
+                "rationale": row["rationale"],
+                "extracted_entities": json.loads(row["entities_json"]),
+                "technique_matches": json.loads(row["technique_matches_json"]),
+                "recommended_action": row["recommended_action"],
+                "event_count": row["event_count"],
+                "triaged_at": row["triaged_at"],
+            }

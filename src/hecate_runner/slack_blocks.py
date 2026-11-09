@@ -6,6 +6,7 @@ MITRE ATT&CK badges, MISP links, and multi-column telemetry summaries.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from pathlib import Path
@@ -111,8 +112,38 @@ def sanitize_slack_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return blocks
 
 
-def _draft_publish_text(result: Any) -> str:
-    """The publish findings written into a new draft, for the card that announces it."""
+def _frontmatter_lab_probe(frontmatter: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebuild a lab probe dict from hunt frontmatter fields."""
+    status = str(frontmatter.get("lab_probe") or "").strip().lower()
+    if not status:
+        return None
+    results = frontmatter.get("lab_probe_results") or []
+    if isinstance(results, str) and results.strip():
+        try:
+            results = json.loads(results)
+        except json.JSONDecodeError:
+            results = []
+    detail = frontmatter.get("lab_probe_detail") or ""
+    if isinstance(detail, str) and detail.startswith('"'):
+        with contextlib.suppress(json.JSONDecodeError):
+            detail = json.loads(detail)
+    provider = frontmatter.get("lab_probe_provider") or ""
+    if isinstance(provider, str) and provider.startswith('"'):
+        with contextlib.suppress(json.JSONDecodeError):
+            provider = json.loads(provider)
+    return {
+        "status": status,
+        "provider": str(provider or ""),
+        "window_days": int(frontmatter.get("lab_probe_window_days") or 0),
+        "total_hits": int(frontmatter.get("lab_probe_hits") or 0),
+        "queries_run": int(frontmatter.get("lab_probe_queries") or 0),
+        "detail": str(detail or ""),
+        "results": results if isinstance(results, list) else [],
+    }
+
+
+def _draft_review_signals(result: Any) -> str:
+    """Publish findings and lab hit probe for the card that announces a new draft."""
     path = getattr(result, "draft_path", None)
     if not path:
         return ""
@@ -122,25 +153,35 @@ def _draft_publish_text(result: Any) -> str:
         frontmatter, _, _ = parse_hunt_frontmatter(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
+
+    sections: list[str] = []
     verdict = str(frontmatter.get("publish_check") or "")
-    if verdict not in {"block", "review"}:
-        return ""
-    raw = frontmatter.get("publish_findings") or []
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            raw = []
-    lines = []
-    for item in raw[:6] if isinstance(raw, list) else []:
-        if isinstance(item, dict):
-            lines.append(f"• `{item.get('target') or item.get('check')}` {item.get('message')}")
-    head = (
-        "*Publish check:* blocking. Approval needs a written override."
-        if verdict == "block"
-        else "*Publish check:* review these before approving."
-    )
-    return head + ("\n" + "\n".join(lines) if lines else "")
+    if verdict in {"block", "review"}:
+        raw = frontmatter.get("publish_findings") or []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = []
+        lines = []
+        for item in raw[:6] if isinstance(raw, list) else []:
+            if isinstance(item, dict):
+                lines.append(
+                    f"• `{item.get('target') or item.get('check')}` {item.get('message')}"
+                )
+        head = (
+            "*Publish check:* blocking. Approval needs a written override."
+            if verdict == "block"
+            else "*Publish check:* review these before approving."
+        )
+        sections.append(head + ("\n" + "\n".join(lines) if lines else ""))
+
+    from hecate_runner.lab_hits import format_lab_probe_slack
+
+    lab_text = format_lab_probe_slack(_frontmatter_lab_probe(frontmatter))
+    if lab_text:
+        sections.append(lab_text)
+    return "\n\n".join(sections)
 
 
 def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[dict[str, Any]]:
@@ -190,9 +231,9 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
             ],
         },
     ]
-    publish_text = _draft_publish_text(result)
-    if publish_text:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": publish_text}})
+    review_text = _draft_review_signals(result)
+    if review_text:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": review_text}})
 
     if interactive:
         blocks.append(
@@ -915,6 +956,21 @@ def build_pending_hunts_card(
             details.append(f"*Publish check:* {blocking} blocking")
         elif hunt.get("publish_check") == "review":
             details.append("*Publish check:* review")
+        lab_status = str(hunt.get("lab_probe") or "").strip().lower()
+        if lab_status and lab_status not in {"skipped"}:
+            provider = hunt.get("lab_probe_provider") or "lab"
+            window = hunt.get("lab_probe_window_days") or "?"
+            hits = hunt.get("lab_probe_hits")
+            if lab_status == "miss":
+                details.append(f"*Lab hits:* miss on `{provider}` (0 in {window}d)")
+            elif lab_status == "unconfigured":
+                details.append(f"*Lab hits:* `{provider}` not configured")
+            elif lab_status == "error":
+                details.append(f"*Lab hits:* error on `{provider}`")
+            elif lab_status == "overmatch":
+                details.append(f"*Lab hits:* overmatch on `{provider}` ({hits} in {window}d)")
+            else:
+                details.append(f"*Lab hits:* {hits} on `{provider}` in {window}d")
         blocks.append(
             {
                 "type": "section",
@@ -970,6 +1026,7 @@ def build_approve_hunt_modal(
     *,
     destination: str | None,
     findings: list[dict[str, Any]] | None = None,
+    lab_probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Modal that approves a planning hunt and, when publishing is on, signs off its release.
 
@@ -1010,6 +1067,11 @@ def build_approve_hunt_modal(
                 },
             }
         )
+    from hecate_runner.lab_hits import format_lab_probe_slack
+
+    lab_text = format_lab_probe_slack(lab_probe)
+    if lab_text:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lab_text}})
     if destination is None:
         if not blocking:
             blocks.append(
@@ -1639,8 +1701,57 @@ def build_sweep_result_card(
         },
     ]
 
+    triage = getattr(result, "triage_report", None)
+    if triage:
+        t_verdict = getattr(triage, "verdict", "")
+        t_conf = getattr(triage, "confidence", 0.0)
+        t_summary = getattr(triage, "summary", "")
+        t_rationale = getattr(triage, "rationale", "")
+        t_action = getattr(triage, "recommended_action", "pivot")
+        entities = getattr(triage, "extracted_entities", {}) or {}
+
+        v_icon = "🟢" if t_verdict == "true_positive" else ("⚠️" if t_verdict == "suspicious" else "⚪")
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*🔎 Automated Triage Assessment:*\n"
+                        f"• *Verdict:* {v_icon} `{t_verdict}` (Confidence: `{t_conf*100:.0f}%`)\n"
+                        f"• *Recommendation:* `{t_action}`\n"
+                        f"• *Summary:* {t_summary}\n"
+                        f"• *Rationale:* _{t_rationale[:200]}_"
+                    ),
+                },
+            }
+        )
+
+        ent_lines = []
+        if entities.get("hosts"):
+            ent_lines.append(f"• *Hosts:* {', '.join(f'`{h}`' for h in entities['hosts'][:3])}")
+        if entities.get("users"):
+            ent_lines.append(f"• *Users:* {', '.join(f'`{u}`' for u in entities['users'][:3])}")
+        if entities.get("processes"):
+            ent_lines.append(f"• *Processes:* {', '.join(f'`{p}`' for p in entities['processes'][:3])}")
+        if entities.get("parent_processes"):
+            ent_lines.append(f"• *Parents:* {', '.join(f'`{p}`' for p in entities['parent_processes'][:3])}")
+        if entities.get("ips"):
+            ent_lines.append(f"• *IPs:* {', '.join(f'`{ip}`' for ip in entities['ips'][:3])}")
+
+        if ent_lines:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*Extracted Security Entities:*\n" + "\n".join(ent_lines),
+                    },
+                }
+            )
+
     events = getattr(result, "events", [])
-    if events and isinstance(events, list):
+    if events and isinstance(events, list) and not triage:
         sample_lines = []
         for i, ev in enumerate(events[:3], 1):
             if isinstance(ev, dict):

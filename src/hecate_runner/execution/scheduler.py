@@ -17,6 +17,7 @@ from hecate_runner.config import Settings
 from hecate_runner.execution.safe_gate import SafeExecutionGate, SafeExecutionResult
 from hecate_runner.execution.watermark_store import StagedSweep, WatermarkStore
 from hecate_runner.lifecycle import (
+    find_hunt_path,
     normalize_lifecycle_state,
     parse_hunt_frontmatter,
     record_hunt_execution,
@@ -256,6 +257,36 @@ class HuntExecutionScheduler:
             matched_count=result.matched_count,
         )
 
+        # Triage telemetry hits if events were retrieved
+        triage_report = None
+        if result.outcome == "hits_detected" and result.events:
+            try:
+                from hecate_runner.execution.normalizer import normalize_events
+                from hecate_runner.execution.triage_agent import FindingTriageAgent
+
+                hunt_path = find_hunt_path(self.workspace, staged.hunt_id)
+                hypothesis = ""
+                techniques: list[str] = []
+                if hunt_path and hunt_path.exists():
+                    fm, _, _ = parse_hunt_frontmatter(hunt_path.read_text(encoding="utf-8"))
+                    hypothesis = str(fm.get("hypothesis") or fm.get("title") or "")
+                    techniques = list(fm.get("techniques") or [])
+
+                normalized = normalize_events(result.events, staged.target_siem, staged.hunt_id)
+                agent = FindingTriageAgent(settings=self.settings)
+                triage_report = agent.triage(
+                    hunt_id=staged.hunt_id,
+                    sweep_id=staged.sweep_id,
+                    target_siem=staged.target_siem,
+                    events=normalized,
+                    hypothesis=hypothesis,
+                    techniques=techniques,
+                )
+                self.store.record_finding(triage_report)
+                result.triage_report = triage_report
+            except Exception as exc:
+                log.warning("Finding triage failed for sweep %s (%s)", staged.sweep_id, exc)
+
         # Record execution in hunt frontmatter and markdown body
         try:
             record_hunt_execution(
@@ -266,6 +297,7 @@ class HuntExecutionScheduler:
                 target=staged.target_siem,
                 detail=result.detail,
                 events=result.events,
+                triage_report=triage_report,
             )
         except Exception as exc:
             log.warning("Could not record execution in hunt markdown (%s)", exc)

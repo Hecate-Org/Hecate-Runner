@@ -125,7 +125,10 @@ def test_vt_graph_preserves_source_assertions_and_keeps_sample_context_separate(
     provider = MagicMock()
     provider.next_item.return_value = item
     monkeypatch.setattr("hecate_agent.api.extract_indicators", lambda _: {"hashes": [sample]})
-    monkeypatch.setattr("hecate_agent.api.generate_enrichment_summary", lambda _: "")
+    monkeypatch.setattr(
+        "hecate_agent.api.generate_enrichment_summary",
+        lambda _content, _stats=None, _citations=None: "",
+    )
     graph = {
         "mitre_techniques": [{"id": "T1485"}],
         "contacted_ips": ["203.0.113.9"],

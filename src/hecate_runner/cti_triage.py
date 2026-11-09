@@ -4,7 +4,8 @@ Three of the first fifteen drafts came from source material that is not threat
 intelligence: a conference recap, a weekly news roundup, and a vendor post
 about agentic SOCs. The empty case -- a blurb that is nothing but its own
 metadata -- is handled in ``orchestrator.is_actionable``. This module covers
-the harder one: an item that *has* prose, but whose prose is commentary.
+the harder one: an item that *has* prose, but whose prose is commentary, or a
+topic essay that names no intrusion, procedure, or indicator.
 
 **Why this parks rather than skips.** The two failure directions cost wildly
 different amounts. A junk draft costs one review slot and is visible. A
@@ -96,6 +97,79 @@ _COMMENTARY_TITLE_PATTERNS = (
     re.compile(r"^(?:overview of|introduction to|understanding the basics of)\b", re.IGNORECASE),
 )
 
+# A paragraph of prose with none of these is a topic, not an intrusion. Short
+# blurbs are left alone: a title like "Lynx Ransomware" often arrives with
+# almost no body, and absence of text is not evidence of absence of a threat.
+_MIN_TOPIC_WORDS = 40
+_TECHNIQUE_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+_CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
+_HASH_RE = re.compile(r"\b[a-fA-F0-9]{32,64}\b")
+_PATH_RE = re.compile(
+    r"(?i)(?:[A-Za-z]:\\(?:[^\\\s]+\\){1,}|/(?:usr|bin|etc|opt|tmp|var|home|proc)/)"
+)
+_COMMAND_RE = re.compile(
+    r"(?i)\b(?:powershell(?:\.exe)?|pwsh|cmd\.exe|rundll32|regsvr32|certutil|"
+    r"bitsadmin|wmic|schtasks|msiexec|bash\s+-[cC]|wget|curl)\b"
+)
+_URL_RE = re.compile(r"https?://\S+")
+_ACTOR_RE = re.compile(r"\b(?:APT|FIN|UNC|TA|DEV)\d{2,4}\b")
+_C2_NAME_RE = re.compile(r"\b[A-Z][A-Za-z0-9]+C2\b")
+_FAMILY_RE = re.compile(
+    r"\b([A-Z][A-Za-z0-9]{2,})\s+(?:Ransomware|Stealer|Loader|Backdoor|Wiper|Botnet|Locker)\b"
+)
+_MALWARE_TERMS_RE = re.compile(
+    r"\b(?:RAT|Trojan|Backdoor|Loader|Stealer|Ransomware|Rootkit|Botnet|Keylogger)\b",
+    re.IGNORECASE,
+)
+_EXECUTABLE_RE = re.compile(
+    r"\b[A-Za-z0-9_.-]+\.(?:exe|dll|elf|so|bin|bat|vbs|ps1|py|sh)\b",
+    re.IGNORECASE,
+)
+_FAMILY_STOPWORDS = frozenset(
+    {"the", "this", "that", "how", "why", "our", "new", "top", "for", "and", "with", "from", "your"}
+)
+
+
+def _has_indicators(item: CTIItem) -> bool:
+    indicators = item.metadata.get("indicators") or {}
+    if isinstance(indicators, dict):
+        return any(bool(values) for values in indicators.values())
+    return bool(indicators)
+
+
+def _names_an_intrusion(title: str) -> bool:
+    if _ACTOR_RE.search(title) or _C2_NAME_RE.search(title):
+        return True
+    return any(match.group(1).lower() not in _FAMILY_STOPWORDS for match in _FAMILY_RE.finditer(title))
+
+
+def _has_specific_intrusion(item: CTIItem) -> bool:
+    """A named intrusion, an exploit procedure, or an indicator list."""
+    if _has_indicators(item):
+        return True
+    blob = f"{item.title or ''}\n{item.content or ''}"
+    if _TECHNIQUE_RE.search(blob) or _CVE_RE.search(blob) or _HASH_RE.search(blob):
+        return True
+    if _PATH_RE.search(blob) or _COMMAND_RE.search(blob) or _URL_RE.search(blob):
+        return True
+    if _MALWARE_TERMS_RE.search(blob) or _EXECUTABLE_RE.search(blob):
+        return True
+    if "MITRE ATT&CK Techniques:" in (item.content or ""):
+        return True
+    return _names_an_intrusion(item.title or "")
+
+
+def topic_without_intrusion(item: CTIItem) -> str:
+    """Why this prose should be parked, or "" when it is specific enough to draft.
+
+    Runs before research. A recoverable park is cheaper than a cycle spent on
+    an essay that has nothing to detect.
+    """
+    words = re.findall(r"[A-Za-z0-9']+", item.content or "")
+    if len(words) < _MIN_TOPIC_WORDS or _has_specific_intrusion(item):
+        return ""
+    return "topic prose names no intrusion, exploit procedure, or indicator"
+
 
 def _categories(item: CTIItem) -> list[str]:
     raw: Any = item.metadata.get("entry_tags") or []
@@ -181,11 +255,13 @@ def triage(
     greynoise_api_key: str | None = None,
     anti_noise_enabled: bool = True,
 ) -> TriageVerdict:
-    """Park commentary or benign scanner noise; let everything else through.
+    """Park commentary, a topic essay with nothing to detect, or benign scanner noise.
 
     Errs toward drafting. An item is parked only on a positive signal -- a
     publisher category naming a commentary series, a title in a recurring
-    non-technical shape, or an observable confirmed as benign infrastructure.
+    non-technical shape, a paragraph that names no intrusion, or an observable
+    confirmed as benign infrastructure. A short blurb is not parked for lack
+    of detail.
     """
     # A provider flags intel that expired while it waited for a draft slot.
     # Parking it is the point: silently skipping it is how OTX lost 23
@@ -206,6 +282,9 @@ def triage(
             return TriageVerdict(
                 True, f"title matches a recurring commentary shape ({pattern.pattern[:44]}...)"
             )
+
+    if reason := topic_without_intrusion(item):
+        return TriageVerdict(True, reason)
 
     # Fast-filter actionability pre-triage: park marketing, webinars, or whitepapers that carry no observables
     indicators = item.metadata.get("indicators") or {}
