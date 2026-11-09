@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
-import yaml
+from ruamel.yaml import YAML
 
 from hecate_runner.atomic_write import atomic_write_text
 
@@ -37,6 +38,14 @@ LIFECYCLE_ALIASES: dict[str, str] = {
     "suppressed": "retired",
     "decommissioned": "retired",
 }
+
+
+def _get_yaml_rt() -> YAML:
+    """Instantiate a round-trip YAML parser that preserves quotes and comments."""
+    yaml_rt = YAML()
+    yaml_rt.preserve_quotes = True
+    yaml_rt.indent(mapping=2, sequence=4, offset=2)
+    return yaml_rt
 
 
 def normalize_lifecycle_state(status: str) -> str:
@@ -76,11 +85,12 @@ def parse_hunt_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
 
     raw_yaml = parts[1]
     body = parts[2]
+    yaml_rt = _get_yaml_rt()
     try:
-        data = yaml.safe_load(raw_yaml) or {}
+        data = yaml_rt.load(raw_yaml) or {}
         if not isinstance(data, dict):
             data = {}
-    except yaml.YAMLError as exc:
+    except Exception as exc:
         log.warning("Failed parsing YAML frontmatter: %s", exc)
         data = {}
 
@@ -198,8 +208,11 @@ def set_hunt_lifecycle(
         fm.pop("retired_by", None)
         fm.pop("retirement_reason", None)
 
-    # Reconstruct document preserving frontmatter formatting
-    new_yaml = yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    # Reconstruct document preserving frontmatter formatting and comments
+    yaml_rt = _get_yaml_rt()
+    stream = StringIO()
+    yaml_rt.dump(fm, stream)
+    new_yaml = stream.getvalue()
     new_content = f"---\n{new_yaml}---\n{body.lstrip()}"
     atomic_write_text(hunt_path, new_content)
 

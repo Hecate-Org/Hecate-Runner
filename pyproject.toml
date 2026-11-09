@@ -38,6 +38,7 @@ dependencies = [
     "hecate-agent[all]",
     "slack-bolt>=1.20.0",
     "beautifulsoup4>=4.12",
+    "ruamel-yaml>=0.19.1",
 ]
 
 [project.optional-dependencies]
