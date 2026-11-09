@@ -37,6 +37,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from hecate_runner import __version__
+from hecate_runner.api_calls import install_api_call_recorder
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.commands.bas import (
     bas_check_cmd,
@@ -66,6 +67,7 @@ from hecate_runner.commands.sources import (
     misp_app,
     sources_app,
 )
+from hecate_runner.commands.sweep import sweep_app
 from hecate_runner.config import Settings
 from hecate_runner.cti.base import CTIItem
 from hecate_runner.dead_letter import (
@@ -168,8 +170,21 @@ def _configure_logging(settings: Settings, *, to_stdout: bool = True) -> None:
     )
     # One line per HTTP request (every MISP/OTX/RSS poll) was half of each
     # cycle's log; the trail's intake line already says what was fetched.
-    if settings.log_level != "DEBUG":
-        logging.getLogger("httpx").setLevel(logging.WARNING)
+    # They go to their own file instead, which the monitor counts per integration.
+    rotate_log_if_needed(
+        settings.api_calls_file,
+        max_bytes=settings.log_max_bytes,
+        backup_count=1,
+    )
+    rotate_log_if_needed(
+        settings.events_file,
+        max_bytes=settings.log_max_bytes,
+        backup_count=1,
+    )
+    os.environ["HECATE_EVENTS_LOG"] = str(settings.events_file)
+    install_api_call_recorder(
+        settings.api_calls_file, also_propagate=settings.log_level == "DEBUG"
+    )
 
 
 # --- Commands --------------------------------------------------------------
@@ -201,6 +216,39 @@ def run(
     result = orch.run_once(dry_run=dry_run)
     _print_result(result)
     raise typer.Exit(code=0 if result.ok else 1)
+
+
+@app.command()
+def maintenance(
+    once: Annotated[bool, typer.Option("--once", help="Run due jobs once, then exit.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="List enabled jobs without launching workers.")] = False,
+) -> None:
+    """Run independent scheduled publishing, SIEM audit and drift-alert workers."""
+    import signal
+    import threading
+
+    from hecate_runner.maintenance import MaintenanceScheduler
+
+    settings = Settings()
+    _configure_logging(settings)
+    scheduler = MaintenanceScheduler(settings)
+    if dry_run:
+        console.print({job: interval for job, interval in scheduler.intervals().items() if interval > 0})
+        return
+    stop = threading.Event()
+    previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        scheduler.tick()
+        while not stop.is_set() and (not once or scheduler.active):
+            stop.wait(0.2 if once else 1.0)
+            if not stop.is_set():
+                scheduler.tick(launch=not once)
+    finally:
+        scheduler.close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if once and scheduler.failed:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -273,7 +321,6 @@ def daemon(
     from hecate_runner.integration_checks import start_health_refresh
 
     cycles_completed = 0
-    last_siem_audit_time = 0.0
     try:
         while not stop_event.is_set():
             start_health_refresh(settings)
@@ -291,51 +338,6 @@ def daemon(
                     provider.close()
             _print_result(result)
             cycles_completed += 1
-
-            # Periodic background SIEM Detection-as-Code drift audit
-            now_ts = datetime.now(UTC).timestamp()
-            drift_interval = getattr(settings, "siem_drift_audit_interval_sec", 3600)
-            if drift_interval > 0 and (now_ts - last_siem_audit_time >= drift_interval):
-                try:
-                    from hecate_runner.notifications import notify_siem_drift
-                    from hecate_runner.siem_drift import (
-                        audit_workspace_queries,
-                        reconcile_all_drifted_queries,
-                    )
-
-                    log.info("Daemon executing scheduled SIEM drift audit sweep...")
-                    drift_report = audit_workspace_queries(
-                        settings.hecate_workspace, dry_run=False, trigger="daemon"
-                    )
-                    drift_cnt = drift_report.get("drifted_count", 0)
-                    missing_cnt = drift_report.get("missing_count", 0)
-
-                    if drift_cnt > 0 or missing_cnt > 0:
-                        log.warning(
-                            "SIEM drift audit detected %d drifted and %d missing detection queries!",
-                            drift_cnt,
-                            missing_cnt,
-                        )
-                        for h_id, d_list in drift_report.get("drifted_by_hunt", {}).items():
-                            notify_siem_drift(settings, h_id, d_list)
-                        for h_id, m_list in drift_report.get("missing_by_hunt", {}).items():
-                            if h_id not in drift_report.get("drifted_by_hunt", {}):
-                                notify_siem_drift(settings, h_id, m_list)
-
-                        if getattr(settings, "siem_drift_auto_reconcile", False):
-                            log.info("Auto-reconcile enabled: reconciling drifted SIEM queries...")
-                            rec_res = reconcile_all_drifted_queries(
-                                settings.hecate_workspace, dry_run=False, actor="daemon"
-                            )
-                            log.info(
-                                "Auto-reconciled %d query(s) (%d failed)",
-                                rec_res.get("total_reconciled", 0),
-                                rec_res.get("total_failed", 0),
-                            )
-
-                    last_siem_audit_time = now_ts
-                except Exception as exc:
-                    log.warning("Background SIEM drift audit encountered an error: %s", exc)
 
             if max_cycles is not None and cycles_completed >= max_cycles:
                 console.print(
@@ -1522,13 +1524,11 @@ def audit_siem_cmd(
             f.write(md_report + "\n")
 
     if alert_slack and (drifted > 0 or missing > 0):
+        from hecate_runner.drift_alerts import drift_alert_groups
         from hecate_runner.notifications import notify_siem_drift
 
-        for hunt_id, drifted_list in report.get("drifted_by_hunt", {}).items():
-            notify_siem_drift(settings, hunt_id, drifted_list)
-        for hunt_id, missing_list in report.get("missing_by_hunt", {}).items():
-            if hunt_id not in report.get("drifted_by_hunt", {}):
-                notify_siem_drift(settings, hunt_id, missing_list)
+        for hunt_id, problems in drift_alert_groups(report).items():
+            notify_siem_drift(settings, hunt_id, problems)
         if format != "markdown" and format != "json":
             console.print("[green]Slack drift alert notification cards dispatched.[/green]")
 
@@ -1998,6 +1998,9 @@ def approve(
         settings.query_provider,
         hecate_bin=settings.hecate_bin_resolved,
         workspace=settings.hecate_workspace,
+        max_time_range_days=settings.max_query_time_range_days,
+        max_limit=settings.max_query_limit,
+        env_overrides=settings.query_provider_env(),
     )
     result = provider.execute(proposed)
 
@@ -2221,7 +2224,9 @@ def metrics(
     table.add_column("Cycles", justify="right")
     table.add_column("Avg wall", justify="right")
     table.add_column("LLM calls", justify="right")
-    table.add_column("Input tokens", justify="right")
+    table.add_column("Reported input", justify="right")
+    table.add_column("Largest prompt", justify="right")
+    table.add_column("Input samples", justify="right")
     table.add_column("Output tokens", justify="right")
     table.add_column("Total est.", justify="right")
     table.add_column("Non-ok", justify="right")
@@ -2237,13 +2242,17 @@ def metrics(
             avg_wall,
             "n/a" if row["llm_calls"] is None else str(row["llm_calls"]),
             "n/a" if row["input_tokens"] is None else str(row["input_tokens"]),
+            "n/a" if row["max_input_tokens"] is None else str(row["max_input_tokens"]),
+            "n/a" if row["input_token_samples"] is None else str(row["input_token_samples"]),
             "n/a" if row["output_tokens"] is None else str(row["output_tokens"]),
             "n/a" if cost is None else f"${cost:.6f}",
             str(row["errors"]),
         )
     console.print(table)
     console.print(
-        "Estimated cost uses Core's model pricing table; it may differ from provider invoices."
+        "Tokens are provider-reported totals; largest prompt is the maximum per request, not a stage total. "
+        "Input samples counts calls reporting input usage; historical records may lack this measurement. "
+        "Estimated cost uses Core's pricing table and may differ from invoices."
     )
 
 
@@ -2565,9 +2574,6 @@ def dedup(
         workspace_queries = settings.hecate_workspace / "queries"
         if workspace_queries.exists() and workspace_queries.is_dir():
             search_dirs.append(workspace_queries)
-        public_queries = Path("/home/chemch/betas/Hecate-Public/queries")
-        if public_queries.exists() and public_queries.is_dir():
-            search_dirs.append(public_queries)
 
     corpus_rules: list[SigmaRuleAST] = []
     seen: set[str] = set()
@@ -2770,6 +2776,7 @@ app.command(name="doctor")(doctor)
 # --- Sources and MISP Sub-apps ---------------------------------------------
 app.add_typer(sources_app, name="sources")
 app.add_typer(misp_app, name="misp")
+app.add_typer(sweep_app, name="sweep")
 
 
 if __name__ == "__main__":

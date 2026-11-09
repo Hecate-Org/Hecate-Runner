@@ -115,6 +115,32 @@ class SlackBotSimulator:
                 msg = f"❌ *Failed to park `{hunt_id}`:* {res.get('error')}"
             return {"ok": bool(res.get("ok")), "action": action_id, "message": msg, "data": res}
 
+        elif action_id == "hecate_approve_sweep":
+            from hecate_runner.execution.scheduler import HuntExecutionScheduler
+
+            scheduler = HuntExecutionScheduler(settings=self.settings)
+            res = scheduler.execute_sweep(value, approver=f"slack:{user}")
+            icon = "🟢" if res.outcome == "clean" else ("⚠️" if res.outcome == "hits_detected" else "🚨")
+            msg = (
+                f"{icon} *Hunt Sweep Executed by <@{user}>*\n"
+                f"• *Hunt ID:* `{res.hunt_id}`\n"
+                f"• *Target SIEM:* `{res.target}`\n"
+                f"• *Outcome:* `{res.outcome}`\n"
+                f"• *Matched Events:* `{res.matched_count}`\n"
+                f"• *Detail:* {res.detail}"
+            )
+            return {"ok": res.ok, "action": action_id, "message": msg, "data": res}
+
+        elif action_id == "hecate_reject_sweep":
+            from hecate_runner.execution.scheduler import HuntExecutionScheduler
+
+            scheduler = HuntExecutionScheduler(settings=self.settings)
+            staged = scheduler.reject_sweep(
+                value, reason=f"Rejected via Slack simulation by {user}", actor=f"slack:{user}"
+            )
+            msg = f"⏹️ *Hunt Sweep `{value}` Skipped / Cancelled* by <@{user}>"
+            return {"ok": staged is not None, "action": action_id, "message": msg, "data": staged}
+
         return {
             "ok": False,
             "action": action_id,

@@ -1,0 +1,305 @@
+"""Autonomous Hunt Execution Scheduler for recurring production sweeps.
+
+Discovers active hunts, matches them against target SIEM dialects, determines
+execution eligibility based on watermarks, stages sweeps for human approval,
+and invokes the SafeExecutionGate.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from hecate_runner.config import Settings
+from hecate_runner.execution.safe_gate import SafeExecutionGate, SafeExecutionResult
+from hecate_runner.execution.watermark_store import StagedSweep, WatermarkStore
+from hecate_runner.lifecycle import (
+    normalize_lifecycle_state,
+    parse_hunt_frontmatter,
+    record_hunt_execution,
+)
+from hecate_runner.query_execution import ProposedQuery, QueryProvider, get_provider
+
+log = logging.getLogger(__name__)
+
+# File extension mappings for supported SIEM backends
+DIALECT_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "splunk": (".spl",),
+    "sentinel": (".kql",),
+    "elastic": (".eql",),
+    "crowdstrike": (".cql",),
+    "mock": (".spl", ".kql", ".eql", ".cql"),
+}
+
+
+class HuntExecutionScheduler:
+    """Discovers, schedules, stages, and executes hunting sweeps across active hunts."""
+
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        provider: QueryProvider | None = None,
+        notify_fn: Callable[[list[dict[str, Any]] | str], None] | None = None,
+    ):
+        self.settings = settings or Settings()
+        self.workspace = self.settings.hecate_workspace
+        self.store = WatermarkStore(self.settings.hunt_executions_db_resolved)
+        self.notify_fn = notify_fn
+
+        if provider is not None:
+            self.provider = provider
+        else:
+            self.provider = get_provider(
+                self.settings.query_provider,
+                hecate_bin=self.settings.hecate_bin_resolved,
+                workspace=self.workspace,
+                max_time_range_days=self.settings.max_query_time_range_days,
+                max_limit=self.settings.max_query_limit,
+                env_overrides=self.settings.query_provider_env(),
+            )
+
+        self.gate = SafeExecutionGate(
+            self.provider,
+            max_auto_fetch=self.settings.auto_hunt_max_fetch,
+            max_time_range_days=self.settings.max_query_time_range_days,
+            max_limit=self.settings.max_query_limit,
+        )
+
+    def discover_active_hunts(self) -> list[dict[str, Any]]:
+        """Find all hunts with status: active and associated query files in the workspace."""
+        hunts_dir = self.workspace / "hunts"
+        if not hunts_dir.exists():
+            return []
+
+        active_hunts = []
+        target = self.provider.name.lower()
+        allowed_exts = DIALECT_EXTENSIONS.get(target, (".spl", ".kql", ".eql", ".cql"))
+
+        for hunt_file in sorted(hunts_dir.glob("**/*.md")):
+            try:
+                content = hunt_file.read_text(encoding="utf-8")
+                fm, _, _ = parse_hunt_frontmatter(content)
+                status = str(fm.get("status") or "")
+                try:
+                    canonical = normalize_lifecycle_state(status)
+                except ValueError:
+                    continue
+
+                if canonical != "active":
+                    continue
+
+                hunt_id = str(fm.get("hunt_id") or hunt_file.stem).upper()
+                query_dir = self.workspace / "queries" / hunt_id
+                query_files: list[Path] = []
+                if query_dir.exists():
+                    for ext in allowed_exts:
+                        query_files.extend(sorted(query_dir.glob(f"*{ext}")))
+
+                watermark = self.store.get_watermark(hunt_id)
+                active_hunts.append(
+                    {
+                        "hunt_id": hunt_id,
+                        "title": fm.get("title", ""),
+                        "path": hunt_file,
+                        "query_files": query_files,
+                        "watermark": watermark,
+                        "frontmatter": fm,
+                    }
+                )
+            except Exception as exc:
+                log.warning("Skipping unreadable hunt file %s: %s", hunt_file, exc)
+
+        return active_hunts
+
+    def check_eligibility(self, hunt_meta: dict[str, Any], force: bool = False) -> bool:
+        """Check whether an active hunt is due for a scheduled sweep."""
+        if force:
+            return True
+
+        if not hunt_meta.get("query_files"):
+            return False
+
+        watermark = hunt_meta.get("watermark")
+        if watermark is None:
+            return True
+
+        try:
+            last_run = datetime.fromisoformat(watermark.last_executed_at)
+            elapsed = datetime.now(UTC) - last_run
+            cadence = timedelta(hours=self.settings.auto_hunt_cadence_hours)
+            return elapsed >= cadence
+        except Exception:
+            return True
+
+    def stage_sweeps(
+        self,
+        hunt_id: str | None = None,
+        *,
+        force: bool = False,
+        time_range_days: int | None = None,
+    ) -> list[StagedSweep]:
+        """Stage sweeps for eligible active hunts awaiting approval."""
+        active_hunts = self.discover_active_hunts()
+        staged: list[StagedSweep] = []
+        lookback = time_range_days or self.settings.auto_hunt_default_lookback_days
+
+        for h in active_hunts:
+            h_id = h["hunt_id"]
+            if hunt_id and h_id != hunt_id.upper():
+                continue
+
+            if not self.check_eligibility(h, force=force):
+                log.debug("Hunt %s is not yet eligible for scheduled sweep", h_id)
+                continue
+
+            q_files: list[Path] = h["query_files"]
+            if not q_files:
+                log.info("Active hunt %s has no query files for dialect %s", h_id, self.provider.name)
+                continue
+
+            # Pick the primary query file (or first available)
+            q_file = q_files[0]
+            query_text = q_file.read_text(encoding="utf-8").strip()
+
+            sweep = self.store.stage_sweep(
+                hunt_id=h_id,
+                target_siem=self.provider.name,
+                query_file=q_file.name,
+                query_text=query_text,
+                time_range_days=lookback,
+                justification=f"Scheduled sweep against {self.provider.name}",
+            )
+            staged.append(sweep)
+            log.info("Staged sweep %s for hunt %s", sweep.sweep_id, h_id)
+
+            # Notify via Slack if callback configured
+            if self.notify_fn:
+                try:
+                    from hecate_runner.slack_blocks import build_staged_sweep_card
+
+                    blocks = build_staged_sweep_card(sweep, title=h.get("title", ""))
+                    self.notify_fn(blocks)
+                except Exception as exc:
+                    log.warning("Could not dispatch staged sweep Slack card (%s)", exc)
+
+        return staged
+
+    def execute_sweep(
+        self,
+        sweep_id_or_hunt_id: str,
+        *,
+        approver: str = "analyst",
+        force_raw: bool = False,
+    ) -> SafeExecutionResult:
+        """Execute a staged sweep through the SafeExecutionGate and sync state."""
+        staged = self.store.get_staged_sweep(sweep_id_or_hunt_id)
+        now_dt = datetime.now(UTC)
+
+        if staged is None:
+            # If a hunt_id was passed directly, try staging on the fly
+            clean_id = sweep_id_or_hunt_id.upper()
+            staged_list = self.stage_sweeps(hunt_id=clean_id, force=True)
+            if not staged_list:
+                return SafeExecutionResult(
+                    hunt_id=clean_id,
+                    target=self.provider.name,
+                    outcome="error",
+                    detail=f"No staged sweep found and could not stage sweep for {clean_id}",
+                    executed_at=now_dt.isoformat(),
+                )
+            staged = staged_list[0]
+
+        if staged.status == "executed":
+            return SafeExecutionResult(
+                hunt_id=staged.hunt_id,
+                target=staged.target_siem,
+                outcome="error",
+                detail=f"Sweep {staged.sweep_id} has already been executed",
+                executed_at=now_dt.isoformat(),
+            )
+
+        window_start = (now_dt - timedelta(days=staged.time_range_days)).isoformat()
+        window_end = now_dt.isoformat()
+
+        proposed = ProposedQuery(
+            hunt_id=staged.hunt_id,
+            data_source=staged.target_siem,
+            query_text=staged.query_text,
+            time_range_days=staged.time_range_days,
+            limit=self.settings.max_query_limit,
+            justification=staged.justification,
+        )
+
+        # Execute via COUNT-FIRST Safe Execution Gate
+        result = self.gate.execute_safely(proposed, force_raw=force_raw)
+
+        # Update watermark in SQLite
+        self.store.update_watermark(
+            hunt_id=staged.hunt_id,
+            target_siem=staged.target_siem,
+            query_file=staged.query_file,
+            last_window_start=window_start,
+            last_window_end=window_end,
+            outcome=result.outcome,
+            matched_count=result.matched_count,
+        )
+
+        # Mark staged sweep status
+        self.store.mark_sweep_status(
+            staged.sweep_id,
+            status="executed",
+            actor=approver,
+            outcome=result.outcome,
+            matched_count=result.matched_count,
+        )
+
+        # Record execution in hunt frontmatter and markdown body
+        try:
+            record_hunt_execution(
+                self.workspace,
+                staged.hunt_id,
+                outcome=result.outcome,
+                matched_count=result.matched_count,
+                target=staged.target_siem,
+                detail=result.detail,
+                events=result.events,
+            )
+        except Exception as exc:
+            log.warning("Could not record execution in hunt markdown (%s)", exc)
+
+        # Notify via Slack if callback configured
+        if self.notify_fn:
+            try:
+                from hecate_runner.slack_blocks import build_sweep_result_card
+
+                blocks = build_sweep_result_card(result)
+                self.notify_fn(blocks)
+            except Exception as exc:
+                log.warning("Could not dispatch sweep result Slack card (%s)", exc)
+
+        return result
+
+    def reject_sweep(
+        self,
+        sweep_id_or_hunt_id: str,
+        reason: str = "Rejected by analyst",
+        actor: str = "analyst",
+    ) -> StagedSweep | None:
+        """Reject and cancel a staged sweep."""
+        staged = self.store.get_staged_sweep(sweep_id_or_hunt_id)
+        if not staged:
+            return None
+
+        self.store.mark_sweep_status(
+            staged.sweep_id,
+            status="rejected",
+            actor=actor,
+            reason=reason,
+        )
+        staged.status = "rejected"
+        staged.rejection_reason = reason
+        log.info("Rejected sweep %s for %s (%s)", staged.sweep_id, staged.hunt_id, reason)
+        return staged

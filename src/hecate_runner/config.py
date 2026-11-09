@@ -6,12 +6,12 @@ Uses pydantic-settings so config is typed, validated, and self-documenting.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from pydantic import Field, field_validator
+from hecate_agent.core.workspace import workspace_root
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
     DotEnvSettingsSource,
@@ -20,23 +20,12 @@ from pydantic_settings import (
 )
 
 
-def _discover_env_files() -> tuple[str, ...]:
-    """Discover environment files with fallback to Hecate-Workspace/.env.
-
-    Order in pydantic-settings: later files override earlier files.
-    Workspace .env is loaded first, then local cwd .env (if present) to allow
-    local developer overrides.
-    """
+def _discover_env_files(workspace: Path | None = None) -> tuple[str, ...]:
+    """Read the selected workspace and local override without checkout fallbacks."""
     files: list[str] = []
-    ws_env = os.environ.get("HECATE_WORKSPACE")
-    if ws_env:
-        candidate = Path(ws_env).expanduser().resolve() / ".env"
-        if candidate.is_file():
-            files.append(str(candidate))
-    else:
-        default_ws = Path.home() / "betas" / "Hecate-Workspace" / ".env"
-        if default_ws.is_file():
-            files.append(str(default_ws))
+    candidate = workspace_root(workspace) / ".env"
+    if candidate.is_file():
+        files.append(str(candidate))
     files.append(".env")
     return tuple(files)
 
@@ -63,9 +52,12 @@ class Settings(BaseSettings):
         # If env_file is defaulted to ".env" (no custom _env_file passed to constructor),
         # dynamically resolve workspace .env and local .env at instantiation time.
         if getattr(dotenv_settings, "env_file", None) == ".env":
+            explicit_workspace = init_settings().get("hecate_workspace")
             dotenv_settings = DotEnvSettingsSource(
                 settings_cls,
-                env_file=_discover_env_files(),
+                env_file=_discover_env_files(
+                    Path(explicit_workspace) if explicit_workspace else None
+                ),
                 env_file_encoding="utf-8",
             )
         return (
@@ -77,12 +69,8 @@ class Settings(BaseSettings):
 
     # --- Hecate workspace -----------------------------------------------------
     hecate_workspace: Path = Field(
-        # The Hecate workspace is Hecate-Core. This used to default to
-        # ~/agentic-threat-hunting-framework, which no longer exists -- so a
-        # deployment with no HECATE_WORKSPACE set resolved hecate_bin and
-        # cti_queue_dir under a missing directory instead of failing clearly.
-        default=Path.home() / "betas" / "Hecate-Workspace",
-        description="Path to the Hecate workspace directory (Hecate-Workspace)",
+        default_factory=workspace_root,
+        description="Hecate workspace; defaults to HECATE_WORKSPACE, nearest workspace config, or cwd.",
     )
     hecate_bin: Path | None = Field(
         default=None,
@@ -160,7 +148,9 @@ class Settings(BaseSettings):
             "instead of producing a draft. 1500s (25 min) leaves headroom above "
             "advanced depth's stated ceiling; the systemd unit's own "
             "TimeoutStartSec must be raised to match (see systemd/"
-            "hecate-runner-orchestrator.service) since that's an outer, harder cap."
+            "hecate-runner-orchestrator.service) since that's an outer, harder cap. "
+            "Primary-source fetching, extraction and indicator classification share "
+            "one hard deadline of this length."
         ),
     )
     cti_provider: Literal[
@@ -283,10 +273,24 @@ class Settings(BaseSettings):
         alias="HECATE_RUNNER_SIEM_DEPLOY_DRY_RUN",
         description="Simulate query deployment in dry-run mode without mutating remote SIEM/EDR state.",
     )
+    maintenance_interval_sec: int = Field(
+        default=60, ge=1, alias="HECATE_RUNNER_MAINTENANCE_INTERVAL_SEC",
+        description="Seconds between bounded GitHub/MISP outbox batches and drift-alert delivery batches.",
+    )
+    maintenance_job_timeout_sec: int = Field(
+        default=900, ge=1, le=3600, alias="HECATE_RUNNER_MAINTENANCE_JOB_TIMEOUT_SEC",
+        description="Hard deadline for an independent maintenance job; timeout kills its process group and backs off.",
+    )
     siem_drift_audit_interval_sec: int = Field(
         default=3600,
         alias="HECATE_RUNNER_SIEM_DRIFT_AUDIT_INTERVAL_SEC",
         description="Interval in seconds between background SIEM query drift audit sweeps (0 to disable).",
+    )
+    siem_drift_alert_reminder_sec: int = Field(
+        default=86400,
+        ge=0,
+        alias="HECATE_RUNNER_SIEM_DRIFT_ALERT_REMINDER_SEC",
+        description="Reminder interval for unchanged automatic drift alerts; 0 disables reminders.",
     )
     siem_drift_auto_reconcile: bool = Field(
         default=False,
@@ -402,6 +406,25 @@ class Settings(BaseSettings):
             "drafting. A failed fetch drafts from the feed item as before. Adds a "
             "few local-model calls per cycle; set false to skip."
         ),
+    )
+    source_evidence_max_calls: int = Field(
+        default=16, ge=1, le=100,
+        alias="HECATE_RUNNER_SOURCE_EVIDENCE_MAX_CALLS",
+        description="Shared source extraction/recovery/classification model-call limit; cache hits use no calls.",
+    )
+    source_evidence_max_tokens: int = Field(
+        default=256000, ge=1,
+        alias="HECATE_RUNNER_SOURCE_EVIDENCE_MAX_TOKENS",
+        description="Conservative UTF-8 prompt reservations plus capped output across the source stage; separate from billed token usage.",
+    )
+    source_evidence_cache_enabled: bool = Field(
+        default=True, alias="HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED",
+        description="Reuse verified source responses when content, prompts, extractor version and model settings match.",
+    )
+    source_evidence_cache_ttl_sec: int = Field(
+        default=86400, ge=0,
+        alias="HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_TTL_SEC",
+        description="Maximum extraction-cache age in seconds; zero disables caching.",
     )
     research_enabled: bool = Field(
         default=True,
@@ -1157,6 +1180,9 @@ class Settings(BaseSettings):
         "opencti_token",
         "vt_api_key",
         "greynoise_api_key",
+        "query_sentinel_token",
+        "query_elastic_api_key",
+        "query_logscale_token",
     }
 
     # --- CTI intake triage ----------------------------------------------------
@@ -1164,8 +1190,9 @@ class Settings(BaseSettings):
         default="park",
         alias="HECATE_RUNNER_CTI_TRIAGE",
         description=(
-            "Hold back CTI that is commentary rather than intelligence -- a "
-            "conference recap, a weekly news roundup, a product post. 'park' "
+            "Hold back CTI that is commentary or a topic essay with no intrusion, "
+            "procedure, or indicator -- a conference recap, a weekly news roundup, "
+            "a product post. 'park' "
             "writes such items whole to <cti_queue>/parked/ with the reason "
             "attached, where `hecate-runner parked` lists them and "
             "`hecate-runner parked restore <id>` puts one back; nothing is "
@@ -1199,16 +1226,36 @@ class Settings(BaseSettings):
     )
 
     # --- Query execution ("propose, don't run") --------------------------------
-    query_provider: Literal["mock", "splunk"] = Field(
+    query_provider: Literal["mock", "splunk", "sentinel", "elastic", "crowdstrike"] = Field(
         default="mock",
         alias="HECATE_RUNNER_QUERY_PROVIDER",
-        description=(
-            "Backend for `hecate-runner approve`. 'mock' touches nothing real — the "
-            "default until real data-source access is configured. 'splunk' "
-            "shells out to `hecate-agent splunk search` (requires SPLUNK_HOST/SPLUNK_TOKEN "
-            "in the Hecate workspace)."
-        ),
+        description="Backend for approved queries: mock, Splunk, Sentinel KQL, Elastic EQL, or LogScale CQL.",
     )
+    query_sentinel_workspace_id: str | None = Field(default=None, alias="SENTINEL_WORKSPACE_ID")
+    query_sentinel_token: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("SENTINEL_BEARER_TOKEN", "AZURE_ACCESS_TOKEN"))
+    query_elastic_url: str | None = Field(default=None, alias="ELASTIC_URL")
+    query_elastic_api_key: str | None = Field(default=None, repr=False, alias="ELASTIC_API_KEY")
+    query_elastic_index: str | None = Field(default=None, alias="ELASTIC_INDEX")
+    query_elastic_timestamp_field: str | None = Field(default=None, alias="ELASTIC_TIMESTAMP_FIELD")
+    query_logscale_url: str | None = Field(default=None, validation_alias=AliasChoices("FALCON_LOGSCALE_URL", "FALCON_BASE_URL"))
+    query_logscale_repo: str | None = Field(default=None, alias="FALCON_LOGSCALE_REPO")
+    query_logscale_token: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("FALCON_LOGSCALE_TOKEN", "FALCON_API_TOKEN", "FALCON_BEARER_TOKEN"))
+
+    def query_provider_env(self) -> dict[str, str]:
+        """Resolved query configuration, including local dotenv and init overrides."""
+        values = {
+            "SENTINEL_WORKSPACE_ID": self.query_sentinel_workspace_id,
+            "SENTINEL_BEARER_TOKEN": self.query_sentinel_token,
+            "ELASTIC_URL": self.query_elastic_url,
+            "ELASTIC_API_KEY": self.query_elastic_api_key,
+            "ELASTIC_INDEX": self.query_elastic_index,
+            "ELASTIC_TIMESTAMP_FIELD": self.query_elastic_timestamp_field,
+            "FALCON_LOGSCALE_URL": self.query_logscale_url,
+            "FALCON_LOGSCALE_REPO": self.query_logscale_repo,
+            "FALCON_LOGSCALE_TOKEN": self.query_logscale_token,
+        }
+        return {key: value for key, value in values.items() if value is not None}
+
     max_query_time_range_days: int = Field(
         default=7,
         ge=1,
@@ -1222,6 +1269,44 @@ class Settings(BaseSettings):
         le=10000,
         alias="HECATE_RUNNER_MAX_QUERY_LIMIT",
         description="Hard ceiling on a proposed query's result limit. Matches AGENTS.md's Query Guardrails.",
+    )
+
+    # --- Auto Hunt Execution Engine -------------------------------------------
+    auto_hunt_execution_enabled: bool = Field(
+        default=False,
+        alias="HECATE_AUTO_HUNT_EXECUTION_ENABLED",
+        description="Enable autonomous recurring hunt sweep execution.",
+    )
+    auto_hunt_approval_required: bool = Field(
+        default=True,
+        alias="HECATE_AUTO_HUNT_APPROVAL_REQUIRED",
+        description="Require one-click approval (via Slack or CLI) before executing scheduled sweeps.",
+    )
+    auto_hunt_max_fetch: int = Field(
+        default=200,
+        ge=1,
+        le=2000,
+        alias="HECATE_AUTO_HUNT_MAX_FETCH",
+        description="Ceiling on raw event retrieval in COUNT-FIRST safe execution gate.",
+    )
+    auto_hunt_cadence_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        alias="HECATE_AUTO_HUNT_CADENCE_HOURS",
+        description="Interval in hours between scheduled sweeps for an active hunt.",
+    )
+    auto_hunt_default_lookback_days: int = Field(
+        default=1,
+        ge=1,
+        le=7,
+        alias="HECATE_AUTO_HUNT_DEFAULT_LOOKBACK_DAYS",
+        description="Default lookback window in days for automated hunt sweeps.",
+    )
+    hunt_executions_db: Path | None = Field(
+        default=None,
+        alias="HECATE_HUNT_EXECUTIONS_DB",
+        description="Custom path to hunt execution watermarks SQLite database.",
     )
     cti_priority_tiers: bool = Field(
         default=True,
@@ -1270,8 +1355,26 @@ class Settings(BaseSettings):
         return self.log_dir / "llm_calls.jsonl"
 
     @property
+    def api_calls_file(self) -> Path:
+        """One line per completed outbound HTTP request: time, method, host, status."""
+        return self.log_dir / "api_calls.jsonl"
+
+    @property
+    def events_file(self) -> Path:
+        """One JSON object per cycle decision and completed HTTP request."""
+        return self.log_dir / "events.jsonl"
+
+    @property
     def state_file(self) -> Path:
         return self.hecate_workspace / ".orchestrator_state.json"
+
+    @property
+    def hunt_executions_db_resolved(self) -> Path:
+        if self.hunt_executions_db:
+            return self.hunt_executions_db
+        state_dir = self.hecate_workspace / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir / "hunt_executions.sqlite3"
 
     @property
     def otx_cursor_file(self) -> Path:
@@ -1447,6 +1550,10 @@ class Settings(BaseSettings):
         env = {
             "HECATE_WORKSPACE": str(self.hecate_workspace),
             "HECATE_LLM_CALL_LOG": str(self.llm_calls_file),
+            "HECATE_RUNNER_SOURCE_EVIDENCE_MAX_CALLS": str(self.source_evidence_max_calls),
+            "HECATE_RUNNER_SOURCE_EVIDENCE_MAX_TOKENS": str(self.source_evidence_max_tokens),
+            "HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED": str(self.source_evidence_cache_enabled).lower(),
+            "HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_TTL_SEC": str(self.source_evidence_cache_ttl_sec),
         }
         if self.hecate_llm_provider:
             env["HECATE_LLM_PROVIDER"] = self.hecate_llm_provider

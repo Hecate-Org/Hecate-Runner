@@ -6,8 +6,12 @@ MITRE ATT&CK badges, MISP links, and multi-column telemetry summaries.
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from hecate_runner.metrics import format_usd
 
 if TYPE_CHECKING:
     from hecate_runner.config import Settings
@@ -107,6 +111,38 @@ def sanitize_slack_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _draft_publish_text(result: Any) -> str:
+    """The publish findings written into a new draft, for the card that announces it."""
+    path = getattr(result, "draft_path", None)
+    if not path:
+        return ""
+    try:
+        from hecate_runner.lifecycle import parse_hunt_frontmatter
+
+        frontmatter, _, _ = parse_hunt_frontmatter(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    verdict = str(frontmatter.get("publish_check") or "")
+    if verdict not in {"block", "review"}:
+        return ""
+    raw = frontmatter.get("publish_findings") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = []
+    lines = []
+    for item in raw[:6] if isinstance(raw, list) else []:
+        if isinstance(item, dict):
+            lines.append(f"• `{item.get('target') or item.get('check')}` {item.get('message')}")
+    head = (
+        "*Publish check:* blocking. Approval needs a written override."
+        if verdict == "block"
+        else "*Publish check:* review these before approving."
+    )
+    return head + ("\n" + "\n".join(lines) if lines else "")
+
+
 def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[dict[str, Any]]:
     """Build a rich Slack card for a newly created draft hunt."""
     research_ctx = (
@@ -154,6 +190,9 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
             ],
         },
     ]
+    publish_text = _draft_publish_text(result)
+    if publish_text:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": publish_text}})
 
     if interactive:
         blocks.append(
@@ -509,13 +548,16 @@ def build_threat_intake_card(item: CTIItem) -> list[dict[str, Any]]:
 
 
 def build_ops_metrics_card(metrics_summary: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build a 24-hour executive operational metrics digest card."""
+    """Build an operational digest for the summary's selected window."""
+    days = metrics_summary.get("window_days", 1)
+    window = "24-Hour" if days == 1 else f"{days}-Day"
     hunts_done = metrics_summary.get("hunts_completed", 0)
-    sigma_total = metrics_summary.get("sigma_rules_produced", 0)
-    spend_today = float(metrics_summary.get("spend_today_usd", 0.0))
-    budget = float(metrics_summary.get("daily_budget_usd", 20.0))
+    sigma_total = metrics_summary.get("sigma_rules_produced")
+    sigma_text = "Unavailable" if sigma_total is None else f"{sigma_total} rules generated"
+    spend_today = format_usd(metrics_summary.get("spend_today_usd"))
+    budget = format_usd(metrics_summary.get("daily_budget_usd"))
     active_sources = metrics_summary.get("active_sources", [])
-    purple_pass_pct = metrics_summary.get("purple_team_pass_pct", "100%")
+    purple_pass_pct = metrics_summary.get("purple_team_pass_pct") or "Unavailable"
 
     sources_str = ", ".join(f"`{s}`" for s in active_sources) or "All sources idle"
 
@@ -524,7 +566,7 @@ def build_ops_metrics_card(metrics_summary: dict[str, Any]) -> list[dict[str, An
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "📊 Hecate 24-Hour Autonomous Ops Digest",
+                "text": f"📊 Hecate {window} Autonomous Ops Digest",
                 "emoji": True,
             },
         },
@@ -533,11 +575,11 @@ def build_ops_metrics_card(metrics_summary: dict[str, Any]) -> list[dict[str, An
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Hunts Completed (24h):*\n*{hunts_done} hunts*",
+                    "text": f"*Hunt Drafts Created ({days}d):*\n*{hunts_done} hunts*",
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Sigma Detection Rules:*\n*{sigma_total} rules generated*",
+                    "text": f"*Sigma Detection Rules:*\n*{sigma_text}*",
                 },
                 {
                     "type": "mrkdwn",
@@ -545,7 +587,7 @@ def build_ops_metrics_card(metrics_summary: dict[str, Any]) -> list[dict[str, An
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Today's Spend / Budget:*\n*${spend_today:.2f}* / ${budget:.2f}",
+                    "text": f"*Today's Estimated LLM Cost / Budget (UTC):*\n*{spend_today}* / {budget}",
                 },
             ],
         },
@@ -868,6 +910,11 @@ def build_pending_hunts_card(
             f"*Research:* `{hunt['research_id']}`" if hunt.get("research_id") else "",
             f"*Techniques:* {technique_text}" if technique_text else "",
         ]
+        blocking = int(hunt.get("publish_blocking") or 0)
+        if blocking:
+            details.append(f"*Publish check:* {blocking} blocking")
+        elif hunt.get("publish_check") == "review":
+            details.append("*Publish check:* review")
         blocks.append(
             {
                 "type": "section",
@@ -918,24 +965,62 @@ def build_pending_hunts_card(
 
 
 def build_approve_hunt_modal(
-    hunt_id: str, private_metadata: str, *, destination: str | None
+    hunt_id: str,
+    private_metadata: str,
+    *,
+    destination: str | None,
+    findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Modal that approves a planning hunt and, when publishing is on, signs off its release.
 
     With a destination, submitting is step one of two: the publisher opens a PR
-    there, and approving that PR on GitHub is step two.
+    there, and approving that PR on GitHub is step two. Blocking publish
+    findings require a written override before the hunt can become active.
     """
     blocks: list[dict[str, Any]] = []
-    if destination is None:
+    blocking = findings or []
+    if blocking:
+        shown = "\n".join(
+            f"• `{item.get('target') or item.get('check')}` {item.get('message')}"
+            for item in blocking[:6]
+        )
+        extra = f"\n• {len(blocking) - 6} more" if len(blocking) > 6 else ""
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"`{hunt_id}` will move from `planning` to `active`. Publishing is off.",
+                    "text": (
+                        f"*Publish check is blocking* `{hunt_id}` ({len(blocking)}).\n"
+                        f"{shown}{extra}"
+                    ),
                 },
             }
         )
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": "publish_override",
+                "label": {"type": "plain_text", "text": "Override, and why this is still safe"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "override",
+                    "min_length": 12,
+                    "max_length": 500,
+                },
+            }
+        )
+    if destination is None:
+        if not blocking:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"`{hunt_id}` will move from `planning` to `active`. Publishing is off.",
+                    },
+                }
+            )
     else:
         blocks += [
             {
@@ -1419,3 +1504,168 @@ def build_siem_history_card(
         }
     )
     return [{"color": COLOR_INFO, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def build_staged_sweep_card(
+    sweep: Any,
+    title: str = "",
+) -> list[dict[str, Any]]:
+    """Build an interactive Slack Block Kit card for a scheduled hunt sweep awaiting approval."""
+    hunt_id = getattr(sweep, "hunt_id", "")
+    sweep_id = getattr(sweep, "sweep_id", "")
+    target = getattr(sweep, "target_siem", "SIEM")
+    days = getattr(sweep, "time_range_days", 1)
+    q_file = getattr(sweep, "query_file", "")
+    query_text = getattr(sweep, "query_text", "")
+    justification = getattr(sweep, "justification", "")
+
+    header_text = f"🎯 *Scheduled Hunt Sweep: `{hunt_id}`*"
+    sub_title = f"_{title}_\n" if title else ""
+
+    q_snippet = query_text[:350] + ("..." if len(query_text) > 350 else "")
+
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"🎯 Scheduled Sweep Approval: {hunt_id}",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"{header_text}\n{sub_title}"
+                    f"• *Target SIEM:* `{target}`\n"
+                    f"• *Lookback Window:* `{days} day(s)`\n"
+                    f"• *Query File:* `{q_file}`\n"
+                    f"• *Justification:* {justification}"
+                ),
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Query Snippet:*\n```{q_snippet}```",
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "▶️ Approve & Sweep", "emoji": True},
+                    "style": "primary",
+                    "value": sweep_id,
+                    "action_id": "hecate_approve_sweep",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⏹️ Skip Sweep", "emoji": True},
+                    "style": "danger",
+                    "value": sweep_id,
+                    "action_id": "hecate_reject_sweep",
+                },
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"🛡️ *Hecate Safe Execution Gate* | Sweep ID: `{sweep_id}` | COUNT-FIRST Protected",
+                }
+            ],
+        },
+    ]
+    return [{"color": COLOR_WARNING, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def build_sweep_result_card(
+    result: Any,
+    title: str = "",
+) -> list[dict[str, Any]]:
+    """Build an informative Slack Block Kit card reporting the outcome of a hunt sweep."""
+    hunt_id = getattr(result, "hunt_id", "")
+    target = getattr(result, "target", "")
+    outcome = getattr(result, "outcome", "clean")
+    matched_count = getattr(result, "matched_count", 0)
+    detail = getattr(result, "detail", "")
+    executed_at = getattr(result, "executed_at", "")
+
+    if outcome == "clean":
+        icon = "🟢"
+        color = COLOR_SUCCESS
+        status_text = "Clean Sweep (0 events)"
+    elif outcome == "hits_detected":
+        icon = "⚠️"
+        color = COLOR_WARNING
+        status_text = f"Telemetry Hits Detected ({matched_count} events)"
+    elif outcome == "overmatch":
+        icon = "🚨"
+        color = COLOR_CRITICAL
+        status_text = f"Overmatch Threshold Exceeded ({matched_count} events)"
+    else:
+        icon = "❌"
+        color = COLOR_CRITICAL
+        status_text = f"Execution Error: {detail[:100]}"
+
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"{icon} Hunt Sweep Outcome: {hunt_id}",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*{icon} Status:* `{status_text}`\n"
+                    f"• *Hunt ID:* `{hunt_id}`\n"
+                    f"• *Target SIEM:* `{target}`\n"
+                    f"• *Matched Events:* `{matched_count}`\n"
+                    f"• *Executed At:* `{executed_at}`\n"
+                    f"• *Summary:* {detail}"
+                ),
+            },
+        },
+    ]
+
+    events = getattr(result, "events", [])
+    if events and isinstance(events, list):
+        sample_lines = []
+        for i, ev in enumerate(events[:3], 1):
+            if isinstance(ev, dict):
+                sample_lines.append(f"{i}. `{json.dumps(ev)[:160]}`")
+        if sample_lines:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*Sample Telemetry Hits:*\n" + "\n".join(sample_lines),
+                    },
+                }
+            )
+
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "🛡️ *Hecate Autonomous Engine* | Guardrails Enforced",
+                }
+            ],
+        }
+    )
+    return [{"color": color, "blocks": sanitize_slack_blocks(blocks)}]
+

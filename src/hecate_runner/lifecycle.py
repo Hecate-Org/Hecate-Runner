@@ -228,3 +228,60 @@ def set_hunt_lifecycle(
     lifecycle["ok"] = True
     lifecycle["previous_status"] = old_status
     return lifecycle
+
+
+def record_hunt_execution(
+    workspace: Path,
+    hunt_id: str,
+    outcome: str,
+    matched_count: int,
+    target: str,
+    detail: str = "",
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Update frontmatter and execution history in hunt markdown following a live sweep.
+
+    Preserves formatting and existing comments using ruamel.yaml.
+    """
+    hunt_path = find_hunt_path(workspace, hunt_id)
+    if not hunt_path:
+        return {"ok": False, "hunt_id": hunt_id, "error": f"Hunt file not found for {hunt_id}"}
+
+    content = hunt_path.read_text(encoding="utf-8")
+    fm, raw_yaml, body = parse_hunt_frontmatter(content)
+    if not fm and not raw_yaml:
+        return {"ok": False, "hunt_id": hunt_id, "error": f"Unable to parse frontmatter in {hunt_path}"}
+
+    now_iso = datetime.now(UTC).isoformat()
+    fm["last_executed_at"] = now_iso
+    fm["latest_execution_outcome"] = outcome
+    fm["execution_run_count"] = int(fm.get("execution_run_count") or 0) + 1
+
+    if outcome == "hits_detected" and matched_count > 0:
+        fm["findings_count"] = int(fm.get("findings_count") or 0) + matched_count
+
+    yaml_rt = _get_yaml_rt()
+    stream = StringIO()
+    yaml_rt.dump(fm, stream)
+    new_yaml = stream.getvalue()
+
+    # Append execution summary entry to markdown body
+    exec_entry = (
+        f"\n\n### Automated Hunt Execution ({now_iso[:19].replace('T', ' ')} UTC)\n"
+        f"- **Target SIEM:** `{target}`\n"
+        f"- **Outcome:** `{outcome}`\n"
+        f"- **Matched Events:** `{matched_count}`\n"
+        f"- **Detail:** {detail}\n"
+    )
+    new_content = f"---\n{new_yaml}---\n{body.rstrip()}\n{exec_entry}"
+    atomic_write_text(hunt_path, new_content)
+
+    log.info("Recorded execution for %s: outcome=%s, matches=%d", hunt_id, outcome, matched_count)
+    return {
+        "ok": True,
+        "hunt_id": hunt_id,
+        "last_executed_at": now_iso,
+        "outcome": outcome,
+        "matched_count": matched_count,
+        "path": str(hunt_path),
+    }
