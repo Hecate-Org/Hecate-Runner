@@ -331,3 +331,23 @@ def test_each_cycle_starts_with_an_empty_call_log(
     settings.llm_calls_file.write_text('{"event": "start", "ts": 1}\n')
     _run(settings, evidence_hecate)
     assert settings.llm_calls_file.read_text() == ""
+
+
+def test_hypothesis_indicators_the_source_does_not_contain_are_dropped(
+    settings: Settings, evidence_hecate: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """H-0022's hash rule carried hashes the hypothesis model had mistyped."""
+    hypothesis = evidence_hecate.hypothesis_generator.return_value
+    mistyped = LOADER[:20] + LOADER[21:]
+    invented = "f" * 64
+    hypothesis.indicator_records = [
+        {"value": LOADER, "type": "sha256"},
+        {"value": mistyped, "type": "sha256"},
+        {"value": invented, "type": "sha256"},
+    ]
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    _run(settings, evidence_hecate)
+    payload = evidence_hecate.sigma_generator.call_args.args[0]
+    values = [r["value"] for r in payload["indicator_records"]]
+    assert LOADER in values and mistyped not in values and invented not in values
+    assert "dropped 2 indicator(s) the source does not contain" in caplog.text

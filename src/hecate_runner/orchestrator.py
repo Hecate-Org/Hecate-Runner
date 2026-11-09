@@ -511,6 +511,7 @@ class Orchestrator:
             "non_file": "is a token, key or certificate fingerprint, not the hash of a file",
             "target": "is an address the actor targeted, not infrastructure a host connects to",
             "source_page": "is the source's own page, not an indicator",
+            "placeholder": "is a documentation placeholder (example.com), not an indicator",
         }
         out: dict[str, str] = {}
         for record in self._indicator_records:
@@ -1383,7 +1384,7 @@ class Orchestrator:
         """
         techniques = list(req.hypothesis.techniques)
         indicators = dict(item.metadata.get("indicators") or {})
-        from hecate_agent.core.provenance import mark_source_pages
+        from hecate_agent.core.provenance import mark_placeholders, mark_source_pages
 
         own = mark_source_pages(
             self._indicator_records,
@@ -1391,6 +1392,11 @@ class Orchestrator:
         )
         if own:
             self.trail.step("sigma", "no rules for the source's own pages: %s", listing(own))
+        placeholders = mark_placeholders(self._indicator_records)
+        if placeholders:
+            self.trail.step(
+                "sigma", "no rules for documentation placeholders: %s", listing(placeholders)
+            )
         records = [r.to_dict() for r in self._indicator_records]
         if records:
             # The model may only use indicators a rule can observe; historical
@@ -2560,18 +2566,44 @@ class Orchestrator:
             hypothesis.hypothesis = repaired
 
         if getattr(hypothesis, "indicator_records", None):
-            from hecate_agent.core.provenance import IndicatorRecord
+            from hecate_agent.core.provenance import IndicatorRecord, well_formed
+            from hecate_agent.core.source_evidence import normalise
 
+            # The model's records are copies: H-0022's hash rule carried three
+            # it had mistyped, so a value counts only if the source has it.
+            evidence = self._source_evidence
+            source_text = normalise(
+                primary_intel_context + "\n" + (evidence.text if evidence is not None else "")
+            )
+            feed_values = {
+                normalise(str(v))
+                for values in (item.metadata.get("indicators") or {}).values()
+                for v in values
+            }
             added = 0
+            unsourced: list[str] = []
             for r in hypothesis.indicator_records:
                 try:
                     if "source" not in r:
                         r["source"] = "cti"
                     rec = IndicatorRecord.from_dict(r)
+                    value = normalise(rec.value)
+                    if not well_formed(rec.value, rec.type) or (
+                        value not in feed_values and value not in source_text
+                    ):
+                        unsourced.append(rec.value)
+                        continue
                     if _merge_indicator_record(self._indicator_records, rec):
                         added += 1
                 except Exception as exc:
                     log.warning("Failed to parse indicator record from hypothesis: %s", exc)
+            if unsourced:
+                self.trail.step(
+                    "hypothesis",
+                    "dropped %d indicator(s) the source does not contain: %s",
+                    len(unsourced),
+                    listing(unsourced),
+                )
             if added > 0:
                 log.info("Appended %d structured indicator(s) from hypothesis extraction.", added)
 

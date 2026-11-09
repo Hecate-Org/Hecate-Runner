@@ -556,6 +556,7 @@ _RULE_PLACEMENT_NOTE = {
     "non_file": "none: a token, key or certificate fingerprint, not the hash of a file",
     "target": "none: an address the actor targeted, not infrastructure a host connects to",
     "source_page": "none: the source's own page, not an indicator",
+    "placeholder": "none: a documentation placeholder (example.com), not an indicator",
 }
 
 

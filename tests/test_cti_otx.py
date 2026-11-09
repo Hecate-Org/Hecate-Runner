@@ -326,13 +326,16 @@ def test_indicator_map_skips_bulk_feed_pulses() -> None:
     assert _indicator_map(pulse) == {}
 
 
-def test_indicator_map_keeps_a_curated_report_past_forty_indicators() -> None:
-    from hecate_runner.cti.otx import _indicator_map
+def test_indicator_map_keeps_every_value_of_a_curated_report() -> None:
+    """The IOC rules built from the map involve no model; H-0022 lost 12 of 48 hashes to a per-type cap."""
+    from hecate_runner.cti.otx import _indicator_detail_lines, _indicator_map
 
     pulse = {
         "indicators": [{"type": "IPv4", "indicator": f"10.0.0.{i}"} for i in range(30)]
         + [{"type": "domain", "indicator": f"d{i}.example"} for i in range(12)]
     }
     grouped = _indicator_map(pulse)
-    assert len(grouped["IPv4"]) == 10
-    assert len(grouped["domain"]) == 10
+    assert len(grouped["IPv4"]) == 30
+    assert len(grouped["domain"]) == 12
+    # The blurb the model reads stays capped.
+    assert any("(+20 more)" in line for line in _indicator_detail_lines(pulse))

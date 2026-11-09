@@ -294,7 +294,9 @@ def _is_high_signal(pulse: dict[str, Any], cutoff: datetime) -> bool:
 # TraderTraitor write-up carried 42 (hashes, IPs, domains, hostnames) and every
 # value was dropped, so H-0007 reached the model and the Sigma generator with
 # counts only. Hand-written reports run to low hundreds; bulk feeds run to
-# many hundreds. The per-type cap below is what bounds the prompt.
+# many hundreds. The per-type cap below bounds only the blurb the model reads;
+# the indicator map keeps every value, because the IOC rules built from it
+# involve no model (H-0022 lost 12 of the pulse's 48 hashes to that cap).
 _MAX_INDICATORS_INLINE = 200
 _MAX_INDICATOR_VALUES_PER_TYPE = 10
 
@@ -364,9 +366,7 @@ def _indicator_map(pulse: dict[str, Any]) -> dict[str, list[str]]:
         value = str(ind.get("indicator") or "").strip()
         if not value or not itype or itype in _NON_OBSERVABLE_OTX_TYPES:
             continue
-        bucket = grouped.setdefault(itype, [])
-        if len(bucket) < _MAX_INDICATOR_VALUES_PER_TYPE:
-            bucket.append(value[:_MAX_INDICATOR_VALUE_CHARS])
+        grouped.setdefault(itype, []).append(value[:_MAX_INDICATOR_VALUE_CHARS])
     return grouped
 
 
