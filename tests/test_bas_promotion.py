@@ -145,4 +145,3 @@ def test_hunt_with_unfilled_placeholder_requires_review(tmp_path: Path) -> None:
     assert decision.eligible is False
     assert decision.review_required is True
     assert any("unfinished template placeholder" in r for r in decision.reasons)
-

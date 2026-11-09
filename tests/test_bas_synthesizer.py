@@ -113,9 +113,7 @@ def test_automatic_pipeline_bas_validates_multiple_rules(tmp_path: Path) -> None
         bas_mode="mock",
     )
 
-    orchestrator = Orchestrator(
-        settings=settings, hecate=MagicMock(), cti_provider=MagicMock()
-    )
+    orchestrator = Orchestrator(settings=settings, hecate=MagicMock(), cti_provider=MagicMock())
 
     req = DraftHuntRequest(
         hunt_id="H-0030",

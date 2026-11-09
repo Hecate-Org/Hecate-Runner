@@ -1166,7 +1166,9 @@ class Orchestrator(
         ):
             cve_match = re.search(r"CVE-\d{4}-\d{4,}", item.content, re.IGNORECASE)
             if cve_match:
-                hypothesis.actor = f"Unattributed (threat actors exploiting {cve_match.group(0).upper()})"
+                hypothesis.actor = (
+                    f"Unattributed (threat actors exploiting {cve_match.group(0).upper()})"
+                )
             else:
                 hypothesis.actor = "Unattributed"
 

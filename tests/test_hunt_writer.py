@@ -1018,7 +1018,10 @@ def test_render_draft_filters_reference_urls_from_indicator_table(
         hypothesis=sample_hypothesis,
         generated_at=datetime(2026, 7, 4, tzinfo=UTC),
         source_url="https://security.paloaltonetworks.com/CVE-2024-3400",
-        source_evidence={"url": "https://security.paloaltonetworks.com/CVE-2024-3400", "chars": 1000},
+        source_evidence={
+            "url": "https://security.paloaltonetworks.com/CVE-2024-3400",
+            "chars": 1000,
+        },
         indicator_records=[
             {
                 "value": "hxxps://www[.]cve[.]org/CVERecord?id=CVE-2024-3400",
@@ -1052,5 +1055,3 @@ def test_render_draft_filters_reference_urls_from_indicator_table(
     assert "first.org" not in md
     # Threat observable must be present in the Indicators by role table
     assert "198.51.100.7" in md or "198[.]51[.]100[.]7" in md
-
-

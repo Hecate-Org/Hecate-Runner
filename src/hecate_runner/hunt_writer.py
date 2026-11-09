@@ -577,16 +577,18 @@ _RULE_PLACEMENT_NOTE = {
 }
 
 
-_REFERENCE_DOMAINS = frozenset({
-    "cve.org",
-    "first.org",
-    "mitre.org",
-    "nist.gov",
-    "cisa.gov",
-    "cert.org",
-    "sans.org",
-    "owasp.org",
-})
+_REFERENCE_DOMAINS = frozenset(
+    {
+        "cve.org",
+        "first.org",
+        "mitre.org",
+        "nist.gov",
+        "cisa.gov",
+        "cert.org",
+        "sans.org",
+        "owasp.org",
+    }
+)
 
 
 def _is_reference_record(record: dict[str, Any], source_url: str = "") -> bool:

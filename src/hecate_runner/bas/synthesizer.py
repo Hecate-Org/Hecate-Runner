@@ -88,14 +88,12 @@ def synthesize_events_from_rule(
                     )
                 elif suffix.startswith("/") or suffix.startswith("\\"):
                     constructed = (
-                        ("C:\\Windows\\System32" if product == "windows" else "/usr/bin")
-                        + suffix
-                    )
+                        "C:\\Windows\\System32" if product == "windows" else "/usr/bin"
+                    ) + suffix
                 else:
                     constructed = (
-                        ("C:\\Windows\\System32\\" if product == "windows" else "/usr/bin/")
-                        + suffix
-                    )
+                        "C:\\Windows\\System32\\" if product == "windows" else "/usr/bin/"
+                    ) + suffix
             elif "contains" in all_mods and not prefix and not suffix:
                 f_lower = f_base.lower()
                 if f_lower in ("commandline", "cmdline", "process_command_line"):
@@ -127,29 +125,21 @@ def synthesize_events_from_rule(
         tp_event.setdefault("ProcessId", 4096)
         tp_event.setdefault(
             "Image",
-            "C:\\Windows\\System32\\powershell.exe"
-            if product == "windows"
-            else "/usr/bin/bash",
+            "C:\\Windows\\System32\\powershell.exe" if product == "windows" else "/usr/bin/bash",
         )
         tp_event.setdefault(
             "CommandLine",
-            "powershell.exe -NoProfile"
-            if product == "windows"
-            else "/bin/bash -c 'probe'",
+            "powershell.exe -NoProfile" if product == "windows" else "/bin/bash -c 'probe'",
         )
         tp_event.setdefault("User", "SYSTEM" if product == "windows" else "root")
     elif category in ("file_event", "file_change"):
         tp_event.setdefault(
             "TargetFilename",
-            "C:\\temp\\hecate_drop.tmp"
-            if product == "windows"
-            else "/tmp/hecate_drop.tmp",
+            "C:\\temp\\hecate_drop.tmp" if product == "windows" else "/tmp/hecate_drop.tmp",
         )
         tp_event.setdefault(
             "Image",
-            "C:\\Windows\\System32\\cmd.exe"
-            if product == "windows"
-            else "/usr/bin/touch",
+            "C:\\Windows\\System32\\cmd.exe" if product == "windows" else "/usr/bin/touch",
         )
     elif category == "network_connection":
         tp_event.setdefault("DestinationIp", "198.51.100.24")
@@ -191,9 +181,7 @@ def synthesize_events_from_rule(
         )
         benign_2.update(
             {
-                "Image": "C:\\Windows\\explorer.exe"
-                if product == "windows"
-                else "/bin/ls",
+                "Image": "C:\\Windows\\explorer.exe" if product == "windows" else "/bin/ls",
                 "CommandLine": "C:\\Windows\\explorer.exe"
                 if product == "windows"
                 else "ls -la /var/log",
@@ -222,19 +210,11 @@ def synthesize_events_from_rule(
             }
         )
     elif category == "network_connection":
-        benign_1.update(
-            {"DestinationIp": "127.0.0.1", "DestinationPort": 53, "Protocol": "udp"}
-        )
-        benign_2.update(
-            {"DestinationIp": "10.0.0.1", "DestinationPort": 443, "Protocol": "tcp"}
-        )
+        benign_1.update({"DestinationIp": "127.0.0.1", "DestinationPort": 53, "Protocol": "udp"})
+        benign_2.update({"DestinationIp": "10.0.0.1", "DestinationPort": 443, "Protocol": "tcp"})
     elif category == "webserver":
-        benign_1.update(
-            {"cs-method": "GET", "cs-uri-stem": "/robots.txt", "sc-status": 200}
-        )
-        benign_2.update(
-            {"cs-method": "GET", "cs-uri-stem": "/favicon.ico", "sc-status": 200}
-        )
+        benign_1.update({"cs-method": "GET", "cs-uri-stem": "/robots.txt", "sc-status": 200})
+        benign_2.update({"cs-method": "GET", "cs-uri-stem": "/favicon.ico", "sc-status": 200})
     else:
         benign_1["CommandLine"] = "benign_system_baseline_process"
         benign_2["CommandLine"] = "benign_routine_telemetry"

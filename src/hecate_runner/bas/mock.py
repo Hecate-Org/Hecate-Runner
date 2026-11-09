@@ -169,11 +169,7 @@ class MockBASProvider(BASProvider):
 
             telemetry = []
             for r_item in rules_param:
-                r_yaml = (
-                    r_item.get("rule_yaml")
-                    if isinstance(r_item, dict)
-                    else str(r_item)
-                )
+                r_yaml = r_item.get("rule_yaml") if isinstance(r_item, dict) else str(r_item)
                 if r_yaml:
                     tp_ev, _ = synthesize_events_from_rule(
                         r_yaml,
@@ -205,7 +201,8 @@ class MockBASProvider(BASProvider):
                     "process_name": process_name,
                     "Image": image,
                     "CommandLine": cmdline,
-                    "command_line": cmdline or f"mock_detonation --technique {request.technique_id}",
+                    "command_line": cmdline
+                    or f"mock_detonation --technique {request.technique_id}",
                     "timestamp_utc": start_time.isoformat(),
                 }
             ]
