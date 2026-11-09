@@ -90,6 +90,81 @@ APPROVED_PROCEDURES = {
         cleanup_observed=("rm", "-f", "/tmp/hecate-t1005.tmp"),
         expected_files=("/tmp/hecate-t1005.tmp",),
     ),
+    "T1053.003": _managed("T1053.003", "crontab -l"),
+    "T1105": _managed("T1105", "curl --version"),
+    "T1049": _managed("T1049", "ss -tan"),
+    "T1007": _managed(
+        "T1007",
+        "systemctl list-units --type=service --state=running",
+        ("systemctl", "list-units", "--type=service", "--state=running"),
+    ),
+    "T1518.001": _managed(
+        "T1518.001",
+        "systemctl status ufw",
+        ("systemctl", "status", "ufw"),
+    ),
+    "T1018": _managed("T1018", "arp -a"),
+    "T1222.002": _managed(
+        "T1222.002",
+        "sh -c 'touch /tmp/hecate-t1222.tmp && chmod 644 /tmp/hecate-t1222.tmp && rm -f /tmp/hecate-t1222.tmp'",
+        ("chmod", "644", "/tmp/hecate-t1222.tmp"),
+        cleanup_command="rm -f /tmp/hecate-t1222.tmp",
+        cleanup_observed=("rm", "-f", "/tmp/hecate-t1222.tmp"),
+        expected_files=("/tmp/hecate-t1222.tmp",),
+    ),
+    "T1036.005": _managed(
+        "T1036.005",
+        "sh -c 'touch /tmp/hecate-t1036-crond.tmp && rm -f /tmp/hecate-t1036-crond.tmp'",
+        ("touch", "/tmp/hecate-t1036-crond.tmp"),
+        cleanup_command="rm -f /tmp/hecate-t1036-crond.tmp",
+        cleanup_observed=("rm", "-f", "/tmp/hecate-t1036-crond.tmp"),
+        expected_files=("/tmp/hecate-t1036-crond.tmp",),
+    ),
+    "T1543.002": _managed(
+        "T1543.002",
+        "systemctl is-active cron",
+        ("systemctl", "is-active", "cron"),
+    ),
+    "T1552.001": _managed(
+        "T1552.001",
+        "grep -s 'BEGIN PRIVATE KEY' /etc/ssl/certs/",
+        ("grep", "-s", "BEGIN PRIVATE KEY", "/etc/ssl/certs/"),
+    ),
+    "T1003.008": _managed(
+        "T1003.008",
+        "head -n 1 /etc/passwd",
+        ("head", "-n", "1", "/etc/passwd"),
+    ),
+    "T1046": _managed(
+        "T1046",
+        "nc -z -v -w 1 127.0.0.1 22",
+        ("nc", "-z", "-v", "-w", "1", "127.0.0.1", "22"),
+    ),
+    "T1526": _managed(
+        "T1526",
+        "curl -s -m 1 http://127.0.0.1:80/latest/meta-data/",
+        ("curl", "-s", "-m", "1", "http://127.0.0.1:80/latest/meta-data/"),
+    ),
+    "T1613": _managed(
+        "T1613",
+        "cat /proc/1/cgroup",
+        ("cat", "/proc/1/cgroup"),
+    ),
+    "T1071.001": _managed(
+        "T1071.001",
+        "curl -sI https://localhost/",
+        ("curl", "-sI", "https://localhost/"),
+    ),
+    "T1190": _managed(
+        "T1190",
+        "curl -s http://127.0.0.1:80/",
+        ("curl", "-s", "http://127.0.0.1:80/"),
+    ),
+    "T1041": _managed(
+        "T1041",
+        "sh -c 'printf hecate-exfil-test | wc -c'",
+        ("wc", "-c"),
+    ),
 }
 
 
@@ -127,11 +202,21 @@ def ability_definition(procedure: ApprovedProcedure) -> dict[str, Any]:
         "name": f"Hecate isolated lab {procedure.technique_id}",
         "description": "Pinned non-destructive Linux lab procedure; local sensor verification.",
         "tactic": {
+            "T1190": "initial-access",
             "T1059.004": "execution",
-            "T1140": "stealth",
+            "T1053.003": "persistence",
+            "T1543.002": "persistence",
+            "T1222.002": "defense-evasion",
+            "T1036.005": "defense-evasion",
+            "T1140": "defense-evasion",
             "T1070.004": "defense-evasion",
             "T1027": "defense-evasion",
+            "T1003.008": "credential-access",
+            "T1552.001": "credential-access",
             "T1005": "collection",
+            "T1071.001": "command-and-control",
+            "T1105": "command-and-control",
+            "T1041": "exfiltration",
         }.get(procedure.technique_id, "discovery"),
         "technique": {"attack_id": procedure.technique_id, "name": procedure.technique_id},
         "platforms": {"linux": {"sh": exec_config}},
@@ -198,7 +283,12 @@ def select_approved_rule(
         source = parsed.get("logsource") or {}
         if not isinstance(source, dict):
             continue
-        if source.get("product") != "linux" or source.get("category") != "process_creation":
+        category = source.get("category", "")
+        if source.get("product") != "linux" or category not in (
+            "process_creation",
+            "file_event",
+            "file_change",
+        ):
             continue
         tags = {str(t).lower() for t in parsed.get("tags") or []}
         rule_techniques = {str(t).upper() for t in rule.get("techniques") or []}
@@ -226,6 +316,16 @@ def select_approved_rule(
                     }
                     for directory in ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
                 ]
+                for fpath in procedure.expected_files:
+                    candidates.append(
+                        {
+                            "data_source": "file_event",
+                            "product": "linux",
+                            "TargetFilename": fpath,
+                            "Image": f"/usr/bin/{procedure.argv[0]}",
+                            "CommandLine": shlex.join(procedure.argv),
+                        }
+                    )
                 try:
                     if SigmaEvaluator.evaluate_rule(text, candidates, []).true_positives > 0:
                         return procedure, text

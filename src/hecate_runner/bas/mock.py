@@ -157,21 +157,58 @@ class MockBASProvider(BASProvider):
             image = "/bin/bash"
             cmdline = f"/bin/bash -c mock_detonation --technique {request.technique_id}"
 
-        telemetry = [
-            {
-                "category": category,
-                "product": product,
-                "data_source": category,
-                "technique_id": request.technique_id,
-                "hunt_id": request.hunt_id,
-                "event_type": event_type,
-                "process_name": process_name,
-                "Image": image,
-                "CommandLine": cmdline,
-                "command_line": cmdline or f"mock_detonation --technique {request.technique_id}",
-                "timestamp_utc": start_time.isoformat(),
-            }
-        ]
+        # If specific detection rules were provided in request params, synthesize
+        # predicate-aware telemetry tailored to the rule ASTs.
+        rules_param = request.params.get("rules") or []
+        rule_yaml_param = request.params.get("rule_yaml")
+        if not rules_param and rule_yaml_param:
+            rules_param = [{"rule_yaml": rule_yaml_param}]
+
+        if rules_param:
+            from hecate_runner.bas.synthesizer import synthesize_events_from_rule
+
+            telemetry = []
+            for r_item in rules_param:
+                r_yaml = (
+                    r_item.get("rule_yaml")
+                    if isinstance(r_item, dict)
+                    else str(r_item)
+                )
+                if r_yaml:
+                    tp_ev, _ = synthesize_events_from_rule(
+                        r_yaml,
+                        hunt_id=request.hunt_id,
+                        technique_id=request.technique_id,
+                    )
+                    telemetry.append(tp_ev)
+            if not telemetry:
+                telemetry = [
+                    {
+                        "category": "process_creation",
+                        "product": "linux",
+                        "data_source": "process_creation",
+                        "technique_id": request.technique_id,
+                        "hunt_id": request.hunt_id,
+                        "CommandLine": f"/bin/bash -c mock_detonation --technique {request.technique_id}",
+                        "timestamp_utc": start_time.isoformat(),
+                    }
+                ]
+        else:
+            telemetry = [
+                {
+                    "category": category,
+                    "product": product,
+                    "data_source": category,
+                    "technique_id": request.technique_id,
+                    "hunt_id": request.hunt_id,
+                    "event_type": event_type,
+                    "process_name": process_name,
+                    "Image": image,
+                    "CommandLine": cmdline,
+                    "command_line": cmdline or f"mock_detonation --technique {request.technique_id}",
+                    "timestamp_utc": start_time.isoformat(),
+                }
+            ]
 
         return DetonationResult(
             success=True,

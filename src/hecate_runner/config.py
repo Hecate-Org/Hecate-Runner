@@ -330,7 +330,7 @@ class Settings(BaseSettings):
 
     # --- Live Adversary Emulation & Breach Simulation (BAS) -----------------
     bas_enabled: bool = Field(
-        default=False,
+        default=True,
         alias="HECATE_BAS_ENABLED",
         description="Enable live adversary emulation & breach simulation validation.",
     )

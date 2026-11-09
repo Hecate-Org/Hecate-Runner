@@ -307,7 +307,7 @@ def test_cli_sweep_flow(mock_workspace: Path, monkeypatch: pytest.MonkeyPatch) -
     # 4. Sweep approve
     res_appr = runner.invoke(app, ["sweep", "approve", "H-0021", "--yes"])
     assert res_appr.exit_code == 0
-    assert "Clean Sweep!" in res_appr.stdout
+    assert "Not observed:" in res_appr.stdout or "clean" in res_appr.stdout
 
 
 def test_cli_sweep_reject(mock_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

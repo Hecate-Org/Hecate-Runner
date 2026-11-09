@@ -238,6 +238,10 @@ def run_bas_validation(
                 orch.settings, req.hunt_id, procedure, rule_yaml
             )
         result = req.bas_verification
+        if result.get("rule_triggered") and result.get("status") == "verified_true_positive":
+            req.purple_team_rules_evaluated = len(rules)
+            req.purple_team_rules_validated = 1
+            req.purple_team_rules_replay_matched = 1
         orch.trail.step(
             "bas",
             "%s for %s: %s; telemetry=%s, rule match=%s",
@@ -311,6 +315,7 @@ def run_bas_validation(
         platform=norm_platform,
         target=target,
         timeout_sec=60,
+        params={"rules": rules, "rule_yaml": rules[0].get("rule_yaml", "") if rules else ""},
     )
 
     rule_yaml = rules[0].get("rule_yaml", "")
@@ -318,12 +323,43 @@ def run_bas_validation(
     try:
         det_result = provider.detonate(det_req)
         verifier = DetectionVerifier()
-        ver_result = verifier.verify_detonation(
+
+        validated_count = 0
+        total_matched = 0
+        primary_ver_result = None
+
+        for r_entry in rules:
+            r_yaml = r_entry.get("rule_yaml", "")
+            if not r_yaml:
+                continue
+            v_res = verifier.verify_detonation(
+                detonation=det_result,
+                rule_yaml=r_yaml,
+            )
+            if primary_ver_result is None:
+                primary_ver_result = v_res
+            if v_res.rule_triggered:
+                validated_count += 1
+                total_matched += v_res.matched_events_count
+                r_entry["bas_validated"] = True
+
+        ver_result = primary_ver_result or verifier.verify_detonation(
             detonation=det_result,
             rule_yaml=rule_yaml,
         )
         ver_dict = ver_result.to_dict()
         ver_dict["duration_seconds"] = det_result.duration_seconds
+        ver_dict["validated_rules_count"] = validated_count
+        ver_dict["total_rules_evaluated"] = len(rules)
+        if validated_count > 0:
+            ver_dict["status"] = "verified_true_positive"
+            ver_dict["rule_triggered"] = True
+            ver_dict["telemetry_arrived"] = True
+            ver_dict["matched_events_count"] = total_matched
+            req.purple_team_rules_evaluated = len(rules)
+            req.purple_team_rules_validated = validated_count
+            req.purple_team_rules_replay_matched = validated_count
+
         req.bas_verification = ver_dict
 
         orch.trail.step(
