@@ -692,3 +692,32 @@ def is_actionable(cti_content: str) -> bool:
         or bool(parse_indicator_inventory(cti_content))
         or _carries_free_text(cti_content)
     )
+
+
+def enrichment_trail_lines(stats: dict[str, dict[str, int]]) -> list[tuple[str, str]]:
+    """One ``(service, outcome)`` pair per OSINT service that took a lookup.
+
+    Services that skipped every observable (wrong type, private IP) are left
+    out: they made no request and the trail line would read as noise.
+    """
+    lines: list[tuple[str, str]] = []
+    for service in sorted(stats, key=str.lower):
+        row = stats[service]
+        checked = row.get("checked", 0)
+        skipped = row.get("skipped", 0)
+        if checked <= skipped:
+            continue
+        if row.get("unconfigured", 0) == checked - skipped:
+            lines.append((service, "not configured"))
+            continue
+        parts = [f"{checked - skipped} checked"]
+        found = row.get("found", 0)
+        if found:
+            flagged = row.get("flagged", 0)
+            parts.append(f"{found} found" + (f" ({flagged} flagged)" if flagged else ""))
+        if row.get("missing", 0):
+            parts.append(f"{row['missing']} not found")
+        if row.get("errors", 0):
+            parts.append(f"{row['errors']} error(s)")
+        lines.append((service, " · ".join(parts)))
+    return lines
