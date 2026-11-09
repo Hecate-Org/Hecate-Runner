@@ -21,6 +21,7 @@ from hecate_runner.bas.base import (
     DetonationResult,
     DetonationStage,
 )
+from hecate_runner.subprocess_utils import run_process_group
 
 log = logging.getLogger(__name__)
 
@@ -71,9 +72,8 @@ class StratusConnector(BASProvider):
             return self._runner_fn(args, timeout)
 
         cmd = [self.binary_path, *args]
-        return subprocess.run(
+        return run_process_group(
             cmd,
-            capture_output=True,
             text=True,
             timeout=timeout,
             check=False,

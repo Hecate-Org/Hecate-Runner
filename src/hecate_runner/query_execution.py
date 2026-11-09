@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hecate_runner.subprocess_utils import run_process_group
+
 log = logging.getLogger(__name__)
 
 
@@ -366,10 +368,9 @@ class SplunkQueryProvider(QueryProvider):
             "json",
         ]
         try:
-            result = subprocess.run(
+            result = run_process_group(
                 cmd,
                 cwd=str(self.workspace),
-                capture_output=True,
                 text=True,
                 timeout=self.timeout_sec,
                 check=False,
