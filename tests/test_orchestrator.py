@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -1171,6 +1171,9 @@ def test_sigma_rules_are_embedded_in_the_draft(
 
     result = orch.run_once()
     assert result.outcome == "draft_created"
+    from hecate_runner.metrics import MetricsStore
+
+    assert MetricsStore(settings.metrics_file).summary()["sigma_rules_produced"] == 1
     content = result.draft_path.read_text()
     assert "Chrysalis C2 beacon" in content
     assert "1 Sigma rule(s) auto-drafted" in content
@@ -2157,3 +2160,30 @@ def test_an_appliance_hunt_lists_no_host_sensor_data_sources() -> None:
     assert platform_consistent_data_sources(
         ["process_execution"], ["Network Devices", "Linux"]
     ) == ["process_execution"]
+
+
+def test_unexpected_crash_in_run_body_refunds_draft_quota(
+    settings: Settings,
+    file_queue_with_cti: FileQueueProvider,
+    mock_hecate: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure that an unhandled crash inside _run_body does not leak daily draft quota."""
+    state = OrchestratorState.load(settings.state_file)
+    initial_drafts = state.drafts_today
+
+    orch = Orchestrator(settings=settings, hecate=mock_hecate, cti_provider=file_queue_with_cti)
+
+    def _crash(*args: object, **kwargs: object) -> None:
+        # Simulate an unexpected bug during pipeline execution after quota was reserved
+        st = cast(OrchestratorState, args[0])
+        st.check_and_reserve_draft(settings.max_drafts_per_day)
+        raise RuntimeError("simulated unexpected crash in pipeline")
+
+    monkeypatch.setattr(orch, "_run_body", _crash)
+    result = orch.run_once()
+
+    assert result.outcome == "error"
+    final_state = OrchestratorState.load(settings.state_file)
+    assert final_state.drafts_today == initial_drafts
+

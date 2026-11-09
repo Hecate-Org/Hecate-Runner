@@ -18,9 +18,11 @@ from typing import Any
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.lifecycle import get_hunt_lifecycle, set_hunt_lifecycle
 from hecate_runner.slack_bot import sync_queries_for_hunt, undeploy_queries_for_hunt
-from hecate_runner.sqlite_utils import connect_sqlite
+from hecate_runner.sqlite_utils import connect_sqlite, connect_sqlite_ro
 
 log = logging.getLogger(__name__)
+
+_drift_db_initialized: set[Path] = set()
 
 
 def get_tracked_query_statuses(workspace: Path) -> dict[tuple[str, str, str], str]:
@@ -33,7 +35,7 @@ def get_tracked_query_statuses(workspace: Path) -> dict[tuple[str, str, str], st
     if not db_path.exists():
         return {}
 
-    conn = connect_sqlite(db_path)
+    conn = connect_sqlite_ro(db_path)
     conn.row_factory = sqlite3.Row
     try:
         with conn:
@@ -577,9 +579,11 @@ def get_drift_db_path(workspace: Path) -> Path:
 def init_drift_db(workspace: Path) -> sqlite3.Connection:
     """Initialize and return SQLite connection for SIEM drift history and versioning."""
     db_path = get_drift_db_path(workspace)
+    resolved = db_path.resolve()
     conn = connect_sqlite(db_path)
-    with conn:
-        conn.executescript(
+    if resolved not in _drift_db_initialized or not db_path.exists():
+        with conn:
+            conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS audit_sweeps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -661,14 +665,16 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
             """
         )
 
-    # Backwards-compatible schema migration
-    try:
-        with conn:
-            conn.execute(
-                "ALTER TABLE audit_sweeps ADD COLUMN decommissioned_count INTEGER NOT NULL DEFAULT 0"
-            )
-    except sqlite3.OperationalError:
-        pass
+        # Backwards-compatible schema migration
+        try:
+            with conn:
+                conn.execute(
+                    "ALTER TABLE audit_sweeps ADD COLUMN decommissioned_count INTEGER NOT NULL DEFAULT 0"
+                )
+        except sqlite3.OperationalError:
+            pass
+
+        _drift_db_initialized.add(resolved)
 
     return conn
 
@@ -931,7 +937,10 @@ def get_drift_history(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Retrieve historical drift and reconciliation events from SQLite."""
-    conn = init_drift_db(workspace)
+    db_path = get_drift_db_path(workspace)
+    if not db_path.exists():
+        return []
+    conn = connect_sqlite_ro(db_path)
     conn.row_factory = sqlite3.Row
     query = "SELECT * FROM drift_events WHERE 1=1"
     params: list[Any] = []
@@ -964,7 +973,10 @@ def get_query_versions(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Retrieve deployed query version history from SQLite."""
-    conn = init_drift_db(workspace)
+    db_path = get_drift_db_path(workspace)
+    if not db_path.exists():
+        return []
+    conn = connect_sqlite_ro(db_path)
     conn.row_factory = sqlite3.Row
     query = "SELECT * FROM query_versions WHERE 1=1"
     params: list[Any] = []
@@ -1045,7 +1057,10 @@ def get_detection_validations(
     workspace: Path, hunt_id: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:
     """Retrieve chronological detection validation results from drift_history.db."""
-    conn = init_drift_db(workspace)
+    db_path = get_drift_db_path(workspace)
+    if not db_path.exists():
+        return []
+    conn = connect_sqlite_ro(db_path)
     conn.row_factory = sqlite3.Row
     query = "SELECT * FROM detection_validations"
     params: list[Any] = []
@@ -1064,7 +1079,8 @@ def get_detection_validations(
 
 def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
     """Calculate aggregated SIEM drift metrics and operational health."""
-    conn = init_drift_db(workspace)
+    db_path = get_drift_db_path(workspace)
+    conn = init_drift_db(workspace) if not db_path.exists() else connect_sqlite_ro(db_path)
     conn.row_factory = sqlite3.Row
 
     since_iso = (datetime.now(UTC) - timedelta(days=days)).isoformat()

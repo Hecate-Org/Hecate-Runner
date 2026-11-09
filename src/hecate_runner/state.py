@@ -67,6 +67,11 @@ class OrchestratorState:
         self.total_drafts_ever += 1
         return True
 
+    def refund_draft(self) -> None:
+        """Refund a reserved draft slot when a cycle fails or produces no draft."""
+        self.drafts_today = max(0, self.drafts_today - 1)
+        self.total_drafts_ever = max(0, self.total_drafts_ever - 1)
+
     def check_and_reserve_research(self, max_per_day: int) -> bool:
         """Return True if a web-searching research run is under quota (and consume one).
 

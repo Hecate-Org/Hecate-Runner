@@ -205,6 +205,7 @@ class Orchestrator:
             return result
         except Exception as exc:  # top-level guard
             log.exception("Cycle failed unexpectedly: %s", exc)
+            state.refund_draft()
             state.mark_run(success=False)
             self.trail.step("done", "error after %.0fs: %s", self.trail.elapsed, clip(str(exc)))
             result = RunResult(outcome="error", detail=str(exc))
@@ -1542,6 +1543,7 @@ class Orchestrator:
             else:
                 log.info("Sigma drafting note for %s: %s", req.hunt_id, warning)
 
+        self.metrics.sigma_rules_produced += len(result.rules)
         req.sigma_rules = result.rules
         req.review_gaps = result.review_gaps
 
@@ -1861,8 +1863,7 @@ class Orchestrator:
         state: OrchestratorState,
     ) -> RunResult:
         """Handle a fatal failure during CTI item processing with DLQ retry management."""
-        state.drafts_today -= 1
-        state.total_drafts_ever -= 1
+        state.refund_draft()
 
         queue_dir = self.settings.cti_queue_dir_resolved
         attempts = record_failure(queue_dir, item, error_msg)
@@ -2034,8 +2035,7 @@ class Orchestrator:
 
         if dry_run:
             log.info("[dry-run] Would call hecate and write a draft; leaving CTI in queue.")
-            state.drafts_today -= 1  # reverse the reservation in dry-run
-            state.total_drafts_ever -= 1
+            state.refund_draft()  # reverse the reservation in dry-run
             return RunResult(
                 outcome="dry_run", detail=item.content[:100], parked_count=parked_count
             )
@@ -2105,8 +2105,7 @@ class Orchestrator:
                 "Daily research quota reached (%d). Leaving CTI in queue for next cycle.",
                 self.settings.max_research_runs_per_day,
             )
-            state.drafts_today -= 1
-            state.total_drafts_ever -= 1
+            state.refund_draft()
             return RunResult(
                 outcome="research_quota_reached",
                 detail=f"{state.research_runs_today}/{self.settings.max_research_runs_per_day}",
@@ -2435,8 +2434,7 @@ class Orchestrator:
                         "hecate-agent research new failed (%s); refusing to generate without configured research context",
                         exc,
                     )
-                    state.drafts_today -= 1
-                    state.total_drafts_ever -= 1
+                    state.refund_draft()
                     return RunResult(
                         outcome="research_error", detail=str(exc), parked_count=parked_count
                     )
@@ -2445,8 +2443,7 @@ class Orchestrator:
                     log.error(
                         "hecate-agent research new produced no research_id; refusing to generate without configured research context"
                     )
-                    state.drafts_today -= 1
-                    state.total_drafts_ever -= 1
+                    state.refund_draft()
                     return RunResult(outcome="research_empty", parked_count=parked_count)
 
                 research_id = research_result.research_id
@@ -2507,8 +2504,7 @@ class Orchestrator:
                     )
                     # The draft slot was reserved for a hunt that will not be
                     # written; the research run was real and stays counted.
-                    state.drafts_today -= 1
-                    state.total_drafts_ever -= 1
+                    state.refund_draft()
                     self._advance_past(item)
                     return RunResult(
                         outcome="parked_after_research",
@@ -2636,8 +2632,7 @@ class Orchestrator:
                             item.title[:60] or "untitled",
                             reason,
                         )
-                        state.drafts_today -= 1
-                        state.total_drafts_ever -= 1
+                        state.refund_draft()
                         # Without the acknowledgement the parked item stayed at
                         # the head of the queue: re-researched and re-parked
                         # every cycle, and -- since multi-provider rotation only
@@ -2653,8 +2648,7 @@ class Orchestrator:
 
         if hypothesis.is_empty:
             log.warning("hecate returned empty hypothesis; refunding quota and leaving CTI.")
-            state.drafts_today -= 1
-            state.total_drafts_ever -= 1
+            state.refund_draft()
             return RunResult(outcome="empty_hypothesis", parked_count=parked_count)
 
         # Restore what the pipeline was discarding before the draft is built.
@@ -2817,8 +2811,7 @@ class Orchestrator:
                     item.title[:60] or "untitled",
                     reason,
                 )
-                state.drafts_today -= 1
-                state.total_drafts_ever -= 1
+                state.refund_draft()
                 self._advance_past(item)
                 return RunResult(
                     outcome="parked_no_techniques",
