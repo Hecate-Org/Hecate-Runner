@@ -649,11 +649,13 @@ class SplunkQueryProvider(QueryProvider):
                 outcome="error", provider=self.name, detail=f"could not parse results: {exc}"
             )
 
+        events_list = data if isinstance(data, list) else []
         return QueryResult(
             outcome="executed",
             provider=self.name,
-            row_count=len(data),
+            row_count=len(events_list),
             detail=result.stdout[start : start + 2000],
+            events=events_list,
         )
 
 

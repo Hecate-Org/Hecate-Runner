@@ -88,7 +88,16 @@ def extract_count_from_result(result: QueryResult) -> int:
     if result.detail:
         try:
             parsed = json.loads(result.detail)
-            if isinstance(parsed, dict):
+            if isinstance(parsed, list) and len(parsed) > 0:
+                first = parsed[0]
+                if isinstance(first, dict):
+                    for k in ("count", "count_", "total", "events"):
+                        if k in first:
+                            try:
+                                return int(first[k])
+                            except (ValueError, TypeError):
+                                pass
+            elif isinstance(parsed, dict):
                 rows = parsed.get("rows")
                 if isinstance(rows, list) and len(rows) > 0:
                     first_row = rows[0]
