@@ -70,6 +70,24 @@ class HuntExecutionScheduler:
             max_limit=self.settings.max_query_limit,
         )
 
+        if self.notify_fn is None and (
+            self.settings.slack_bot_token
+            or self.settings.slack_webhook_url
+        ):
+            try:
+                from hecate_runner.notifications import SlackNotifier
+
+                notifier = SlackNotifier(self.settings)
+                if notifier.is_configured:
+                    channel = self.settings.slack_channel_hunts_exec or "#all-hecate-hunt"
+                    self.notify_fn = lambda b: notifier.post_message(
+                        channel=channel,
+                        text="Hecate Auto Hunt Notification",
+                        blocks=b if isinstance(b, list) else None,
+                    )
+            except Exception as exc:
+                log.debug("Could not initialize default SlackNotifier for scheduler: %s", exc)
+
     def discover_active_hunts(self) -> list[dict[str, Any]]:
         """Find all hunts with status: active and associated query files in the workspace."""
         hunts_dir = self.workspace / "hunts"
@@ -370,3 +388,39 @@ class HuntExecutionScheduler:
         staged.rejection_reason = reason
         log.info("Rejected sweep %s for %s (%s)", staged.sweep_id, staged.hunt_id, reason)
         return staged
+
+    def run_scheduled_sweeps(
+        self,
+        *,
+        force: bool = False,
+    ) -> list[SafeExecutionResult | StagedSweep]:
+        """Discover eligible active hunts, stage sweeps, and execute or request approval.
+
+        If `auto_hunt_approval_required` is True:
+            Stages eligible sweeps and dispatches Slack HITL approval cards.
+        If `auto_hunt_approval_required` is False:
+            Stages eligible sweeps and executes them autonomously via the safe gate.
+        """
+        if not self.settings.auto_hunt_execution_enabled:
+            log.info("Auto hunt execution is disabled; skipping scheduled sweeps.")
+            return []
+
+        staged = self.stage_sweeps(force=force)
+        if not staged:
+            log.debug("No eligible active hunts found for scheduled sweep.")
+            return []
+
+        if self.settings.auto_hunt_approval_required:
+            log.info(
+                "Staged %d sweeps awaiting analyst approval (HITL enabled).",
+                len(staged),
+            )
+            return staged
+
+        # When approval is not required, autonomously execute each staged sweep
+        results: list[SafeExecutionResult] = []
+        for s in staged:
+            log.info("Autonomously executing scheduled sweep %s for %s...", s.sweep_id, s.hunt_id)
+            res = self.execute_sweep(s.sweep_id, approver="daemon")
+            results.append(res)
+        return results

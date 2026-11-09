@@ -281,16 +281,26 @@ def daemon(
             help="Bypass daily draft, research quota, and spacing limits.",
         ),
     ] = False,
+    sweeps: Annotated[
+        bool,
+        typer.Option(
+            "--sweeps/--no-sweeps",
+            help="Enable periodic auto-hunt sweep execution in the daemon loop (default: True).",
+        ),
+    ] = True,
 ) -> None:
     """Run orchestrator perpetually as a resident daemon with an event-driven worker loop."""
     import signal
     import threading
+    import time
 
     settings = Settings()
     _configure_logging(settings)
 
     effective_interval = interval if interval is not None else settings.daemon_interval_sec
     stop_event = threading.Event()
+    last_sweep_check: float = 0.0
+    sweep_interval_sec = float(settings.auto_hunt_sweep_interval_sec)
 
     def _sig_handler(signum: int, frame: Any) -> None:
         signame = signal.Signals(signum).name
@@ -308,6 +318,7 @@ def daemon(
             f"• Workspace: [cyan]{settings.hecate_workspace}[/cyan]\n"
             f"• CTI Provider: [cyan]{settings.cti_provider}[/cyan]\n"
             f"• Idle Poll Interval: [cyan]{effective_interval}s[/cyan]\n"
+            f"• Auto Hunt Sweeps: [cyan]{'enabled (' + str(settings.auto_hunt_sweep_interval_sec) + 's interval)' if (sweeps and settings.auto_hunt_execution_enabled) else 'disabled'}[/cyan]\n"
             f"• Max Cycles: [cyan]{max_cycles or 'unlimited'}[/cyan]\n"
             f"• Research Reuse: [cyan]{'enabled (<=' + str(settings.research_reuse_max_age_days) + 'd)' if settings.research_reuse_enabled else 'disabled'}[/cyan]\n"
             f"• Dry Run: [cyan]{dry_run}[/cyan]\n"
@@ -338,6 +349,25 @@ def daemon(
                     provider.close()
             _print_result(result)
             cycles_completed += 1
+
+            # Run periodic autonomous hunt sweep check
+            if sweeps and settings.auto_hunt_execution_enabled and not dry_run:
+                now_ts = time.time()
+                if (now_ts - last_sweep_check) >= sweep_interval_sec:
+                    log.info("Daemon executing scheduled hunt sweep check...")
+                    try:
+                        from hecate_runner.execution.scheduler import HuntExecutionScheduler
+
+                        sched = HuntExecutionScheduler(settings=settings)
+                        sweep_res = sched.run_scheduled_sweeps()
+                        if sweep_res:
+                            console.print(
+                                f"[bold cyan]🎯 Daemon processed {len(sweep_res)} hunt sweeps.[/bold cyan]"
+                            )
+                    except Exception as sweep_err:
+                        log.error("Daemon hunt sweep error: %s", sweep_err, exc_info=True)
+                    finally:
+                        last_sweep_check = now_ts
 
             if max_cycles is not None and cycles_completed >= max_cycles:
                 console.print(

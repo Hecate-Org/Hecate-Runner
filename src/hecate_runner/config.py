@@ -1369,6 +1369,12 @@ class Settings(BaseSettings):
         alias="HECATE_AUTO_HUNT_PIVOT_MIN_CONFIDENCE",
         description="Minimum triage confidence required to trigger autonomous investigation pivoting.",
     )
+    auto_hunt_sweep_interval_sec: int = Field(
+        default=3600,
+        ge=60,
+        alias="HECATE_AUTO_HUNT_SWEEP_INTERVAL_SEC",
+        description="Interval in seconds between automated hunt sweep execution checks in the daemon.",
+    )
     cti_priority_tiers: bool = Field(
         default=True,
         validation_alias="HECATE_RUNNER_CTI_PRIORITY_TIERS",

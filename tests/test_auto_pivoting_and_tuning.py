@@ -18,7 +18,7 @@ from hecate_runner.execution.scheduler import HuntExecutionScheduler
 from hecate_runner.execution.triage_agent import FindingTriageReport
 from hecate_runner.execution.watermark_store import WatermarkStore
 from hecate_runner.lifecycle import get_hunt_lifecycle
-from hecate_runner.query_execution import QueryResult
+from hecate_runner.query_execution import MockQueryProvider, QueryResult
 from hecate_runner.rule_tuner import RuleTuner
 from hecate_runner.slack_sim import SlackBotSimulator
 
@@ -411,3 +411,55 @@ def test_cli_sweep_pivots_and_tune(tmp_path: Path) -> None:
     assert res_tune.exit_code == 0, res_tune.output
     assert "Successfully Tuned Detection Rule" in res_tune.output
     assert "nagios" in res_tune.output
+
+
+def test_scheduler_run_scheduled_sweeps(tmp_path: Path) -> None:
+    ws = _setup_mock_workspace(tmp_path)
+    db_path = tmp_path / "watermarks.db"
+
+    # Case 1: HITL approval required -> returns StagedSweep
+    settings_hitl = Settings(
+        hecate_workspace=ws,
+        hunt_executions_db=db_path,
+        auto_hunt_execution_enabled=True,
+        auto_hunt_approval_required=True,
+    )
+    mock_prov = MockQueryProvider(responses=[0])
+    scheduler_hitl = HuntExecutionScheduler(settings=settings_hitl, provider=mock_prov)
+    staged = scheduler_hitl.run_scheduled_sweeps(force=True)
+    assert len(staged) == 1
+    assert staged[0].status == "pending_approval"
+
+    # Case 2: Autonomous execution (no approval required) -> executes sweep
+    settings_auto = Settings(
+        hecate_workspace=ws,
+        hunt_executions_db=db_path,
+        auto_hunt_execution_enabled=True,
+        auto_hunt_approval_required=False,
+    )
+    scheduler_auto = HuntExecutionScheduler(settings=settings_auto, provider=mock_prov)
+    executed = scheduler_auto.run_scheduled_sweeps(force=True)
+    assert len(executed) == 1
+    assert executed[0].outcome == "clean"
+
+
+def test_cli_sweep_daemon(tmp_path: Path) -> None:
+    ws = _setup_mock_workspace(tmp_path)
+    db_path = tmp_path / "watermarks.db"
+
+    runner = CliRunner()
+    env = {
+        "HECATE_WORKSPACE": str(ws),
+        "HECATE_HUNT_EXECUTIONS_DB": str(db_path),
+        "HECATE_AUTO_HUNT_EXECUTION_ENABLED": "true",
+        "COLUMNS": "180",
+    }
+
+    res = runner.invoke(
+        cli.app,
+        ["sweep", "daemon", "--max-cycles", "1", "--interval", "1", "--force"],
+        env=env,
+    )
+    assert res.exit_code == 0, res.output
+    assert "Starting Hecate Hunt Sweep Daemon" in res.output
+    assert "Sweep daemon exited cleanly after 1 cycles." in res.output

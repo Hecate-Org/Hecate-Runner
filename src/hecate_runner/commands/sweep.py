@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich import box
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from hecate_runner.config import Settings
@@ -390,3 +391,97 @@ def sweep_tune(
             summary=res.action_summary,
         )
         console.print("[dim]Updated finding ledger with tuning outcome.[/dim]")
+
+
+@sweep_app.command("daemon")
+def sweep_daemon(
+    interval: Annotated[
+        int | None,
+        typer.Option(
+            "--interval",
+            "-i",
+            help="Polling interval in seconds between scheduled sweeps.",
+        ),
+    ] = None,
+    approval: Annotated[
+        bool | None,
+        typer.Option(
+            "--approval/--no-approval",
+            help="Override whether Slack HITL approval is required before execution.",
+        ),
+    ] = None,
+    max_cycles: Annotated[
+        int | None,
+        typer.Option(
+            "--max-cycles",
+            "-m",
+            help="Maximum number of sweep cycles to run before exiting.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Bypass cadence checks to execute sweeps immediately on each cycle.",
+        ),
+    ] = False,
+) -> None:
+    """Run autonomous hunt sweep scheduler perpetually in a background worker loop."""
+    import signal
+    import threading
+
+    settings = Settings()
+    if approval is not None:
+        settings.auto_hunt_approval_required = approval
+
+    effective_interval = (
+        interval if interval is not None else settings.auto_hunt_sweep_interval_sec
+    )
+    stop_event = threading.Event()
+
+    def _sig_handler(signum: int, frame: Any) -> None:
+        signame = signal.Signals(signum).name
+        console.print(f"\n[yellow]Received {signame}. Shutting down sweep daemon...[/yellow]")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    console.print(
+        Panel(
+            f"[bold green]Starting Hecate Hunt Sweep Daemon[/bold green]\n\n"
+            f"• Workspace: [cyan]{settings.hecate_workspace}[/cyan]\n"
+            f"• Query Provider: [cyan]{settings.query_provider}[/cyan]\n"
+            f"• Sweep Interval: [cyan]{effective_interval}s[/cyan]\n"
+            f"• HITL Approval Required: [cyan]{settings.auto_hunt_approval_required}[/cyan]\n"
+            f"• Max Pivots Enabled: [cyan]{settings.auto_hunt_pivots_enabled}[/cyan]\n"
+            f"• Max Cycles: [cyan]{max_cycles or 'unlimited'}[/cyan]\n\n"
+            "[dim]Press Ctrl+C to terminate cleanly.[/dim]",
+            title="🎯 Hecate Sweep Daemon",
+            box=box.ROUNDED,
+        )
+    )
+
+    scheduler = HuntExecutionScheduler(settings=settings)
+    cycles = 0
+
+    while not stop_event.is_set():
+        cycles += 1
+        console.print(f"[bold cyan]Cycle #{cycles}: Scanning active hunts...[/bold cyan]")
+        try:
+            results = scheduler.run_scheduled_sweeps(force=force)
+            if results:
+                console.print(f"[bold green]Processed {len(results)} sweep(s).[/bold green]")
+            else:
+                console.print("[dim]No hunts currently eligible for sweep.[/dim]")
+        except Exception as exc:
+            log.error("Error in sweep daemon cycle: %s", exc, exc_info=True)
+            console.print(f"[red]Error during sweep cycle: {exc}[/red]")
+
+        if max_cycles and cycles >= max_cycles:
+            console.print(f"[bold green]Reached max cycles ({max_cycles}). Exiting.[/bold green]")
+            break
+
+        stop_event.wait(float(effective_interval))
+
+    console.print(f"[bold green]Sweep daemon exited cleanly after {cycles} cycles.[/bold green]")

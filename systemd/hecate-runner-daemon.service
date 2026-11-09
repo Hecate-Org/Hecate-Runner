@@ -2,7 +2,7 @@
 Description=hecate-runner - Hecate resident autonomous daemon
 Documentation=https://github.com/BrizoSec/Hecate-Runner
 After=network-online.target ollama.service
-Wants=network-online.target
+Wants=network-online.target hecate-runner-maintenance.service
 Requires=ollama.service
 Conflicts=hecate-runner-orchestrator.timer
 
@@ -14,6 +14,7 @@ WorkingDirectory=/home/chemch/betas/Hecate-Runner
 
 # Read env from the workspace .env (single canonical source of truth), with optional runner-local override.
 EnvironmentFile=-/home/chemch/betas/Hecate-Workspace/.env
+EnvironmentFile=-/home/chemch/betas/Hecate-Public/.env
 EnvironmentFile=-/home/chemch/betas/Hecate-Runner/.env
 
 # Run via uv so we always execute inside the project venv.
@@ -29,6 +30,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/home/chemch/betas/Hecate-Core /home/chemch/betas/Hecate-Runner /home/chemch/betas/Hecate-Workspace
+ReadWritePaths=-/home/chemch/betas/Hecate-Public
 
 [Install]
 WantedBy=multi-user.target
