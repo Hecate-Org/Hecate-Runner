@@ -54,3 +54,46 @@ def test_forward_events_basic_auth_fallback(monkeypatch):
         # Second call uses basic auth
         second_kwargs = mock_post.call_args_list[1][1]
         assert second_kwargs["auth"] == ("admin", "Secret123!")
+
+
+def test_tls_verification_defaults_on_and_allows_explicit_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("SPLUNK_VERIFY_SSL", raising=False)
+    with mock.patch("httpx.Client") as client:
+        assert forward_events_to_splunk([{"event": "test"}], workspace=tmp_path) == 1
+        assert client.call_args.kwargs["verify"] is True
+        forward_events_to_splunk([{"event": "test"}], workspace=tmp_path, verify_ssl=False)
+        assert client.call_args.kwargs["verify"] is False
+
+
+def test_credentials_are_isolated_between_workspaces(monkeypatch, tmp_path):
+    import os
+
+    from hecate_runner.bas.forwarder import splunk_settings
+
+    for name in ("SPLUNK_HOST", "SPLUNK_TOKEN", "SPLUNK_PASSWORD", "SPLUNK_VERIFY_SSL"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text("SPLUNK_TOKEN=ancestor-secret\n")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / ".env").write_text("SPLUNK_HOST=https://first\nSPLUNK_TOKEN=first-secret\n")
+    (second / ".env").write_text("SPLUNK_HOST=https://second\nSPLUNK_TOKEN=second-secret\n")
+    monkeypatch.chdir(first)
+    assert "SPLUNK_TOKEN" not in splunk_settings()
+    assert splunk_settings(first)["SPLUNK_TOKEN"] == "first-secret"
+    assert splunk_settings(second)["SPLUNK_TOKEN"] == "second-secret"
+    assert "SPLUNK_TOKEN" not in os.environ
+    monkeypatch.setenv("SPLUNK_TOKEN", "explicit-secret")
+    assert splunk_settings(first)["SPLUNK_TOKEN"] == "explicit-secret"
+
+
+def test_forwarder_uses_selected_workspace_credentials(monkeypatch, tmp_path):
+    for name in ("SPLUNK_HOST", "SPLUNK_TOKEN", "SPLUNK_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text("SPLUNK_HOST=https://selected\nSPLUNK_TOKEN=selected-token\n")
+    with mock.patch("httpx.Client") as client:
+        forward_events_to_splunk([{"event": "test"}], workspace=tmp_path)
+        post = client.return_value.__enter__.return_value.post
+        assert post.call_args.args[0].startswith("https://selected/")
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer selected-token"

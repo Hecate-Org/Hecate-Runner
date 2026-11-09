@@ -75,8 +75,8 @@ def test_sigma_rule_validates_against_atomic_adversary_emulation() -> None:
         BENIGN_SAMPLE,
         emulated_techniques=["T1059.001"],
     )
-    assert outcome.status == "validated"
-    assert outcome.validated is True
+    assert outcome.status == "self_consistent"
+    assert outcome.matched is True
     assert outcome.true_positives >= 1
     assert outcome.false_positives == 0
     assert outcome.emulation_type == "atomic_red_team"
@@ -88,7 +88,7 @@ def test_atomic_emulation_flags_false_positive_on_benign_sample() -> None:
     # _OVERLY_BROAD_RULE matches both the atomic test AND the benign monitoring script in BENIGN_SAMPLE
     outcome = replay_rule(_OVERLY_BROAD_RULE, events["process_creation"], BENIGN_SAMPLE)
     assert outcome.status == "baseline_match"
-    assert outcome.validated is False
+    assert outcome.matched is False
     assert outcome.false_positives >= 1
 
 
@@ -132,10 +132,14 @@ def test_orchestrator_purple_team_atomic_flow(tmp_path: Path) -> None:
     orch._run_purple_team_validation(req, rules, out_dir, item)
 
     assert req.purple_team_rules_evaluated == 1
-    assert req.purple_team_rules_validated == 1
+    # The Atomic events are synthesised from test definitions, never executed.
+    assert req.purple_team_rules_replay_matched == 1
+    assert req.purple_team_rules_validated == 0
     assert "T1059.001" in req.purple_team_atomic_techniques
     assert len(req.purple_team_atomic_tests) > 0
-    assert "x_hecate_purple_team_validated: true" in rule_file.read_text(encoding="utf-8")
+    text = rule_file.read_text(encoding="utf-8")
+    assert "x_hecate_replay_matched: true" in text
+    assert "x_hecate_purple_team_validated" not in text
 
 
 def test_hunt_writer_renders_atomic_emulation_details(sample_hypothesis: HypothesisResult) -> None:
@@ -152,11 +156,11 @@ def test_hunt_writer_renders_atomic_emulation_details(sample_hypothesis: Hypothe
                 "level": "high",
                 "techniques": ["T1059.001"],
                 "rule_yaml": _POWERSHELL_SIGMA_RULE,
-                "purple_team": {"status": "validated", "validated": True},
+                "purple_team": {"status": "self_consistent", "matched": True},
             }
         ],
         purple_team_rules_evaluated=1,
-        purple_team_rules_validated=1,
+        purple_team_rules_replay_matched=1,
         purple_team_atomic_techniques=["T1059.001"],
         purple_team_atomic_tests=[
             {
@@ -168,6 +172,10 @@ def test_hunt_writer_renders_atomic_emulation_details(sample_hypothesis: Hypothe
         ],
     )
     md = render_draft(req)
-    assert "purple_team_validated: true" in md
-    assert "Adversary Emulation (Atomic Red Team):" in md
-    assert "`T1059.001`" in md
+    # H-0021 read "validated against dynamic adversary emulation telemetry" with
+    # every event synthesised and BAS skipped.
+    assert "purple_team_validated: false" in md
+    assert "purple_team_rules_replay_matched: 1" in md
+    assert "Atomic Red Team test definitions for `T1059.001`" in md
+    assert "dynamic adversary emulation telemetry" not in md
+    assert "Nothing was executed, so this is not validation" in md

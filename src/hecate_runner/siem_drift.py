@@ -584,7 +584,7 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
     if resolved not in _drift_db_initialized or not db_path.exists():
         with conn:
             conn.executescript(
-            """
+                """
             CREATE TABLE IF NOT EXISTS audit_sweeps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -663,7 +663,7 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_detection_validations_technique ON detection_validations(technique_id);
             CREATE INDEX IF NOT EXISTS idx_detection_validations_timestamp ON detection_validations(timestamp);
             """
-        )
+            )
 
         # Backwards-compatible schema migration
         try:

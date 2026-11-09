@@ -351,16 +351,11 @@ def list_sources() -> None:
 def _find_canonical_env_file() -> Path:
     try:
         settings = _get_settings()
-        ws_env = settings.hecate_workspace / ".env"
-        if ws_env.is_file():
-            return ws_env
+        return settings.hecate_workspace / ".env"
     except Exception:
         pass
     if Path(".env").is_file():
         return Path(".env")
-    default_ws = Path.home() / "betas" / "Hecate-Workspace" / ".env"
-    if default_ws.is_file():
-        return default_ws
     return Path(".env")
 
 

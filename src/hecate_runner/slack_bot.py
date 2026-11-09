@@ -806,7 +806,11 @@ class SlackBotService:
             scheduler = HuntExecutionScheduler(settings=self.settings)
             res = scheduler.execute_sweep(sweep_id, approver=f"slack:{user_id} ({user_name})")
 
-            icon = "🟢" if res.outcome == "clean" else ("⚠️" if res.outcome == "hits_detected" else "🚨")
+            icon = (
+                "🟢"
+                if res.outcome == "clean"
+                else ("⚠️" if res.outcome == "hits_detected" else "🚨")
+            )
             msg = (
                 f"{icon} *Hunt Sweep Executed by <@{user_id}>*\n"
                 f"• *Hunt ID:* `{res.hunt_id}`\n"
@@ -859,13 +863,13 @@ class SlackBotService:
             from hecate_runner.execution.watermark_store import WatermarkStore
             from hecate_runner.rule_tuner import RuleTuner
 
-            store = WatermarkStore(db_path=self.settings.hunt_executions_db)
+            store = WatermarkStore(db_path=self.settings.hunt_executions_db_resolved)
             finding = store.get_finding(finding_id)
             if not finding:
                 say(text=f"❌ *Finding `{finding_id}` not found in ledger.*", thread_ts=thread_ts)
                 return
 
-            tuner = RuleTuner(workspace=self.workspace)
+            tuner = RuleTuner(workspace=self.settings.hecate_workspace)
             res = tuner.auto_tune_from_finding(finding)
 
             if res.ok:
@@ -994,7 +998,10 @@ class SlackBotService:
                         errors={"publish_override": str(res.get("error"))[:150]},
                     )
                 elif publishing:
-                    ack(response_action="errors", errors={"release_checks": str(res.get("error"))[:150]})
+                    ack(
+                        response_action="errors",
+                        errors={"release_checks": str(res.get("error"))[:150]},
+                    )
                 else:
                     ack()
                     _post_review_result(client, metadata, f"⚠️ {res.get('error')}")

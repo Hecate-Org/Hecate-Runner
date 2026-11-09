@@ -134,7 +134,11 @@ def _extract_field(data: dict[str, Any], aliases: set[str]) -> str:
                 return str(val).strip()
             if isinstance(val, dict):
                 for subkey in ("name", "hostname", "value", "id", "ip"):
-                    if subkey in val and not isinstance(val[subkey], (dict, list)) and str(val[subkey]).strip():
+                    if (
+                        subkey in val
+                        and not isinstance(val[subkey], (dict, list))
+                        and str(val[subkey]).strip()
+                    ):
                         return str(val[subkey]).strip()
 
     # 2. Dot-delimited nested object lookup (e.g. process.name or host.name)

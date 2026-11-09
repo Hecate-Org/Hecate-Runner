@@ -180,7 +180,7 @@ def test_siem_verifier_live_execution_mocked(mock_siem_workspace: Path, monkeypa
     ]
 
     with (
-        patch("hecate_agent.core.splunk_client.create_client_from_env", return_value=mock_client),
+        patch("hecate_agent.core.splunk_client.SplunkClient", return_value=mock_client),
         patch("hecate_runner.bas.siem_verifier.forward_events_to_splunk", return_value=1),
     ):
         verifier = SiemAlertVerifier(mock_siem_workspace)

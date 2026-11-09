@@ -107,22 +107,27 @@ sequenceDiagram
 
 ## 4. Key Subsystem Architectures
 
-### 4.1 Autonomous Daemon & Dual-Track Queue
+### 4.1 Autonomous Daemon & Pipeline Architecture
 
-The perpetual daemon ([`hecate_runner.orchestrator`](file:///home/chemch/betas/Hecate-Runner/src/hecate_runner/orchestrator.py)) runs as a resilient systemd background service (`hecate-runner-daemon.service`).
+The perpetual daemon ([`hecate_runner.orchestrator`](file:///home/chemch/betas/Hecate-Runner/src/hecate_runner/orchestrator.py)) runs as a resilient systemd background service (`hecate-runner-daemon.service`). Rather than a monolithic worker, the pipeline is decomposed into four discrete stage mixins:
+
+1. **Intake & Queue Management ([`orchestrator_intake.py`](file:///home/chemch/betas/Hecate-Runner/src/hecate_runner/orchestrator_intake.py)):** Coordinates multi-feed polling, SHA-256 deduplication, rate quotas, dead-letter retry schedules, and quarantine parking.
+2. **Grounding & Evidence Extraction ([`orchestrator_grounding.py`](file:///home/chemch/betas/Hecate-Runner/src/hecate_runner/orchestrator_grounding.py)):** Audits verbatim claims against primary intelligence, extracts observables, scopes specimen platforms, and renders formatted LOCK grounding sections.
+3. **Rule Generation & Review ([`orchestrator_rules.py`](file:///home/chemch/betas/Hecate-Runner/src/hecate_runner/orchestrator_rules.py)):** Executes multi-pass Sigma generation, synthesizes gap feedback from reviewer passes, audits rule provenance, and deploys native SIEM queries.
+4. **Publishing & Notification ([`orchestrator_publishing.py`](file:///home/chemch/betas/Hecate-Runner/src/hecate_runner/orchestrator_publishing.py)):** Enqueues drafted artifacts into SQLite outboxes for GitHub pull request creation and MISP event synchronization, and dispatches interactive Slack notifications.
 
 ```mermaid
 flowchart TD
-    POLL["Poll Active CTI Feeds"] --> DUAL{"Classify Feed Type"}
+    POLL["Poll Active CTI Feeds<br/>(orchestrator_intake)"] --> DUAL{"Classify Feed Type"}
     DUAL -- "Pure Indicators / High-Velocity" --> SWEEP["Fast Sweep Track<br/>Short Cooldown (30s)<br/>Deterministic Generator"]
-    DUAL -- "Narrative Threat Intel / Reports" --> DEEP["Deep Research Track<br/>Standard Cooldown (180s)<br/>Agentic Research & Hypothesis"]
-    SWEEP --> EMULATE["Purple Team Emulation & Review"]
+    DUAL -- "Narrative Threat Intel / Reports" --> DEEP["Deep Research Track<br/>Standard Cooldown (180s)<br/>Agentic Research & Grounding<br/>(orchestrator_grounding)"]
+    SWEEP --> EMULATE["Purple Team Emulation & Review<br/>(orchestrator_rules)"]
     DEEP --> EMULATE
     EMULATE --> DRAFT["Write Draft Hunt & Queries"]
-    DRAFT --> SYNC["Outbox PR Dispatch & Slack Notice"]
+    DRAFT --> SYNC["Outbox PR Dispatch & Slack Notice<br/>(orchestrator_publishing)"]
 ```
 
-- **Dual-Track Priority:** High-volume indicator feeds (e.g. ThreatFox, MalwareBazaar) bypass heavy LLM research and invoke fast deterministic sweeps, preserving LLM token budgets and Tavily search credits for complex narrative advisories.
+- **Dual-Track Priority:** High-volume indicator feeds (e.g. ThreatFox, MalwareBazaar) bypass heavy LLM research and invoke fast deterministic sweeps, preserving LLM token budgets and search credits for complex narrative advisories.
 - **State Persistence:** Feed cursor positions, processed pulse IDs, and daily quotas are atomically committed to `.cursors/` and `.orchestrator_state.json`.
 
 ### 4.2 Grounding & Anti-Hallucination Framework

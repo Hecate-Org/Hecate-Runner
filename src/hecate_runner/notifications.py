@@ -349,31 +349,22 @@ def notify_ops_metrics(
     settings: Settings,
     metrics_summary: dict[str, Any],
     channel: str | None = None,
-) -> None:
-    """Post daily operational and cost metrics digest."""
+) -> tuple[bool, str]:
+    """Post the operational digest and return the actual delivery result."""
     router = SlackNotificationRouter(settings)
     if not router.is_configured:
-        return
-
-    hunts_done = metrics_summary.get("hunts_completed", 0)
-    sigma_total = metrics_summary.get("sigma_rules_produced", 0)
-    spend_today = metrics_summary.get("spend_today_usd", 0.0)
-    budget = metrics_summary.get("daily_budget_usd", 20.0)
-    active_sources = metrics_summary.get("active_sources", [])
-
-    sources_str = ", ".join(f"`{s}`" for s in active_sources) or "None"
-
-    text = (
-        f":bar_chart: *Hecate Daily Autonomous Ops & Spend Digest*\n"
-        f"*Hunts Completed (24h):* `{hunts_done}`\n"
-        f"*Sigma Detection Rules Produced:* `{sigma_total}`\n"
-        f"*Today's Spend / Budget:* `${spend_today:.2f} / ${budget:.2f}`\n"
-        f"*Active Threat Feeds:* {sources_str}"
-    )
-
-    target_channel = channel or settings.slack_channel_ops_metrics
+        return False, "Slack is not configured"
     attachments = build_ops_metrics_card(metrics_summary)
-    router.post_message(target_channel, text, attachments=attachments)
+    blocks = attachments[0]["blocks"]
+    text = "\n".join(
+        [
+            blocks[0]["text"]["text"],
+            *(field["text"] for field in blocks[1]["fields"]),
+            blocks[2]["text"]["text"],
+        ]
+    )
+    target_channel = channel or settings.slack_channel_ops_metrics
+    return router.post_message(target_channel, text, attachments=attachments)
 
 
 def notify_detection_digest(

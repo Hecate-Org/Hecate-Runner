@@ -324,7 +324,9 @@ class RuleTuner:
                 ext = ext_map.get(tgt)
                 if ext:
                     q_path = query_dir / f"{stem}{ext}"
-                    atomic_write_text(q_path, t_res.query.strip() + "\n")
+                    from hecate_runner.native_queries import write_query_if_changed
+
+                    write_query_if_changed(q_path, t_res.query)
                     successful_targets.append(tgt)
 
         # Check for subsumption or duplication against existing rules
@@ -416,9 +418,7 @@ class RuleTuner:
             processes = entities.get("processes") or []
 
             benign_users = [
-                u
-                for u in users
-                if u.lower() not in ("root", "admin", "administrator", "system")
+                u for u in users if u.lower() not in ("root", "admin", "administrator", "system")
             ]
             if benign_users:
                 instruction = f"Exclude User {benign_users[0]}"

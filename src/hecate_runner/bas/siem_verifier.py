@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -21,7 +20,7 @@ from uuid import uuid4
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.base import DetonationResult
-from hecate_runner.bas.forwarder import forward_events_to_splunk
+from hecate_runner.bas.forwarder import forward_events_to_splunk, splunk_settings
 from hecate_runner.siem_drift import record_detection_validation
 
 log = logging.getLogger(__name__)
@@ -77,17 +76,6 @@ class SiemAlertVerifier:
             Tuple of (query_string, source_file_name, sigma_yaml_content)
         """
         query_dir = self.workspace / "queries" / hunt_id
-        if not query_dir.is_dir():
-            # Workspace might be Hecate-Public or parent
-            alt_candidates = [
-                self.workspace / "Hecate-Public" / "queries" / hunt_id,
-                self.workspace.parent / "Hecate-Public" / "queries" / hunt_id,
-                Path("/home/chemch/betas/Hecate-Public/queries") / hunt_id,
-            ]
-            for alt in alt_candidates:
-                if alt.is_dir():
-                    query_dir = alt
-                    break
 
         spl_files = sorted(query_dir.glob("*.spl")) if query_dir.is_dir() else []
         yml_files = (
@@ -270,27 +258,14 @@ class SiemAlertVerifier:
         ability_id = detonation.ability_id or ""
         notes: list[str] = []
 
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv(override=False)
-            for env_path in (
-                self.workspace / ".env",
-                self.workspace / "Hecate-Public" / ".env",
-                Path.cwd() / ".env",
-                Path("/home/chemch/betas/Hecate-Public/.env"),
-            ):
-                if env_path.exists():
-                    load_dotenv(env_path, override=False)
-        except Exception:
-            pass
+        env = splunk_settings(self.workspace)
 
         # 1. Telemetry verification & forwarding
         telemetry_events = list(detonation.telemetry_signatures or [])
         telemetry_arrived = len(telemetry_events) > 0
         if telemetry_arrived and forward_telemetry and siem_target.lower() == "splunk":
             try:
-                forwarded = forward_events_to_splunk(telemetry_events)
+                forwarded = forward_events_to_splunk(telemetry_events, workspace=self.workspace)
                 notes.append(f"Forwarded {forwarded} telemetry event(s) to Splunk Simple Receiver.")
             except Exception as fwd_exc:
                 notes.append(f"Warning: Telemetry forwarding encountered: {fwd_exc}")
@@ -303,8 +278,8 @@ class SiemAlertVerifier:
         notes.append(f"Evaluating candidate query from {query_source}: {query_text}")
 
         # 3. Handle Mock / Offline Mode
-        splunk_host = os.getenv("SPLUNK_HOST") or os.getenv("SPLUNK_URL")
-        splunk_token = os.getenv("SPLUNK_TOKEN") or os.getenv("SPLUNK_PASSWORD")
+        splunk_host = env.get("SPLUNK_HOST") or env.get("SPLUNK_URL")
+        splunk_token = env.get("SPLUNK_TOKEN") or env.get("SPLUNK_PASSWORD")
         is_mock = siem_target.lower() == "mock" or not (splunk_host and splunk_token)
 
         if is_mock:
@@ -336,10 +311,17 @@ class SiemAlertVerifier:
             return result
 
         # 4. Live Splunk Search Jobs API Verification
-        from hecate_agent.core.splunk_client import create_client_from_env
+        from hecate_agent.core.splunk_client import SplunkClient
 
         try:
-            client = create_client_from_env()
+            if not env.get("SPLUNK_HOST") or not env.get("SPLUNK_TOKEN"):
+                raise ValueError("SPLUNK_HOST and SPLUNK_TOKEN are required")
+            client = SplunkClient(
+                host=env["SPLUNK_HOST"],
+                token=env["SPLUNK_TOKEN"],
+                verify_ssl=env.get("SPLUNK_VERIFY_SSL", "true").strip().lower()
+                not in ("false", "0", "no"),
+            )
         except Exception as client_exc:
             notes.append(f"Splunk client initialization failed: {client_exc}")
             result = SiemAlertVerificationResult(

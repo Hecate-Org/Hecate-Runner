@@ -91,6 +91,45 @@ def test_review_hunt_approve_records_reviewer_and_keeps_body(tmp_path: Path):
     assert "status: experimental" in path.read_text(encoding="utf-8")
 
 
+def test_approving_a_rendered_draft_removes_its_draft_markers(tmp_path: Path, sample_hypothesis):
+    """H-0021 was approved and published still titled and headed "DRAFT"."""
+    from datetime import UTC, datetime
+
+    from hecate_runner.hunt_writer import DraftHuntRequest, render_draft
+
+    req = DraftHuntRequest(
+        hunt_id="H-0001",
+        threat_intel="intel",
+        hypothesis=sample_hypothesis,
+        generated_at=datetime(2026, 11, 9, tzinfo=UTC),
+    )
+    draft = render_draft(req)
+    assert "DRAFT - Automated Hunt Draft" in draft and "Do not execute queries" in draft
+    hunts_dir = tmp_path / "hunts" / "2026" / "Q4"
+    hunts_dir.mkdir(parents=True)
+    path = hunts_dir / "H-0001.md"
+    path.write_text(draft, encoding="utf-8")
+
+    review_hunt(tmp_path, "H-0001", approve=True, reviewer="slack:U1 (alice)")
+
+    text = path.read_text(encoding="utf-8")
+    fm = _frontmatter(path)
+    assert fm["title"] == "Adversaries dump LSASS memory via comsvcs.dll MiniDump."
+    assert "draft" not in fm["tags"] and "requires-human-review" not in fm["tags"]
+    assert "(draft)" not in fm["hunter"]
+    assert "# H-0001: Adversaries dump LSASS memory via comsvcs.dll MiniDump.\n" in text
+    assert "DRAFT" not in text
+    assert "Do not execute queries" not in text
+    assert "- **Status:** active" in text
+    assert "**Reviewed:** 20" in text and "by slack:U1 (alice)" in text
+
+
+def test_rejecting_a_draft_keeps_its_draft_markers(tmp_path: Path):
+    path = _write_hunt(tmp_path, "H-0001")
+    review_hunt(tmp_path, "H-0001", approve=False, reviewer="slack:U1", reason="no")
+    assert _frontmatter(path)["title"] == "DRAFT - H-0001 test"
+
+
 def test_review_hunt_reject_stores_reason_safely(tmp_path: Path):
     path = _write_hunt(tmp_path, "H-0001")
     reason = 'Duplicate of H-0007.\nSee "notes": no new telemetry'
@@ -420,3 +459,106 @@ def test_reject_submission_errors_keep_modal_open(tmp_path: Path):
     listener.ack_function(ack=ack, body={"user": {"id": "U2"}}, view=_submission("late"))
     assert "not awaiting review" in ack.call_args[1]["errors"]["reject_reason"]
     assert yaml.safe_load(path.read_text(encoding="utf-8").split("---")[1])["status"] == "active"
+
+
+_BLOCKING_RULE = """
+title: Unauthenticated flow deploy
+description: an unauthenticated client deploys a flow
+logsource:
+  category: webserver
+  product: linux
+detection:
+  selection:
+    cs-method: POST
+    cs-uri-stem|contains: /flows
+  condition: selection
+"""
+
+
+def test_approval_stops_on_a_blocking_publish_finding_until_overridden(tmp_path: Path):
+    path = _write_hunt(tmp_path, "H-0001")
+    (tmp_path / "queries" / "H-0001").mkdir(parents=True)
+    (tmp_path / "queries" / "H-0001" / "deploy.yml").write_text(_BLOCKING_RULE, encoding="utf-8")
+
+    refused = review_hunt(tmp_path, "H-0001", approve=True, reviewer="slack:U1")
+    assert refused["ok"] is False and refused["needs_override"] is True
+    assert _frontmatter(path)["status"] == "planning"
+
+    approved = review_hunt(
+        tmp_path,
+        "H-0001",
+        approve=True,
+        reviewer="slack:U1",
+        override="The web log has no auth field; reviewed the source procedure.",
+    )
+    assert approved["ok"] is True
+    fm = _frontmatter(path)
+    assert fm["status"] == "active"
+    assert fm["publish_check"] == "block"
+    assert fm["publish_override_by"] == "slack:U1"
+    assert "auth field" in fm["publish_override"]
+
+
+def test_pending_card_and_approve_modal_show_blocking_findings():
+    from hecate_runner.slack_blocks import build_approve_hunt_modal, build_pending_hunts_card
+
+    card = build_pending_hunts_card(
+        [{"hunt_id": "H-0001", "title": "Deploy", "publish_check": "block", "publish_blocking": 2}]
+    )[0]["blocks"]
+    text = " ".join(
+        block.get("text", {}).get("text", "")
+        for block in card
+        if isinstance(block.get("text"), dict)
+    )
+    assert "2 blocking" in text
+
+    modal = build_approve_hunt_modal(
+        "H-0001",
+        "{}",
+        destination=None,
+        findings=[{"check": "auth_claim", "target": "deploy.yml", "message": "no auth field"}],
+    )
+    joined = json.dumps(modal)
+    assert "publish_override" in joined
+    assert "no auth field" in joined
+    assert "release_checks" not in joined
+
+
+def test_pending_card_and_approve_modal_show_lab_hits():
+    from hecate_runner.slack_blocks import build_approve_hunt_modal, build_pending_hunts_card
+
+    card = build_pending_hunts_card(
+        [
+            {
+                "hunt_id": "H-0002",
+                "title": "LSASS",
+                "lab_probe": "miss",
+                "lab_probe_provider": "sentinel",
+                "lab_probe_window_days": 1,
+                "lab_probe_hits": 0,
+            }
+        ]
+    )[0]["blocks"]
+    text = " ".join(
+        block.get("text", {}).get("text", "")
+        for block in card
+        if isinstance(block.get("text"), dict)
+    )
+    assert "Lab hits" in text
+    assert "miss" in text
+    assert "sentinel" in text
+
+    modal = build_approve_hunt_modal(
+        "H-0002",
+        "{}",
+        destination=None,
+        lab_probe={
+            "status": "hit",
+            "provider": "elastic",
+            "window_days": 1,
+            "total_hits": 4,
+        },
+    )
+    joined = json.dumps(modal)
+    assert "4 hit" in joined
+    assert "elastic" in joined

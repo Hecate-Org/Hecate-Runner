@@ -2186,4 +2186,3 @@ def test_unexpected_crash_in_run_body_refunds_draft_quota(
     assert result.outcome == "error"
     final_state = OrchestratorState.load(settings.state_file)
     assert final_state.drafts_today == initial_drafts
-

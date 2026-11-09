@@ -17,18 +17,20 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-install -m 0644 "$REPO_ROOT/systemd/hecate-runner-orchestrator.service" "$UNIT_DIR/hecate-runner-orchestrator.service"
-install -m 0644 "$REPO_ROOT/systemd/hecate-runner-orchestrator.timer" "$UNIT_DIR/hecate-runner-orchestrator.timer"
+bash "$REPO_ROOT/scripts/retire-legacy-services.sh"
+install -m 0644 "$REPO_ROOT/systemd/hecate-runner-daemon.service" "$UNIT_DIR/hecate-runner-daemon.service"
+install -m 0644 "$REPO_ROOT/systemd/hecate-runner-maintenance.service" "$UNIT_DIR/hecate-runner-maintenance.service"
 
 echo "==> Reloading systemd"
 systemctl daemon-reload
 
 echo
 echo "==> Installed. Next steps:"
-echo "   sudo systemctl enable --now hecate-runner-orchestrator.timer"
-echo "   sudo systemctl list-timers hecate-runner-orchestrator.timer"
-echo "   sudo systemctl start hecate-runner-orchestrator.service   # force one run"
-echo "   sudo journalctl -u hecate-runner-orchestrator.service -f  # follow logs"
+echo "   sudo systemctl enable --now hecate-runner-maintenance.service"
+echo "   sudo systemctl enable --now hecate-runner-daemon.service"
+echo "   sudo systemctl status hecate-runner-daemon.service hecate-runner-maintenance.service"
+echo "   sudo journalctl -u hecate-runner-daemon.service -f  # follow logs"
+echo "   uv run hecate-runner run  # optional manual single cycle; no legacy timer"
 echo
 echo "   CTI polling needs no units of its own: with HECATE_RUNNER_CTI_PROVIDER=multi"
 echo "   (or otx/rss/misp) the orchestrator pulls from each source inline every cycle."

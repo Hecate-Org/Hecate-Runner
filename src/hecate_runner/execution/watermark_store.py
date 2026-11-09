@@ -158,9 +158,7 @@ class WatermarkStore:
                 ("tuning_summary", "TEXT DEFAULT ''"),
             ):
                 with contextlib.suppress(sqlite3.OperationalError):
-                    conn.execute(
-                        f"ALTER TABLE hunt_execution_findings ADD COLUMN {col} {col_def}"
-                    )
+                    conn.execute(f"ALTER TABLE hunt_execution_findings ADD COLUMN {col} {col_def}")
 
     def get_watermark(self, hunt_id: str) -> HuntExecutionWatermark | None:
         with self._connect() as conn:
@@ -461,9 +459,7 @@ class WatermarkStore:
             )
         return finding_id
 
-    def update_finding_pivots(
-        self, finding_id: str, pivots: list[dict[str, Any]]
-    ) -> None:
+    def update_finding_pivots(self, finding_id: str, pivots: list[dict[str, Any]]) -> None:
         """Attach automated investigation pivot results to a finding."""
         with self._connect() as conn:
             conn.execute(

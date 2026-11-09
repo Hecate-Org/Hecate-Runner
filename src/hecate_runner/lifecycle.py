@@ -252,7 +252,11 @@ def record_hunt_execution(
     content = hunt_path.read_text(encoding="utf-8")
     fm, raw_yaml, body = parse_hunt_frontmatter(content)
     if not fm and not raw_yaml:
-        return {"ok": False, "hunt_id": hunt_id, "error": f"Unable to parse frontmatter in {hunt_path}"}
+        return {
+            "ok": False,
+            "hunt_id": hunt_id,
+            "error": f"Unable to parse frontmatter in {hunt_path}",
+        }
 
     now_iso = datetime.now(UTC).isoformat()
     fm["last_executed_at"] = now_iso
@@ -297,10 +301,13 @@ def record_hunt_execution(
         procs_str = ", ".join(f"`{p}`" for p in entities.get("processes", [])) or "None"
         parents_str = ", ".join(f"`{p}`" for p in entities.get("parent_processes", [])) or "None"
         ips_str = ", ".join(f"`{ip}`" for ip in entities.get("ips", [])) or "None"
-        techniques_str = ", ".join(f"`{t}`" for t in getattr(triage_report, "technique_matches", [])) or "None"
+        techniques_str = (
+            ", ".join(f"`{t}`" for t in getattr(triage_report, "technique_matches", [])) or "None"
+        )
 
         verdict_icon = (
-            "🟢" if getattr(triage_report, "verdict", "") == "true_positive"
+            "🟢"
+            if getattr(triage_report, "verdict", "") == "true_positive"
             else ("⚠️" if getattr(triage_report, "verdict", "") == "suspicious" else "⚪")
         )
 
@@ -308,10 +315,12 @@ def record_hunt_execution(
             f"\n\n### Automated Hunt Execution & Finding Triage ({now_iso[:19].replace('T', ' ')} UTC)\n"
             f"- **Target SIEM:** `{target}` | **Outcome:** `{outcome}` | **Matched Events:** `{matched_count}`\n"
             f"- **Triage Verdict:** {verdict_icon} `{getattr(triage_report, 'verdict', 'unknown')}` "
-            f"(Confidence: `{getattr(triage_report, 'confidence', 0.0) * 100:.0f}%`)\n"
+            f"(Uncalibrated score: `{getattr(triage_report, 'confidence', 0.0):.2f}/1`)\n"
             f"- **Executive Summary:** {getattr(triage_report, 'summary', '')}\n"
             f"- **Forensic Rationale:** {getattr(triage_report, 'rationale', '')}\n"
-            f"- **Techniques Confirmed:** {techniques_str}\n"
+            f"- **Candidate Technique Mappings:** {techniques_str}\n"
+            f"- **Reviewed / Returned Events:** {getattr(triage_report, 'reviewed_event_count', 'unknown')} / "
+            f"{getattr(triage_report, 'event_count', 'unknown')} (upstream coverage unverified)\n"
             f"- **Recommended Action:** `{getattr(triage_report, 'recommended_action', 'pivot')}`\n\n"
             f"#### Extracted Security Entities\n"
             f"- **Hosts:** {hosts_str}\n"
@@ -323,13 +332,31 @@ def record_hunt_execution(
         if pivot_results:
             exec_entry += f"\n#### Automated Investigation Pivots ({len(pivot_results)} executed)\n"
             for p in pivot_results:
-                p_type = getattr(p, "pivot_type", "") if hasattr(p, "pivot_type") else p.get("pivot_type", "")
-                p_tech = getattr(p, "technique", "") if hasattr(p, "technique") else p.get("technique", "")
-                p_hits = getattr(p, "matched_count", 0) if hasattr(p, "matched_count") else p.get("matched_count", 0)
+                p_type = (
+                    getattr(p, "pivot_type", "")
+                    if hasattr(p, "pivot_type")
+                    else p.get("pivot_type", "")
+                )
+                p_tech = (
+                    getattr(p, "technique", "")
+                    if hasattr(p, "technique")
+                    else p.get("technique", "")
+                )
+                p_hits = (
+                    getattr(p, "matched_count", 0)
+                    if hasattr(p, "matched_count")
+                    else p.get("matched_count", 0)
+                )
                 p_out = getattr(p, "outcome", "") if hasattr(p, "outcome") else p.get("outcome", "")
-                p_q = getattr(p, "query_text", "") if hasattr(p, "query_text") else p.get("query_text", "")
+                p_q = (
+                    getattr(p, "query_text", "")
+                    if hasattr(p, "query_text")
+                    else p.get("query_text", "")
+                )
                 icon = "⚠️" if p_out == "hits_detected" else ("🟢" if p_out == "clean" else "🚨")
-                exec_entry += f"- {icon} **{p_type}** (`{p_tech}`): `{p_hits}` hits ({p_out}) | `{p_q}`\n"
+                exec_entry += (
+                    f"- {icon} **{p_type}** (`{p_tech}`): `{p_hits}` hits ({p_out}) | `{p_q}`\n"
+                )
     else:
         exec_entry = (
             f"\n\n### Automated Hunt Execution ({now_iso[:19].replace('T', ' ')} UTC)\n"
@@ -350,5 +377,9 @@ def record_hunt_execution(
         "outcome": outcome,
         "matched_count": matched_count,
         "path": str(hunt_path),
-        "triage_report": triage_report.to_dict() if hasattr(triage_report, "to_dict") else None,
+        "triage_report": (
+            triage_report.to_dict()
+            if triage_report is not None and hasattr(triage_report, "to_dict")
+            else None
+        ),
     }

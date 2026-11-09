@@ -147,24 +147,29 @@ class TestGetProvider:
 
 
 class TestSentinelQueryProvider:
-    def test_dry_run_without_credentials(self) -> None:
+    def test_missing_credentials_are_an_error(self) -> None:
         provider = SentinelQueryProvider()
         res = provider.execute(_query())
-        assert res.ok is True
+        assert res.ok is False
         assert res.provider == "sentinel"
         assert res.row_count == 0
-        assert "Validated Sentinel KQL query" in res.detail
+        assert "Missing SENTINEL_WORKSPACE_ID" in res.detail
 
     def test_mocked_live_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import unittest.mock as mock
 
-        monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "test-ws")
+        monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "00000000-0000-0000-0000-000000000001")
         monkeypatch.setenv("SENTINEL_BEARER_TOKEN", "test-token")
 
         fake_resp = mock.MagicMock()
         fake_resp.status_code = 200
         fake_resp.json.return_value = {
-            "tables": [{"rows": [["event1", "cmd.exe"], ["event2", "powershell.exe"]]}]
+            "tables": [
+                {
+                    "name": "PrimaryResult",
+                    "rows": [["event1", "cmd.exe"], ["event2", "powershell.exe"]],
+                }
+            ]
         }
 
         with mock.patch("httpx.Client.post", return_value=fake_resp) as mock_post:
@@ -176,19 +181,20 @@ class TestSentinelQueryProvider:
 
 
 class TestElasticQueryProvider:
-    def test_dry_run_without_credentials(self) -> None:
+    def test_missing_credentials_are_an_error(self) -> None:
         provider = ElasticQueryProvider()
         res = provider.execute(_query())
-        assert res.ok is True
+        assert res.ok is False
         assert res.provider == "elastic"
         assert res.row_count == 0
-        assert "Validated Elastic query" in res.detail
+        assert "Missing ELASTIC_URL" in res.detail
 
     def test_mocked_live_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import unittest.mock as mock
 
         monkeypatch.setenv("ELASTIC_URL", "https://es.local:9200")
         monkeypatch.setenv("ELASTIC_API_KEY", "es-key-123")
+        monkeypatch.setenv("ELASTIC_INDEX", "logs-endpoint-*")
 
         fake_resp = mock.MagicMock()
         fake_resp.status_code = 200
@@ -203,18 +209,20 @@ class TestElasticQueryProvider:
 
 
 class TestCrowdStrikeQueryProvider:
-    def test_dry_run_without_credentials(self) -> None:
+    def test_missing_credentials_are_an_error(self) -> None:
         provider = CrowdStrikeQueryProvider()
         res = provider.execute(_query())
-        assert res.ok is True
+        assert res.ok is False
         assert res.provider == "crowdstrike"
         assert res.row_count == 0
-        assert "Validated Falcon LogScale query" in res.detail
+        assert "Missing FALCON_LOGSCALE_URL" in res.detail
 
     def test_mocked_live_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import unittest.mock as mock
 
         monkeypatch.setenv("FALCON_API_TOKEN", "cs-token-xyz")
+        monkeypatch.setenv("FALCON_LOGSCALE_URL", "https://logs.test")
+        monkeypatch.setenv("FALCON_LOGSCALE_REPO", "endpoint")
 
         fake_resp = mock.MagicMock()
         fake_resp.status_code = 200

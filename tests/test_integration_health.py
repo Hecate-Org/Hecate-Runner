@@ -238,4 +238,6 @@ def test_health_query_credentials_are_redacted_even_with_httpx_debug_logging(
             "HTTP Request: %s", "https://api.shodan.io/api-info?key=do-not-log-this"
         )
     assert "do-not-log-this" not in caplog.text
-    assert "key=[redacted]" in caplog.text
+    # Prefer the typed replacement; accept a whole-query scrub if another
+    # httpx filter already ran earlier in the process.
+    assert ("key=[redacted]" in caplog.text) or ("?REDACTED" in caplog.text)

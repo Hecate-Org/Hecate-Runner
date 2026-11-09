@@ -163,6 +163,68 @@ def test_render_draft_includes_hypothesis(sample_hypothesis: HypothesisResult) -
     assert "[Human to draft based on Observe section" in md
 
 
+def test_render_draft_includes_lab_probe(sample_hypothesis: HypothesisResult) -> None:
+    req = DraftHuntRequest(
+        hunt_id="H-0999",
+        threat_intel="APT actor X observed dumping LSASS.",
+        hypothesis=sample_hypothesis,
+        generated_at=datetime(2026, 7, 4, 22, 0, tzinfo=UTC),
+        lab_probe={
+            "provider": "sentinel",
+            "window_days": 1,
+            "status": "miss",
+            "total_hits": 0,
+            "queries_run": 1,
+            "detail": "1 query, 0 hits in 1d",
+            "results": [
+                {
+                    "query_file": "process.kql",
+                    "provider": "sentinel",
+                    "hits": 0,
+                    "window_days": 1,
+                    "outcome": "miss",
+                    "detail": "Clean sweep",
+                }
+            ],
+        },
+    )
+    md = render_draft(req)
+    assert "lab_probe: miss" in md
+    assert "lab_probe_provider:" in md
+    assert "### Lab query probe" in md
+    assert "`process.kql`" in md
+    assert "| 0 | 1d | `miss` |" in md
+
+
+def test_render_draft_cites_enrichment_outcomes(sample_hypothesis: HypothesisResult) -> None:
+    req = DraftHuntRequest(
+        hunt_id="H-0999",
+        threat_intel="C2 at 45.9.148.10",
+        hypothesis=sample_hypothesis,
+        generated_at=datetime(2026, 7, 4, 22, 0, tzinfo=UTC),
+        enrichment_citations=[
+            {
+                "observable": "45.9.148.10",
+                "kind": "ip",
+                "service": "VirusTotal",
+                "outcome": "flagged",
+                "verdict": "malicious",
+            },
+            {
+                "observable": "45.9.148.10",
+                "kind": "ip",
+                "service": "GreyNoise",
+                "outcome": "missing",
+                "verdict": "",
+            },
+        ],
+    )
+    md = render_draft(req)
+    assert "### Enrichment citations" in md
+    assert "**corroborated** by VirusTotal (malicious)" in md
+    assert "No record: GreyNoise." in md
+
+
 def test_render_draft_includes_research_link_when_present(
     sample_hypothesis: HypothesisResult,
 ) -> None:
@@ -330,14 +392,20 @@ def test_short_title_leaves_short_hypothesis_untouched() -> None:
 
 def test_short_title_ends_at_a_clause_when_one_fits() -> None:
     """H-0025's title read "...flows via port 1880 to execute..."."""
-    assert _short_title(
-        "Adversaries use unauthenticated deployment of malicious Node-RED flows via port 1880 "
-        "to execute arbitrary root commands on SIMATIC IoT2050 devices."
-    ) == "Adversaries use unauthenticated deployment of malicious Node-RED flows via port 1880"
-    assert _short_title(
-        "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures "
-        "on high-value cloud tenants via supply chain compromise"
-    ) == "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures on high-value cloud tenants"
+    assert (
+        _short_title(
+            "Adversaries use unauthenticated deployment of malicious Node-RED flows via port 1880 "
+            "to execute arbitrary root commands on SIMATIC IoT2050 devices."
+        )
+        == "Adversaries use unauthenticated deployment of malicious Node-RED flows via port 1880"
+    )
+    assert (
+        _short_title(
+            "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures "
+            "on high-value cloud tenants via supply chain compromise"
+        )
+        == "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures on high-value cloud tenants"
+    )
 
 
 def test_short_title_truncates_on_word_boundary_with_ellipsis() -> None:
@@ -939,3 +1007,50 @@ def test_the_role_table_lists_the_log_sources_the_rules_actually_use(
     assert rows["45[.]153[.]212[.]101"] == "webserver, network_connection"
     assert rows["209[.]141[.]43[.]95"] == "network_connection on 80"
     assert rows["/vpn/index[.]html"].startswith("none:")
+
+
+def test_render_draft_filters_reference_urls_from_indicator_table(
+    sample_hypothesis: HypothesisResult,
+) -> None:
+    req = DraftHuntRequest(
+        hunt_id="H-0999",
+        threat_intel="test intel",
+        hypothesis=sample_hypothesis,
+        generated_at=datetime(2026, 7, 4, tzinfo=UTC),
+        source_url="https://security.paloaltonetworks.com/CVE-2024-3400",
+        source_evidence={"url": "https://security.paloaltonetworks.com/CVE-2024-3400", "chars": 1000},
+        indicator_records=[
+            {
+                "value": "hxxps://www[.]cve[.]org/CVERecord?id=CVE-2024-3400",
+                "type": "url",
+                "role": "unknown",
+                "status": "active",
+            },
+            {
+                "value": "https://www.first.org/cvss/calculator/4.0#...",
+                "type": "url",
+                "role": "unknown",
+                "status": "active",
+            },
+            {
+                "value": "https://security.paloaltonetworks.com/CVE-2024-3400",
+                "type": "url",
+                "role": "unknown",
+                "status": "active",
+            },
+            {
+                "value": "198.51.100.7",
+                "type": "ipv4",
+                "role": "c2",
+                "status": "active",
+            },
+        ],
+    )
+    md = render_draft(req)
+    # Reference URLs must not appear in the Indicators by role table
+    assert "cve.org" not in md
+    assert "first.org" not in md
+    # Threat observable must be present in the Indicators by role table
+    assert "198.51.100.7" in md or "198[.]51[.]100[.]7" in md
+
+

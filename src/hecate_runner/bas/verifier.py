@@ -192,7 +192,9 @@ class DetectionVerifier:
             try:
                 from hecate_runner.bas.forwarder import forward_events_to_splunk
 
-                forwarded_count = forward_events_to_splunk(events_to_evaluate)
+                forwarded_count = forward_events_to_splunk(
+                    events_to_evaluate, workspace=self.workspace
+                )
                 if forwarded_count > 0:
                     notes.append(
                         f"Forwarded {forwarded_count} sensor event(s) to live {self.query_provider.name.upper()} index."

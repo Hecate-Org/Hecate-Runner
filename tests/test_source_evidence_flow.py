@@ -138,6 +138,53 @@ def test_a_failed_fetch_drafts_from_the_feed_as_before(
     mock_hecate.indicator_records.assert_not_called()
 
 
+def test_source_deadline_covers_both_phases_and_falls_back_cleanly(
+    settings: Settings, evidence_hecate: MagicMock
+) -> None:
+    settings.llm_timeout_sec = 30
+    evidence_hecate.source_evidence_with_indicators.side_effect = TimeoutError("stage timed out")
+    result = _run(settings, evidence_hecate)
+    evidence_hecate.source_evidence_with_indicators.assert_called_once_with(
+        REPORT, ITEM.metadata["indicators"], timeout_sec=30
+    )
+    assert result.outcome == "draft_created"
+    assert evidence_hecate.research_new.call_args.kwargs["source_context"] == ITEM.content
+    assert evidence_hecate.sigma_generator.call_args.args[0]["indicator_records"] == []
+    evidence_hecate.source_evidence.assert_not_called()
+    evidence_hecate.indicator_records.assert_not_called()
+
+
+def test_chunk_metrics_and_zero_call_cache_usage_are_persisted(settings, evidence_hecate):
+    import json
+    from dataclasses import replace
+
+    details = {
+        "cache_hits": 1,
+        "model_calls": 0,
+        "budget_exhausted": False,
+        "attempts": [
+            {
+                "phase": "extraction",
+                "chunk": 0,
+                "retry_depth": 0,
+                "duration_ms": 2,
+                "cache_hit": True,
+                "status": "cached",
+            }
+        ],
+    }
+    evidence_hecate.source_evidence.return_value = replace(
+        EVIDENCE, extraction_metrics=details, usage={}
+    )
+    _run(settings, evidence_hecate)
+    cycle = json.loads(settings.metrics_file.read_text().splitlines()[-1])
+    stage = next(row for row in cycle["stages"] if row["stage"] == "source_evidence")
+    assert stage["details"] == details
+    assert stage["llm_calls"] == 0
+    assert stage["input_tokens"] == stage["output_tokens"] == 0
+    assert stage["estimated_cost_usd"] == 0.0
+
+
 def test_the_step_can_be_turned_off(settings: Settings, evidence_hecate: MagicMock) -> None:
     settings.source_evidence_enabled = False
     _run(settings, evidence_hecate)

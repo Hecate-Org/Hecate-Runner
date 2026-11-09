@@ -19,7 +19,7 @@ from hecate_runner.digests import (
     collect_threat_hunting_metrics,
     collect_threat_intel_metrics,
 )
-from hecate_runner.metrics import MetricsStore
+from hecate_runner.metrics import MetricsStore, format_count, format_usd
 from hecate_runner.notifications import (
     notify_detection_digest,
     notify_ops_metrics,
@@ -185,23 +185,24 @@ def ops_digest(
     ] = True,
     days: Annotated[
         int,
-        typer.Option("--days", "-d", help="Number of past days to summarize."),
-    ] = 7,
+        typer.Option("--days", "-d", min=1, help="Number of past days to summarize."),
+    ] = 1,
 ) -> None:
     """Generate and optionally post an executive operational and cost metrics digest."""
     settings = _get_settings()
     store = MetricsStore(settings.metrics_file)
     metrics_summary = store.summary(days=days)
+    metrics_summary["daily_budget_usd"] = settings.daily_budget_usd
 
     table = Table(title=f"Hecate SecOps Operational Digest ({days}-Day Summary)", box=box.ROUNDED)
     table.add_column("Metric", style="dim")
     table.add_column("Value", style="bold cyan")
 
     table.add_row("Total Pipeline Cycles", str(metrics_summary["completed_cycles"]))
-    table.add_row("Estimated Spend", f"${metrics_summary['total_cost_usd']:.2f}")
-    table.add_row("Total LLM Calls", f"{metrics_summary['total_llm_calls']:,}")
-    table.add_row("Total Prompt Tokens", f"{metrics_summary['total_input_tokens']:,}")
-    table.add_row("Total Completion Tokens", f"{metrics_summary['total_output_tokens']:,}")
+    table.add_row("Estimated Spend", format_usd(metrics_summary["total_cost_usd"]))
+    table.add_row("Total LLM Calls", format_count(metrics_summary["total_llm_calls"]))
+    table.add_row("Total Prompt Tokens", format_count(metrics_summary["total_input_tokens"]))
+    table.add_row("Total Completion Tokens", format_count(metrics_summary["total_output_tokens"]))
     console.print(table)
 
     if metrics_summary["stages"]:
@@ -213,14 +214,14 @@ def ops_digest(
         stage_table.add_column("Cost (USD)", justify="right", style="green")
 
         for stage, data in sorted(
-            metrics_summary["stages"].items(), key=lambda x: x[1]["cost_usd"], reverse=True
+            metrics_summary["stages"].items(), key=lambda x: x[1]["cost_usd"] or 0, reverse=True
         ):
             stage_table.add_row(
                 stage,
-                f"{data['calls']:,}",
-                f"{data['input_tokens']:,}",
-                f"{data['output_tokens']:,}",
-                f"${data['cost_usd']:.4f}",
+                format_count(data["calls"]),
+                format_count(data["input_tokens"]),
+                format_count(data["output_tokens"]),
+                format_usd(data["cost_usd"], 4),
             )
         console.print(stage_table)
 
@@ -230,7 +231,10 @@ def ops_digest(
             return
         target = channel or settings.slack_channel_ops_metrics
         console.print(f"[dim]Posting visual ops digest to {target}...[/dim]")
-        notify_ops_metrics(settings, metrics_summary, channel=target)
+        success, detail = notify_ops_metrics(settings, metrics_summary, channel=target)
+        if not success:
+            console.print(f"[red]Ops digest delivery failed: {detail}[/red]")
+            raise typer.Exit(code=1)
         console.print(f"[green]✓ Ops digest posted to {target} successfully.[/green]")
 
 

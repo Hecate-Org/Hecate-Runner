@@ -172,9 +172,8 @@ class Settings(BaseSettings):
             "research_depth's own ceiling (advanced: ~15-20 min) or `hecate "
             "research new` gets killed mid-run and the cycle refunds its quota "
             "instead of producing a draft. 1500s (25 min) leaves headroom above "
-            "advanced depth's stated ceiling; the systemd unit's own "
-            "TimeoutStartSec must be raised to match (see systemd/"
-            "hecate-runner-orchestrator.service) since that's an outer, harder cap. "
+            "advanced depth's stated ceiling. The resident daemon schedules "
+            "cycles without a separate oneshot systemd deadline. "
             "Primary-source fetching, extraction and indicator classification share "
             "one hard deadline of this length."
         ),
@@ -300,11 +299,16 @@ class Settings(BaseSettings):
         description="Simulate query deployment in dry-run mode without mutating remote SIEM/EDR state.",
     )
     maintenance_interval_sec: int = Field(
-        default=60, ge=1, alias="HECATE_RUNNER_MAINTENANCE_INTERVAL_SEC",
+        default=60,
+        ge=1,
+        alias="HECATE_RUNNER_MAINTENANCE_INTERVAL_SEC",
         description="Seconds between bounded GitHub/MISP outbox batches and drift-alert delivery batches.",
     )
     maintenance_job_timeout_sec: int = Field(
-        default=900, ge=1, le=3600, alias="HECATE_RUNNER_MAINTENANCE_JOB_TIMEOUT_SEC",
+        default=900,
+        ge=1,
+        le=3600,
+        alias="HECATE_RUNNER_MAINTENANCE_JOB_TIMEOUT_SEC",
         description="Hard deadline for an independent maintenance job; timeout kills its process group and backs off.",
     )
     siem_drift_audit_interval_sec: int = Field(
@@ -434,21 +438,26 @@ class Settings(BaseSettings):
         ),
     )
     source_evidence_max_calls: int = Field(
-        default=16, ge=1, le=100,
+        default=16,
+        ge=1,
+        le=100,
         alias="HECATE_RUNNER_SOURCE_EVIDENCE_MAX_CALLS",
         description="Shared source extraction/recovery/classification model-call limit; cache hits use no calls.",
     )
     source_evidence_max_tokens: int = Field(
-        default=256000, ge=1,
+        default=256000,
+        ge=1,
         alias="HECATE_RUNNER_SOURCE_EVIDENCE_MAX_TOKENS",
         description="Conservative UTF-8 prompt reservations plus capped output across the source stage; separate from billed token usage.",
     )
     source_evidence_cache_enabled: bool = Field(
-        default=True, alias="HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED",
+        default=True,
+        alias="HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED",
         description="Reuse verified source responses when content, prompts, extractor version and model settings match.",
     )
     source_evidence_cache_ttl_sec: int = Field(
-        default=86400, ge=0,
+        default=86400,
+        ge=0,
         alias="HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_TTL_SEC",
         description="Maximum extraction-cache age in seconds; zero disables caching.",
     )
@@ -1258,14 +1267,26 @@ class Settings(BaseSettings):
         description="Backend for approved queries: mock, Splunk, Sentinel KQL, Elastic EQL, or LogScale CQL.",
     )
     query_sentinel_workspace_id: str | None = Field(default=None, alias="SENTINEL_WORKSPACE_ID")
-    query_sentinel_token: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("SENTINEL_BEARER_TOKEN", "AZURE_ACCESS_TOKEN"))
+    query_sentinel_token: str | None = Field(
+        default=None,
+        repr=False,
+        validation_alias=AliasChoices("SENTINEL_BEARER_TOKEN", "AZURE_ACCESS_TOKEN"),
+    )
     query_elastic_url: str | None = Field(default=None, alias="ELASTIC_URL")
     query_elastic_api_key: str | None = Field(default=None, repr=False, alias="ELASTIC_API_KEY")
     query_elastic_index: str | None = Field(default=None, alias="ELASTIC_INDEX")
     query_elastic_timestamp_field: str | None = Field(default=None, alias="ELASTIC_TIMESTAMP_FIELD")
-    query_logscale_url: str | None = Field(default=None, validation_alias=AliasChoices("FALCON_LOGSCALE_URL", "FALCON_BASE_URL"))
+    query_logscale_url: str | None = Field(
+        default=None, validation_alias=AliasChoices("FALCON_LOGSCALE_URL", "FALCON_BASE_URL")
+    )
     query_logscale_repo: str | None = Field(default=None, alias="FALCON_LOGSCALE_REPO")
-    query_logscale_token: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("FALCON_LOGSCALE_TOKEN", "FALCON_API_TOKEN", "FALCON_BEARER_TOKEN"))
+    query_logscale_token: str | None = Field(
+        default=None,
+        repr=False,
+        validation_alias=AliasChoices(
+            "FALCON_LOGSCALE_TOKEN", "FALCON_API_TOKEN", "FALCON_BEARER_TOKEN"
+        ),
+    )
 
     def query_provider_env(self) -> dict[str, str]:
         """Resolved query configuration, including local dotenv and init overrides."""
@@ -1619,7 +1640,9 @@ class Settings(BaseSettings):
             "HECATE_LLM_CALL_LOG": str(self.llm_calls_file),
             "HECATE_RUNNER_SOURCE_EVIDENCE_MAX_CALLS": str(self.source_evidence_max_calls),
             "HECATE_RUNNER_SOURCE_EVIDENCE_MAX_TOKENS": str(self.source_evidence_max_tokens),
-            "HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED": str(self.source_evidence_cache_enabled).lower(),
+            "HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED": str(
+                self.source_evidence_cache_enabled
+            ).lower(),
             "HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_TTL_SEC": str(self.source_evidence_cache_ttl_sec),
         }
         if self.hecate_llm_provider:

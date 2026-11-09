@@ -50,27 +50,35 @@ Hecate-Runner/
 │   ├── bas/                     # Breach & Attack Simulation (CALDERA, Stratus, Mock, Verifier)
 │   ├── correlation.py           # Campaign clustering & incremental hunt updater
 │   ├── cti/                     # 20+ CTI feed providers (OTX, MISP, RSS, KEV, AnyRun...)
-│   ├── orchestrator.py          # Central autonomous worker loop & queue manager
+│   ├── orchestrator.py          # Central autonomous coordinator loop & factory
+│   ├── orchestrator_intake.py   # CTI feed polling, dedup, and dead-letter retry/quarantine
+│   ├── orchestrator_grounding.py # Primary evidence collection & claim auditing
+│   ├── orchestrator_rules.py    # Multi-pass Sigma generation, gap synthesis & SIEM deployment
+│   ├── orchestrator_publishing.py # GitHub and MISP outbox enqueuing & notifications
 │   ├── purple_team.py           # Adversary emulation & synthetic telemetry replay
 │   ├── rule_tuner.py            # Automated reviewer self-remediation feedback loop
 │   ├── indicator_sweep.py       # Zero-token deterministic sweep engine
 │   ├── github_publisher.py      # Durable SQLite outbox & GitHub PR publisher
+│   ├── misp_publisher.py        # MISP event & attribute publisher
 │   ├── slack_bot.py             # Interactive Slack Bot with Block Kit UI
 │   ├── hunt_writer.py           # Atomic LOCK markdown and Sigma YAML writer
 │   ├── config.py                # Environment and quota configuration
 │   └── cli.py                   # Typer CLI entrypoint (`hecate-runner`)
 ├── systemd/                     # Systemd service unit files
 │   ├── hecate-runner-daemon.service    # Resident event-driven worker daemon
-│   └── hecate-runner-slack-bot.service  # Interactive Slack bot service
+│   ├── hecate-runner-maintenance.service # Independent publishing, audits & alerts
+│   ├── hecate-slack-bot.service        # Interactive Slack bot (user service)
+│   └── caldera-sandcat.service         # Isolated BAS agent (user service)
 ├── docs/                        # Complete technical documentation
 │   ├── ONBOARDING.md            # Step-by-step developer onboarding guide
 │   ├── ARCHITECTURE.md          # 3-repo architecture blueprint & data flow
 │   ├── FEATURES.md              # Exhaustive feature matrix and subsystem details
 │   ├── BAS_SAFETY_AUDIT.md      # Safety guarantees & lab isolation boundaries
 │   ├── CHALLENGES.md            # Technical challenges solved (hallucinations, token quotas)
-│   └── HOW_TO.md                # Developer recipes & step-by-step guides
+│   ├── HOW_TO.md                # Developer recipes & step-by-step guides
+│   └── COMMUNITY_RELEASES.md    # Community release guidelines and controls
 ├── scripts/                     # Operational scripts (systemd installer, lab setup)
-└── tests/                       # 1,100+ unit and integration tests
+└── tests/                       # 1,360+ unit and integration tests
 ```
 
 ---
@@ -187,17 +195,18 @@ uv run hecate-runner daemon --interval 60
 Hecate-Runner includes a production-grade systemd service unit:
 
 ```bash
-# Install user systemd service
-./scripts/install-systemd.sh
+# Install system services (review workspace paths in systemd/ first)
+sudo ./scripts/install-systemd.sh
 
-# Start daemon
-systemctl --user start hecate-runner-daemon.service
+# Start independent maintenance and the hunting daemon
+sudo systemctl enable --now hecate-runner-maintenance.service
+sudo systemctl start hecate-runner-daemon.service
 
 # Inspect live status
-systemctl --user status hecate-runner-daemon.service
+sudo systemctl status hecate-runner-daemon.service hecate-runner-maintenance.service
 
 # View streaming journal logs
-journalctl --user -u hecate-runner-daemon.service -f
+sudo journalctl -u hecate-runner-daemon.service -f
 ```
 
 ### Running Interactively in Foreground
@@ -206,6 +215,9 @@ For local development, testing, or debugging:
 ```bash
 # Run daemon continuously with a 60-second polling interval
 uv run hecate-runner daemon --interval 60
+
+# In a separate terminal: publishing, SIEM audits, and queued drift alerts
+uv run hecate-runner maintenance
 
 # Run a single cycle against active feeds
 uv run hecate-runner run
@@ -262,15 +274,43 @@ uv run hecate-runner slack-bot
 
 ---
 
+## 🔍 Structured CTI Sources & Health Monitoring
+
+Enable or disable individual threat sources via `hecate-runner sources enable <name>`. Sources poll periodically, compare immutable revisions, and queue changed entries durably:
+
+| Provider | Intake & Enrichment Scope |
+| :--- | :--- |
+| `lolbas` | [LOLBAS](https://github.com/LOLBAS-Project/LOLBAS) YAML procedures, including decoded commands, ATT&CK IDs, and binary enrichment. |
+| `loldrivers` | [LOLDrivers](https://github.com/magicsword-io/LOLDrivers) driver entries and vulnerable hashes via daily snapshot cache. |
+| `gtfobins` | [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io) Unix binary commands, functions, and privilege contexts. |
+| `nuclei` | [Nuclei HTTP templates](https://github.com/projectdiscovery/nuclei-templates), prioritized beside KEV with live EPSS score gating (`min_epss=0.5`). |
+| `cisa_advisories` | Official [CISA advisory feed](https://www.cisa.gov/cybersecurity-advisories/all.xml) with article retrieval for AA/CSA reports and CSAF IT deltas. |
+| `cisa_ics` | CISA CSAF Industrial Control Systems (OT) advisories, mapping legacy TLP:WHITE to TLP:CLEAR. |
+| `attack_deltas` | Monthly pinned [MITRE ATT&CK STIX](https://github.com/mitre-attack/attack-stix-data) deltas, queuing changed techniques for uncovered TTPs. |
+
+- **Health Verification:** `hecate-runner sources check` performs read-only connectivity and schema checks without advancing cursors. The daemon refreshes health status hourly.
+- **Evidence Boundaries:** Catalog and template definitions represent reference capabilities rather than observed intrusions; placeholders are strictly excluded from incident IOC extraction.
+
+---
+
+## 📦 Reviewed Community Releases
+
+Hecate supports vetted community detection packaging via `hecate-runner release build` and isolated verification via `hecate-runner release verify`.
+- **Review Gate:** Public hunt snapshots remain in `awaiting_review` in the local outbox until approved via `hecate-runner publish-review <ID> --approve` with verified privacy and license checks.
+- **Isolation:** Private archives, sessions, and operational traces are strictly excluded from exported release bundles. See [the community release guide](docs/COMMUNITY_RELEASES.md) for details.
+
+---
+
 ## 🧪 Testing & Verification
 
-The entire 850+ test suite runs offline with complete mocks:
+The complete 1,360+ test suite runs offline with deterministic mocks:
 
 ```bash
 # Run full test suite
 uv run pytest -q
 
 # Run specific subsystem tests
+uv run pytest tests/test_orchestrator.py
 uv run pytest tests/test_purple_team_pipeline.py
 uv run pytest tests/test_cti_multi.py
 uv run pytest tests/test_daemon.py
@@ -280,76 +320,14 @@ uv run pytest tests/test_daemon.py
 
 ## 📚 Complete Documentation
 
-- **[System Architecture](docs/ARCHITECTURE.md)**: Three-repository design, lifecycle diagrams, and agent graphs.
-- **[Feature Reference](docs/FEATURES.md)**: Exhaustive breakdown of ingestion, dual-track scheduling, and evaluation.
-- **[Engineering Challenges](docs/CHALLENGES.md)**: Deep dive into hallucination defense, token economics, and telemetry synthesis.
-- **[Developer How-To Guides](docs/HOW_TO.md)**: Step-by-step recipes for adding CTI feeds, SIEM targets, and local evals.
+- **[System Architecture](docs/ARCHITECTURE.md)**: 3-repo design, lifecycle diagrams, and pipeline stage mixins.
+- **[Feature Reference](docs/FEATURES.md)**: Breakdown of CTI ingestion, dual-track scheduling, and evaluation.
+- **[Engineering Challenges](docs/CHALLENGES.md)**: Hallucination defense, token economics, and telemetry synthesis.
+- **[Developer How-To Guides](docs/HOW_TO.md)**: Step-by-step recipes for CTI feeds, SIEM targets, and local evals.
+- **[Adversary Emulation & BAS](docs/BAS_AUTOMATION.md)**: Approved Linux lab procedures and isolation controls.
 
 ---
 
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.
-
-
-## Structured CTI sources and confirmed health
-
-Enable sources with `hecate-runner sources enable <name>`. Public repository
-sources use `GITHUB_TOKEN` when configured for higher API rate limits. They poll
-hourly, compare immutable blob revisions, and queue changed entries durably.
-First use establishes a baseline; it does not backfill the entire catalog. An
-acknowledgment consumes one entry, while fetch/schema/rate-limit failures retain
-pending work. At most ten filtered entries are examined per poll.
-
-| Provider | Intake and enrichment |
-| --- | --- |
-| `lolbas` | Changed [LOLBAS](https://github.com/LOLBAS-Project/LOLBAS) YAML procedures, including exact decoded command strings and ATT&CK IDs; named binary enrichment. |
-| `loldrivers` | Changed [LOLDrivers](https://github.com/magicsword-io/LOLDrivers) entries and vulnerable sample hashes; hash lookup against the official JSON API with a daily cache and snapshot digest. |
-| `gtfobins` | Changed [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io) YAML entries (including extensionless files), function commands and privilege contexts; named binary enrichment. |
-| `nuclei` | Changed HTTP CVE [templates](https://github.com/projectdiscovery/nuclei-templates), in priority tier 1 beside KEV. Requires live KEV membership or FIRST EPSS at the configured `HECATE_RUNNER_FIRST_ORG_MIN_EPSS` and `HECATE_RUNNER_FIRST_ORG_MIN_PERCENTILE` thresholds (defaults 0.5 and 0.85). Embedded template EPSS scores do not authorize intake. FIRST scores older than three days, malformed responses and API outages defer processing. |
-| `cisa_advisories` | Dedicated [CISA advisory feed](https://www.cisa.gov/cybersecurity-advisories/all.xml) with a browser user agent and full article retrieval for narrative AA/CSA reports; independent official [CISA CSAF IT](https://github.com/cisagov/CSAF) deltas. A failed narrative channel remains red even when CSAF works. |
-| `cisa_ics` | Official CISA CSAF OT advisories, preserving notes, CVEs, versions and original documents. Legacy TLP:WHITE maps explicitly to TLP:CLEAR. |
-| `attack_deltas` | Monthly commit-pinned [MITRE ATT&CK STIX](https://github.com/mitre-attack/attack-stix-data) enterprise and ICS deltas. Changed techniques and procedure examples become deep-track items only for techniques without a non-archived hunt. Timestamp/version-only changes and revoked/deprecated objects are ignored; pending items are checked again against current coverage. |
-
-Catalogs, Nuclei and ATT&CK deltas use the deep research route. Catalog and template
-examples are reference capabilities, never claims of an observed intrusion.
-Their domains and placeholders are excluded from incident IOC extraction and
-secondary OSINT queries. Catalog enrichments remain background context, separate
-from primary incident evidence; disable them with
-`HECATE_RUNNER_CATALOG_ENRICHMENT_ENABLED=false`.
-
-Structured primary sources retain exact source text and revision. Catalog command
-values produce deterministic reference candidates only when they include a
-specific argument. Nuclei retains method, path, headers, body, raw requests,
-extractors and response matchers separately. Concrete request methods/URIs produce
-Sigma candidates and source-based replay events without inferred methods or
-invented matcher values. Template DSL, variables, scanner callbacks and fetched
-commands are never executed. Unresolved paths, request bodies and custom headers
-remain in the source for analyst mapping; they are not silently translated into
-unavailable web-log fields. HTTP KQL requires a real deployed table mapping;
-unsupported target conversions retain explicit rejection reasons.
-
-`hecate-runner sources check` performs read-only connectivity/schema checks and
-writes local health records under `.hecate/integrations/`; it neither advances CTI
-cursors nor creates hunts. The daemon refreshes these checks hourly in a background
-thread. The monitor shows **green only for enabled integrations confirmed within
-the past two hours**. Failed, disabled, unconfigured, stale and unconfirmed
-integrations are **red**, and disabled integrations remain visible in the grid.
-CISA narrative and CSAF health are shown separately. An unconfigured OpenCTI
-instance is unconfirmed, even though the existing provider has a test-data fallback.
-
-Intentionally filtered Nuclei entries retain the last 200 decisions, with reasons
-and pinned source revisions, in `.hecate/source-decisions/nuclei.json`. Cursors,
-health records and catalog caches are runtime state, not content to commit.
-`hecate-runner sources reset <name>` resets delta sources to a fresh baseline on
-their next poll. Restart the daemon and reopen the monitor after installing an
-update so both processes load the new code and configuration.
-
-## Reviewed community releases
-
-Use `hecate-runner release build` for the explicit original-content catalog and
-`release verify` for its existing isolated BAS controls. Public hunt snapshots
-now remain private in `awaiting_review` until `publish-review` records an exact
-privacy/redistribution approval; the separate GitHub quality gate still applies.
-See [the community release guide](docs/COMMUNITY_RELEASES.md). Private MISP output
-keeps its organization-only, unpublished, non-IDS defaults.

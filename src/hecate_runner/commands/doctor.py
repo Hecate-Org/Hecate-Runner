@@ -197,6 +197,21 @@ def doctor(
             "Set both in the Hecate workspace .env — see `hecate-agent splunk test` to verify connectivity "
             "before running `hecate-runner approve` against it.",
         )
+    elif settings.query_provider != "mock":
+        from hecate_runner.query_execution import get_provider
+
+        provider = get_provider(
+            settings.query_provider,
+            workspace=settings.hecate_workspace,
+            env_overrides=settings.query_provider_env(),
+        )
+        errors = provider.configuration_errors()
+        check(
+            not errors,
+            f"Configuration for live query provider '{settings.query_provider}'",
+            "; ".join(errors)
+            or "Configuration is present; live connectivity is not tested by doctor.",
+        )
     else:
         checks.append(
             {
@@ -209,7 +224,7 @@ def doctor(
         if not json_output:
             console.print(
                 f"[dim]i Query provider is '{settings.query_provider}' — `hecate-runner approve` cannot touch a real "
-                "system yet. Set HECATE_RUNNER_QUERY_PROVIDER=splunk once real access exists.[/dim]"
+                "system yet. Select a live query provider once real access exists.[/dim]"
             )
 
     if json_output:

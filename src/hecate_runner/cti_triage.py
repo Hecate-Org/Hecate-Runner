@@ -140,7 +140,9 @@ def _has_indicators(item: CTIItem) -> bool:
 def _names_an_intrusion(title: str) -> bool:
     if _ACTOR_RE.search(title) or _C2_NAME_RE.search(title):
         return True
-    return any(match.group(1).lower() not in _FAMILY_STOPWORDS for match in _FAMILY_RE.finditer(title))
+    return any(
+        match.group(1).lower() not in _FAMILY_STOPWORDS for match in _FAMILY_RE.finditer(title)
+    )
 
 
 def _has_specific_intrusion(item: CTIItem) -> bool:

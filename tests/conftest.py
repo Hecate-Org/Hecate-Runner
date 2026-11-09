@@ -38,16 +38,31 @@ def workspace(tmp_path: Path) -> Path:
 
 
 _ENV_VARS_TO_ISOLATE = (
-    "SENTINEL_WORKSPACE_ID", "SENTINEL_BEARER_TOKEN", "AZURE_ACCESS_TOKEN",
-    "ELASTIC_URL", "ELASTIC_API_KEY", "ELASTIC_INDEX", "ELASTIC_TIMESTAMP_FIELD",
-    "FALCON_LOGSCALE_URL", "FALCON_BASE_URL", "FALCON_LOGSCALE_REPO",
-    "FALCON_LOGSCALE_TOKEN", "FALCON_API_TOKEN", "FALCON_BEARER_TOKEN",
+    "SENTINEL_WORKSPACE_ID",
+    "SENTINEL_BEARER_TOKEN",
+    "AZURE_ACCESS_TOKEN",
+    "ELASTIC_URL",
+    "ELASTIC_API_KEY",
+    "ELASTIC_INDEX",
+    "ELASTIC_TIMESTAMP_FIELD",
+    "FALCON_LOGSCALE_URL",
+    "FALCON_BASE_URL",
+    "FALCON_LOGSCALE_REPO",
+    "FALCON_LOGSCALE_TOKEN",
+    "FALCON_API_TOKEN",
+    "FALCON_BEARER_TOKEN",
     "HECATE_RUNNER_QUERY_PROVIDER",
-
     "HECATE_WORKSPACE",
+    "HECATE_HUNTING_KNOWLEDGE",
     "HECATE_BIN",
     "HECATE_LLM_PROVIDER",
     "HECATE_LLM_MODEL",
+    "HECATE_LLM_SIMPLE_PROVIDER",
+    "HECATE_LLM_SIMPLE_MODEL",
+    "HECATE_LLM_SIMPLE_BASE_URL",
+    "HECATE_LLM_COMPLEX_PROVIDER",
+    "HECATE_LLM_COMPLEX_MODEL",
+    "HECATE_LLM_COMPLEX_BASE_URL",
     "HECATE_RUNNER_MAX_DRAFTS_PER_DAY",
     "HECATE_RUNNER_MAX_RESEARCH_RUNS_PER_DAY",
     "HECATE_RUNNER_MIN_HOURS_BETWEEN_DRAFTS",
@@ -243,6 +258,13 @@ def mock_hecate(
         url=url, error="source fetch not configured in this test"
     )
     mock.indicator_records.return_value = []
+
+    def collect_source(url, indicators, *, timeout_sec):
+        evidence = mock.source_evidence(url)
+        records = mock.indicator_records(indicators, evidence) if evidence.text else []
+        return evidence, records
+
+    mock.source_evidence_with_indicators.side_effect = collect_source
     return mock
 
 

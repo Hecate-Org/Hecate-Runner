@@ -1,13 +1,11 @@
 [Unit]
-Description=hecate-runner-slack-bot - Hecate interactive Slack bot daemon
+Description=Hecate SecOps Slack Bot (Socket Mode, user service)
 Documentation=https://github.com/BrizoSec/Hecate-Runner
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=chemch
-Group=chemch
 WorkingDirectory=/home/chemch/betas/Hecate-Runner
 
 # Read env from the workspace .env (single canonical source of truth), with optional runner-local override.
@@ -23,11 +21,8 @@ RestartSec=10s
 StandardOutput=append:/home/chemch/betas/Hecate-Core/logs/slack_bot.log
 StandardError=append:/home/chemch/betas/Hecate-Core/logs/slack_bot.log
 
-# Light hardening — bot needs to read/write the Hecate workspace for queries & rules
+# User service: install under ~/.config/systemd/user/ and manage with --user.
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/home/chemch/betas/Hecate-Core /home/chemch/betas/Hecate-Runner /home/chemch/betas/Hecate-Workspace
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

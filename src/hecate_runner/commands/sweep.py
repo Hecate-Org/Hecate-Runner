@@ -25,7 +25,9 @@ sweep_app = typer.Typer(
 
 @sweep_app.command("list")
 def sweep_list(
-    force: Annotated[bool, typer.Option("--force", "-f", help="Show all active hunts regardless of cadence")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Show all active hunts regardless of cadence")
+    ] = False,
 ) -> None:
     """List active hunts, target SIEM queries, execution watermarks, and sweep eligibility."""
     settings = Settings()
@@ -33,7 +35,9 @@ def sweep_list(
     active = scheduler.discover_active_hunts()
 
     if not active:
-        console.print("[yellow]No active hunts found with transpiled queries in workspace.[/yellow]")
+        console.print(
+            "[yellow]No active hunts found with transpiled queries in workspace.[/yellow]"
+        )
         return
 
     table = Table(
@@ -110,8 +114,12 @@ def sweep_pending() -> None:
 
 @sweep_app.command("stage")
 def sweep_stage(
-    hunt_id: Annotated[str | None, typer.Option("--hunt-id", "-h", help="Stage sweep for a specific hunt only")] = None,
-    force: Annotated[bool, typer.Option("--force", "-f", help="Stage sweep regardless of scheduled cadence")] = False,
+    hunt_id: Annotated[
+        str | None, typer.Option("--hunt-id", "-h", help="Stage sweep for a specific hunt only")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Stage sweep regardless of scheduled cadence")
+    ] = False,
     days: Annotated[int, typer.Option("--days", "-d", help="Lookback window in days")] = 1,
 ) -> None:
     """Stage scheduled sweeps for eligible active hunts (generates approval cards)."""
@@ -120,7 +128,9 @@ def sweep_stage(
     staged = scheduler.stage_sweeps(hunt_id=hunt_id, force=force, time_range_days=days)
 
     if not staged:
-        console.print("[yellow]No eligible hunts to stage. Use --force to stage immediately.[/yellow]")
+        console.print(
+            "[yellow]No eligible hunts to stage. Use --force to stage immediately.[/yellow]"
+        )
         return
 
     console.print(f"[green]✓[/green] Staged {len(staged)} hunt sweep(s) for approval:")
@@ -136,7 +146,9 @@ def sweep_stage(
 
 @sweep_app.command("approve")
 def sweep_approve(
-    sweep_id_or_hunt_id: Annotated[str, typer.Argument(help="Sweep ID (SWEEP-...) or Hunt ID (H-...)")],
+    sweep_id_or_hunt_id: Annotated[
+        str, typer.Argument(help="Sweep ID (SWEEP-...) or Hunt ID (H-...)")
+    ],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
 ) -> None:
     """Execute a staged sweep through the COUNT-FIRST Safe Execution Gate."""
@@ -165,14 +177,18 @@ def sweep_approve(
     res = scheduler.execute_sweep(staged.sweep_id, approver="cli:analyst")
 
     if res.outcome == "clean":
-        console.print(f"[green]✓ Clean Sweep![/green] 0 events matched on {res.target}.")
+        console.print(
+            f"[cyan]Not observed:[/cyan] 0 events matched on {res.target} within the tested scope."
+        )
     elif res.outcome == "hits_detected":
         console.print(
             f"[yellow]⚠️ Telemetry Hits Detected![/yellow] {res.matched_count} event(s) matched on {res.target}."
         )
         if res.triage_report:
             t = res.triage_report
-            console.print(f"  • [bold]Triage Verdict:[/bold] {t.verdict} ({t.confidence*100:.0f}% confidence)")
+            console.print(
+                f"  • [bold]Triage Verdict:[/bold] {t.verdict} (uncalibrated score {t.confidence:.2f}/1)"
+            )
             console.print(f"  • [bold]Recommendation:[/bold] {t.recommended_action}")
             console.print(f"  • [bold]Summary:[/bold] {t.summary}")
     elif res.outcome == "overmatch":
@@ -188,8 +204,12 @@ def sweep_approve(
 
 @sweep_app.command("reject")
 def sweep_reject(
-    sweep_id_or_hunt_id: Annotated[str, typer.Argument(help="Sweep ID (SWEEP-...) or Hunt ID (H-...)")],
-    reason: Annotated[str, typer.Option("--reason", "-r", help="Reason for rejecting sweep")] = "Rejected via CLI",
+    sweep_id_or_hunt_id: Annotated[
+        str, typer.Argument(help="Sweep ID (SWEEP-...) or Hunt ID (H-...)")
+    ],
+    reason: Annotated[
+        str, typer.Option("--reason", "-r", help="Reason for rejecting sweep")
+    ] = "Rejected via CLI",
 ) -> None:
     """Reject and cancel a staged sweep."""
     settings = Settings()
@@ -200,7 +220,9 @@ def sweep_reject(
         console.print(f"[red]No pending sweep found for '{sweep_id_or_hunt_id}'.[/red]")
         raise typer.Exit(code=1)
 
-    console.print(f"[yellow]✓ Sweep {staged.sweep_id} for {staged.hunt_id} rejected.[/yellow] ({reason})")
+    console.print(
+        f"[yellow]✓ Sweep {staged.sweep_id} for {staged.hunt_id} rejected.[/yellow] ({reason})"
+    )
 
 
 @sweep_app.command("run")
@@ -208,7 +230,9 @@ def sweep_run(
     hunt_id: Annotated[str, typer.Argument(help="Hunt ID to sweep (e.g. H-0021)")],
     days: Annotated[int, typer.Option("--days", "-d", help="Lookback window in days")] = 1,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
-    force_raw: Annotated[bool, typer.Option("--force-raw", help="Bypass COUNT-FIRST check")] = False,
+    force_raw: Annotated[
+        bool, typer.Option("--force-raw", help="Bypass COUNT-FIRST check")
+    ] = False,
 ) -> None:
     """Stage and immediately execute a sweep for an active hunt."""
     settings = Settings()
@@ -220,21 +244,27 @@ def sweep_run(
 
     staged_list = scheduler.stage_sweeps(hunt_id=hunt_id, force=True, time_range_days=days)
     if not staged_list:
-        console.print(f"[red]Could not stage sweep for '{hunt_id}'. Verify hunt is active with queries.[/red]")
+        console.print(
+            f"[red]Could not stage sweep for '{hunt_id}'. Verify hunt is active with queries.[/red]"
+        )
         raise typer.Exit(code=1)
 
     staged = staged_list[0]
     res = scheduler.execute_sweep(staged.sweep_id, approver="cli:analyst", force_raw=force_raw)
 
     if res.outcome == "clean":
-        console.print(f"[green]✓ Clean Sweep![/green] 0 events matched on {res.target}.")
+        console.print(
+            f"[cyan]Not observed:[/cyan] 0 events matched on {res.target} within the tested scope."
+        )
     elif res.outcome == "hits_detected":
         console.print(
             f"[yellow]⚠️ Telemetry Hits Detected![/yellow] {res.matched_count} event(s) matched on {res.target}."
         )
         if res.triage_report:
             t = res.triage_report
-            console.print(f"  • [bold]Triage Verdict:[/bold] {t.verdict} ({t.confidence*100:.0f}% confidence)")
+            console.print(
+                f"  • [bold]Triage Verdict:[/bold] {t.verdict} (uncalibrated score {t.confidence:.2f}/1)"
+            )
             console.print(f"  • [bold]Recommendation:[/bold] {t.recommended_action}")
             console.print(f"  • [bold]Summary:[/bold] {t.summary}")
     elif res.outcome == "overmatch":
@@ -249,7 +279,9 @@ def sweep_run(
 
 @sweep_app.command("findings")
 def sweep_findings(
-    hunt_id: Annotated[str | None, typer.Option("--hunt-id", "-h", help="Filter findings by hunt ID")] = None,
+    hunt_id: Annotated[
+        str | None, typer.Option("--hunt-id", "-h", help="Filter findings by hunt ID")
+    ] = None,
 ) -> None:
     """View triaged findings and threat classifications from the execution ledger."""
     settings = Settings()
@@ -265,7 +297,7 @@ def sweep_findings(
     table.add_column("Finding ID", style="bold cyan")
     table.add_column("Hunt ID", style="bold yellow")
     table.add_column("Verdict", style="white")
-    table.add_column("Confidence", justify="right")
+    table.add_column("Score (uncalibrated)", justify="right")
     table.add_column("Action", style="magenta")
     table.add_column("Triaged At", style="dim")
     table.add_column("Summary", style="white")
@@ -285,7 +317,7 @@ def sweep_findings(
             f["finding_id"],
             f["hunt_id"],
             verdict_badge,
-            f"{f['confidence'] * 100:.0f}%",
+            f"{f['confidence']:.2f}/1",
             f["recommended_action"],
             f["triaged_at"][:16].replace("T", " "),
             (f["summary"][:45] + "...") if len(f["summary"]) > 45 else f["summary"],
@@ -328,7 +360,7 @@ def sweep_pivots(
         if outcome == "hits_detected":
             out_badge = "[bold yellow]Hits Detected[/bold yellow]"
         elif outcome == "clean":
-            out_badge = "[green]Clean (0)[/green]"
+            out_badge = "[cyan]Not observed (0)[/cyan]"
         elif outcome == "overmatch":
             out_badge = "[red]Overmatch[/red]"
         else:
@@ -353,9 +385,13 @@ def sweep_tune(
     finding_id: Annotated[str, typer.Argument(help="Finding ID to tune (e.g. FINDING-H-0021-...)")],
     instruction: Annotated[
         str | None,
-        typer.Option("--instruction", "-i", help="Custom tuning instruction (e.g. 'Exclude User svc_backup')"),
+        typer.Option(
+            "--instruction", "-i", help="Custom tuning instruction (e.g. 'Exclude User svc_backup')"
+        ),
     ] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview tuning diff without applying")] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Preview tuning diff without applying")
+    ] = False,
 ) -> None:
     """Auto-tune a Sigma detection rule based on a triaged finding to exclude false positives."""
     settings = Settings()
@@ -375,9 +411,13 @@ def sweep_tune(
         console.print(f"[red]✗ Rule Tuning Failed for {res.hunt_id}:[/red] {res.error}")
         raise typer.Exit(code=1)
 
-    console.print(f"[bold green]✓ Successfully Tuned Detection Rule for {res.hunt_id}![/bold green]")
+    console.print(
+        f"[bold green]✓ Successfully Tuned Detection Rule for {res.hunt_id}![/bold green]"
+    )
     console.print(f"  • [bold]Action:[/bold] {res.action_summary}")
-    console.print(f"  • [bold]Target Dialects Re-transpiled:[/bold] {', '.join(res.transpiled_targets)}")
+    console.print(
+        f"  • [bold]Target Dialects Re-transpiled:[/bold] {', '.join(res.transpiled_targets)}"
+    )
 
     if res.diff:
         console.print("\n[bold cyan]Rule Diff:[/bold cyan]")
@@ -434,9 +474,7 @@ def sweep_daemon(
     if approval is not None:
         settings.auto_hunt_approval_required = approval
 
-    effective_interval = (
-        interval if interval is not None else settings.auto_hunt_sweep_interval_sec
-    )
+    effective_interval = interval if interval is not None else settings.auto_hunt_sweep_interval_sec
     stop_event = threading.Event()
 
     def _sig_handler(signum: int, frame: Any) -> None:

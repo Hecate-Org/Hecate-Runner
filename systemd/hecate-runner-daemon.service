@@ -4,7 +4,6 @@ Documentation=https://github.com/BrizoSec/Hecate-Runner
 After=network-online.target ollama.service
 Wants=network-online.target hecate-runner-maintenance.service
 Requires=ollama.service
-Conflicts=hecate-runner-orchestrator.timer
 
 [Service]
 Type=simple

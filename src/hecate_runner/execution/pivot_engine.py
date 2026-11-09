@@ -29,7 +29,9 @@ class PivotExecutionResult:
 
     pivot_id: str
     finding_id: str
-    pivot_type: str  # "child_process" | "network_egress" | "user_auth" | "parent_process" | "lateral_ip"
+    pivot_type: (
+        str  # "child_process" | "network_egress" | "user_auth" | "parent_process" | "lateral_ip"
+    )
     target_siem: str
     query_text: str
     rationale: str
@@ -196,7 +198,9 @@ def _build_network_egress_query(dialect: str, host: str, proc: str, ip: str) -> 
         if ip:
             return f'target.ip = "{ip}"'
         host_filter = f'principal.hostname = "{host}" and ' if host else ""
-        return f'{host_filter}principal.process.file.full_path = "*{clean_proc}" and target.ip != ""'
+        return (
+            f'{host_filter}principal.process.file.full_path = "*{clean_proc}" and target.ip != ""'
+        )
     if dialect in ("crowdstrike", "crowdstrike_cql", "cql", "logscale"):
         if ip:
             return f'#event_simpleName=NetworkConnectIP4 RemoteAddressIP4="{ip}" | limit(50)'
@@ -215,7 +219,9 @@ def _build_user_auth_query(dialect: str, user: str, host: str) -> str:
     if dialect in ("splunk", "spl"):
         return f'index=* (EventCode=4624 OR action="success") (user="*{clean_user}*" OR User="*{clean_user}*") | head 50'
     if dialect in ("sentinel", "sentinel_kql", "kql"):
-        return f'SecurityEvent | where EventID == 4624 and TargetUserName =~ "{clean_user}" | take 50'
+        return (
+            f'SecurityEvent | where EventID == 4624 and TargetUserName =~ "{clean_user}" | take 50'
+        )
     if dialect in ("elastic", "elastic_eql", "eql", "es_query"):
         return f'event.code: "4624" and user.name: "*{clean_user}*"'
     if dialect in ("chronicle",):
@@ -231,7 +237,9 @@ def _build_parent_scope_query(dialect: str, parent: str) -> str:
     if dialect in ("splunk", "spl"):
         return f'index=* (parent_process_name="*{clean_parent}" OR parent_process="*{clean_parent}") | head 50'
     if dialect in ("sentinel", "sentinel_kql", "kql"):
-        return f'DeviceProcessEvents | where InitiatingProcessFileName =~ "{clean_parent}" | take 50'
+        return (
+            f'DeviceProcessEvents | where InitiatingProcessFileName =~ "{clean_parent}" | take 50'
+        )
     if dialect in ("elastic", "elastic_eql", "eql", "es_query"):
         return f'process.parent.name: "*{clean_parent}"'
     if dialect in ("chronicle",):
@@ -265,7 +273,11 @@ class PivotExecutionEngine:
         max_pivots: int | None = None,
     ) -> list[PivotExecutionResult]:
         """Synthesize and safely execute secondary pivot queries for a triaged finding."""
-        limit = max_pivots or getattr(self.settings, "auto_hunt_max_pivots", 3)
+        limit = (
+            max_pivots
+            if max_pivots is not None
+            else int(getattr(self.settings, "auto_hunt_max_pivots", 3))
+        )
         specs = synthesize_pivot_queries(
             target_siem=target_siem,
             entities=entities,

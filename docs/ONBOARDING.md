@@ -83,7 +83,7 @@ MISP_API_KEY=...
 
 # --- BAS Adversary Emulation (Optional) ---
 HECATE_BAS_ENABLED=true
-HECATE_BAS_PROVIDER=mock          # options: mock, caldera, stratus
+HECATE_BAS_MODE=mock              # options: mock, caldera, stratus
 ```
 
 ---
@@ -148,7 +148,7 @@ journalctl --user -u hecate-runner-daemon.service -f
 
 ## 🧪 Testing & Code Quality
 
-Hecate-Runner maintains an extensive automated test suite with over 1,100 tests.
+Hecate-Runner maintains an extensive automated test suite with over 1,360 tests.
 
 ```bash
 # Run all unit and integration tests
@@ -182,7 +182,11 @@ src/hecate_runner/
 ├── cti/                         # Threat intelligence feed collectors
 │   ├── abuse_ch.py, cisa_kev.py, otx_poller.py, misp_poller.py, rss.py...
 ├── correlation.py               # Threat entity correlation & incremental hunt enrichment
-├── orchestrator.py              # Core autonomous pipeline loop and intake queue
+├── orchestrator.py              # Core autonomous pipeline loop and coordinator
+├── orchestrator_intake.py       # CTI feed polling, dedup, and dead-letter queue
+├── orchestrator_grounding.py    # Primary evidence collection & claim auditing
+├── orchestrator_rules.py        # Multi-pass Sigma generation & query deployment
+├── orchestrator_publishing.py   # GitHub & MISP outbox enqueuing & notifications
 ├── hunt_writer.py               # Atomic LOCK markdown and Sigma rule writer
 ├── rule_tuner.py                # Automated detection reviewer and self-healing loop
 ├── github_publisher.py          # SQLite outbox and GitHub pull request creator

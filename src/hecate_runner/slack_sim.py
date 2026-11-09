@@ -119,17 +119,21 @@ class SlackBotSimulator:
             from hecate_runner.execution.scheduler import HuntExecutionScheduler
 
             scheduler = HuntExecutionScheduler(settings=self.settings)
-            res = scheduler.execute_sweep(value, approver=f"slack:{user}")
-            icon = "🟢" if res.outcome == "clean" else ("⚠️" if res.outcome == "hits_detected" else "🚨")
+            exec_res = scheduler.execute_sweep(value, approver=f"slack:{user}")
+            icon = (
+                "🟢"
+                if exec_res.outcome == "clean"
+                else ("⚠️" if exec_res.outcome == "hits_detected" else "🚨")
+            )
             msg = (
                 f"{icon} *Hunt Sweep Executed by <@{user}>*\n"
-                f"• *Hunt ID:* `{res.hunt_id}`\n"
-                f"• *Target SIEM:* `{res.target}`\n"
-                f"• *Outcome:* `{res.outcome}`\n"
-                f"• *Matched Events:* `{res.matched_count}`\n"
-                f"• *Detail:* {res.detail}"
+                f"• *Hunt ID:* `{exec_res.hunt_id}`\n"
+                f"• *Target SIEM:* `{exec_res.target}`\n"
+                f"• *Outcome:* `{exec_res.outcome}`\n"
+                f"• *Matched Events:* `{exec_res.matched_count}`\n"
+                f"• *Detail:* {exec_res.detail}"
             )
-            return {"ok": res.ok, "action": action_id, "message": msg, "data": res}
+            return {"ok": exec_res.ok, "action": action_id, "message": msg, "data": exec_res}
 
         elif action_id == "hecate_reject_sweep":
             from hecate_runner.execution.scheduler import HuntExecutionScheduler
@@ -145,7 +149,7 @@ class SlackBotSimulator:
             from hecate_runner.execution.watermark_store import WatermarkStore
             from hecate_runner.rule_tuner import RuleTuner
 
-            store = WatermarkStore(db_path=self.settings.hunt_executions_db)
+            store = WatermarkStore(db_path=self.settings.hunt_executions_db_resolved)
             finding = store.get_finding(value)
             if not finding:
                 return {
@@ -155,19 +159,22 @@ class SlackBotSimulator:
                 }
 
             tuner = RuleTuner(workspace=self.workspace)
-            res = tuner.auto_tune_from_finding(finding)
-            if res.ok:
+            tune_res = tuner.auto_tune_from_finding(finding)
+            if tune_res.ok:
                 store.update_finding_tuning(
                     finding_id=value,
                     status="tuned",
                     instruction="Auto-derived from finding",
-                    summary=res.action_summary,
+                    summary=tune_res.action_summary,
                 )
-                msg = f"🛠️ *Sigma Detection Rule Tuned for `{res.hunt_id}`:* {res.action_summary}"
+                msg = (
+                    f"🛠️ *Sigma Detection Rule Tuned for `{tune_res.hunt_id}`:* "
+                    f"{tune_res.action_summary}"
+                )
             else:
-                msg = f"⚠️ *Rule Tuning Failed for `{res.hunt_id}`:* {res.error}"
+                msg = f"⚠️ *Rule Tuning Failed for `{tune_res.hunt_id}`:* {tune_res.error}"
 
-            return {"ok": res.ok, "action": action_id, "message": msg, "data": res}
+            return {"ok": tune_res.ok, "action": action_id, "message": msg, "data": tune_res}
 
         return {
             "ok": False,

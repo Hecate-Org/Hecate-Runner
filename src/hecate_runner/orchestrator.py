@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from hecate_runner.orchestrator_derivations import (
     attributed_actor,
     derive_data_sources,
     derive_research_topic,
+    enrichment_trail_lines,
     has_narrative,
     is_actionable,
     merge_techniques,
@@ -201,16 +203,6 @@ class Orchestrator(
     def run_once(self, *, dry_run: bool = False) -> RunResult:
         """Execute one cycle. Never raises; always returns a RunResult."""
         log.info("=== Orchestrator cycle starting (dry_run=%s) ===", dry_run)
-        if self.settings.misp_publishing_enabled and not dry_run:
-            try:
-                sync_misp_outbox(self.settings)
-            except Exception as exc:
-                log.warning("Could not sync the MISP output queue (%s)", type(exc).__name__)
-        if self.settings.github_publishing_enabled and not dry_run:
-            try:
-                sync_outbox(self.settings)
-            except Exception as exc:
-                log.warning("Could not sync the GitHub promotion outbox (%s)", exc)
         state = OrchestratorState.load(self.settings.state_file)
         self.trail = CycleTrail()
         self.metrics = CycleMetrics(self.trail.cycle_id)
@@ -318,6 +310,7 @@ class Orchestrator(
         # Primary-source evidence for this cycle's item; see _gather_source_evidence.
         self._source_evidence = None
         self._enriched_context = ""
+        self._enrichment_citations: list[dict[str, str]] = []
         self._indicator_records = []
         self._detection_guidance = []
         self._specimen = []
@@ -557,7 +550,7 @@ class Orchestrator(
                 else:
                     self.trail.step(
                         "enrichment",
-                        "%d observable(s) (%s) checked via VT, GreyNoise, AbuseIPDB, Shodan, Censys, Abuse.ch (ThreatFox, MalwareBazaar, Feodo, SSLBL, URLhaus), RDAP, EPSS, OTX, HybridAnalysis, OSV.dev",
+                        "%d observable(s) (%s) sent to OSINT lookup",
                         total_obs,
                         ", ".join(obs_detail),
                     )
@@ -591,11 +584,27 @@ class Orchestrator(
         except Exception as exc:
             log.warning("Indicator extraction failed before enrichment: %s", exc)
 
+        enrichment_stats: dict[str, dict[str, int]] = {}
+        enrichment_citations: list[dict[str, str]] = []
         self._enriched_context = (
             ""
             if source_is_indicator_only or item.metadata.get("reference_only")
-            else generate_enrichment_summary(item.content)
+            else generate_enrichment_summary(item.content, enrichment_stats, enrichment_citations)
         )
+        self._enrichment_citations = enrichment_citations
+        for service, line in enrichment_trail_lines(enrichment_stats):
+            self.trail.step(
+                "enrichment",
+                "%s: %s",
+                service,
+                line,
+                data={
+                    "kind": "enrichment",
+                    "service": service,
+                    "summary": line,
+                    **enrichment_stats[service],
+                },
+            )
 
         if self.settings.catalog_enrichment_enabled and not item.metadata.get("reference_only"):
             import json
@@ -874,7 +883,9 @@ class Orchestrator(
                 "" if intel_has_narrative else "; constrained to indicator presence",
             )
             hypothesis_started = self.trail.elapsed
-            log_payload_metrics("hypothesis_generation", primary_intel_context, self.settings.hecate_llm_model)
+            log_payload_metrics(
+                "hypothesis_generation", primary_intel_context, self.settings.hecate_llm_model
+            )
             try:
                 with self.metrics.measure("hypothesis_generation") as measured:
                     hypothesis = self.hecate.hypothesis_generator(
@@ -1148,6 +1159,17 @@ class Orchestrator(
                 ", ".join(f"{count} {status}" for status, count in sorted(quote_checks.items())),
             )
 
+        if (
+            not hypothesis.actor
+            or not hypothesis.actor.strip()
+            or hypothesis.actor == "[Review CTI and populate]"
+        ):
+            cve_match = re.search(r"CVE-\d{4}-\d{4,}", item.content, re.IGNORECASE)
+            if cve_match:
+                hypothesis.actor = f"Unattributed (threat actors exploiting {cve_match.group(0).upper()})"
+            else:
+                hypothesis.actor = "Unattributed"
+
         try:
             with hunt_id_lock(self.settings.hunts_root):
                 hunt_id = next_hunt_id(self.settings.hunts_root)
@@ -1170,6 +1192,7 @@ class Orchestrator(
                     claim_audit=self._claim_audit,
                     claim_evidence=self._claim_evidence,
                     detection_guidance=self._detection_guidance,
+                    enrichment_citations=list(self._enrichment_citations),
                 )
                 req.grounding_section = self._grounding_section(req, item, technique_facts)
                 with self.metrics.measure("draft_write"):

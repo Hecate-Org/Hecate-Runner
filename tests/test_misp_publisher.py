@@ -290,7 +290,7 @@ def test_pipeline_exports_after_sigma_and_isolates_outage(
         settings=settings, hecate=mock_hecate, cti_provider=file_queue_with_cti
     ).run_once()
     assert result.outcome == "draft_created"
-    assert calls == ["sync", "enqueue", "sync"]
+    assert calls == ["enqueue"]
 
 
 def test_dry_run_does_not_export(

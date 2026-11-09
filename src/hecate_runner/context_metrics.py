@@ -1,26 +1,40 @@
+"""Payload estimates, explicitly separate from provider-reported prompt usage."""
+
 import logging
 
 log = logging.getLogger(__name__)
 
 
-def measure_tokens(text: str, model_name: str = "gpt-4") -> int:
-    """Measure the token usage of a text payload to help optimize context window sizing."""
+def measure_tokens(text: str, model_name: str | None = None) -> int | None:
+    """Estimate a payload using a known tokenizer; None means unavailable.
+
+    This excludes prompt templates, loaded context, and chat framing. Unknown
+    models never silently use a different model's tokenizer.
+    """
     if not text:
         return 0
+    if not model_name:
+        return None
     try:
         import tiktoken
 
-        # Fall back to cl100k_base (gpt-4) if the specific model isn't known to tiktoken
-        try:
-            encoding = tiktoken.encoding_for_model(model_name)
-        except KeyError:
-            encoding = tiktoken.get_encoding("cl100k_base")
+        encoding = tiktoken.encoding_for_model(model_name)
+        return len(encoding.encode(text, disallowed_special=()))
+    except (ImportError, KeyError):
+        return None
+    except Exception as exc:
+        log.debug("Payload token estimate unavailable for %s (%s)", model_name, exc)
+        return None
 
-        count = len(encoding.encode(text))
-        return count
-    except ImportError:
-        log.warning("tiktoken not installed, skipping context measurement.")
-        return 0
-    except Exception as e:
-        log.warning("Failed to measure context token usage: %s", e)
-        return 0
+
+def log_payload_metrics(stage: str, text: str, model_name: str | None = None) -> None:
+    """Log input size without presenting the payload as a complete model prompt."""
+    estimate = measure_tokens(text, model_name)
+    log.info(
+        "LLM payload estimate: stage=%s model=%s chars=%d payload_tokens=%s "
+        "scope=payload_only; excludes Core-added instructions/context and chat framing",
+        stage,
+        model_name or "workspace_default",
+        len(text),
+        estimate if estimate is not None else "unavailable",
+    )

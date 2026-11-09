@@ -166,6 +166,11 @@ def evaluate_promotion(
             str(risk["incomplete_metadata"]),
             "hunt has incomplete technique, platform, or data-source metadata",
         )
+    if "[Review CTI and populate]" in text:
+        apply(
+            str(risk["incomplete_metadata"]),
+            "hunt contains unfinished template placeholder '[Review CTI and populate]'",
+        )
     tags = metadata.get("tags") or []
     if not isinstance(tags, list):
         raise ValueError("hunt tags must be a list")

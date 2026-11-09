@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from hecate_runner.config import Settings
 from hecate_runner.execution.safe_gate import SafeExecutionGate, SafeExecutionResult
@@ -71,20 +71,23 @@ class HuntExecutionScheduler:
         )
 
         if self.notify_fn is None and (
-            self.settings.slack_bot_token
-            or self.settings.slack_webhook_url
+            self.settings.slack_bot_token or self.settings.slack_webhook_url
         ):
             try:
-                from hecate_runner.notifications import SlackNotifier
+                from hecate_runner.notifications import SlackNotificationRouter
 
-                notifier = SlackNotifier(self.settings)
+                notifier = SlackNotificationRouter(self.settings)
                 if notifier.is_configured:
                     channel = self.settings.slack_channel_hunts_exec or "#all-hecate-hunt"
-                    self.notify_fn = lambda b: notifier.post_message(
-                        channel=channel,
-                        text="Hecate Auto Hunt Notification",
-                        blocks=b if isinstance(b, list) else None,
-                    )
+
+                    def _notify(b: list[dict[str, Any]] | str) -> None:
+                        notifier.post_message(
+                            channel,
+                            "Hecate Auto Hunt Notification",
+                            blocks=b if isinstance(b, list) else None,
+                        )
+
+                    self.notify_fn = _notify
             except Exception as exc:
                 log.debug("Could not initialize default SlackNotifier for scheduler: %s", exc)
 
@@ -177,7 +180,9 @@ class HuntExecutionScheduler:
 
             q_files: list[Path] = h["query_files"]
             if not q_files:
-                log.info("Active hunt %s has no query files for dialect %s", h_id, self.provider.name)
+                log.info(
+                    "Active hunt %s has no query files for dialect %s", h_id, self.provider.name
+                )
                 continue
 
             # Pick the primary query file (or first available)
@@ -324,8 +329,7 @@ class HuntExecutionScheduler:
                     settings=self.settings,
                 )
                 finding_id = (
-                    triage_report.finding_id
-                    or f"FINDING-{staged.hunt_id}-{uuid.uuid4().hex[:6]}"
+                    triage_report.finding_id or f"FINDING-{staged.hunt_id}-{uuid.uuid4().hex[:6]}"
                 )
                 pivot_results = pivot_engine.execute_pivots(
                     finding_id=finding_id,
@@ -405,7 +409,7 @@ class HuntExecutionScheduler:
             log.info("Auto hunt execution is disabled; skipping scheduled sweeps.")
             return []
 
-        staged = self.stage_sweeps(force=force)
+        staged: list[SafeExecutionResult | StagedSweep] = list(self.stage_sweeps(force=force))
         if not staged:
             log.debug("No eligible active hunts found for scheduled sweep.")
             return []
@@ -418,8 +422,9 @@ class HuntExecutionScheduler:
             return staged
 
         # When approval is not required, autonomously execute each staged sweep
-        results: list[SafeExecutionResult] = []
-        for s in staged:
+        results: list[SafeExecutionResult | StagedSweep] = []
+        for item in staged:
+            s = cast(StagedSweep, item)
             log.info("Autonomously executing scheduled sweep %s for %s...", s.sweep_id, s.hunt_id)
             res = self.execute_sweep(s.sweep_id, approver="daemon")
             results.append(res)

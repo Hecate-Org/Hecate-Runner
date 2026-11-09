@@ -90,20 +90,30 @@ def reference_candidates(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         selection = {"cs-method": request["method"], "cs-uri-stem": path}
         if query:
             selection["cs-uri-query"] = query
-        label = (
-            "Request the PoC README documents"
-            if request.get("origin") == "readme"
-            else "Nuclei reference request"
-        )
-        output.append(
-            {
-                "category": "webserver",
-                "title": f"{label}: {request['method']} {uri}"[:110],
-                "detection": {"selection": selection, "condition": "selection"},
-                "level": "medium",
-                "command": f"{request['method']} {uri}",
-                "behaviour": f"{request['method']} {uri}",
-                "passage": f"Documented probe request: {request['method']} {uri}",
-            }
-        )
+        readme = request.get("origin") == "readme"
+        candidate = {
+            "category": "webserver",
+            "title": (
+                f"Hunting lead: {request['method']} {uri} as the PoC README documents"
+                if readme
+                else f"Nuclei reference request: {request['method']} {uri}"
+            )[:110],
+            "detection": {"selection": selection, "condition": "selection"},
+            "level": "medium",
+            "command": f"{request['method']} {uri}",
+            "behaviour": f"{request['method']} {uri}",
+            "passage": f"Documented probe request: {request['method']} {uri}",
+        }
+        if readme:
+            # A PoC README shows the request the exploit sends, which is usually the
+            # product's own admin API: the same method and path are sent by every
+            # legitimate client. What makes the exploit's request different, such as
+            # a missing Authorization header, is not a field web server logs record.
+            candidate["level"] = "low"
+            candidate["falsepositives"] = (
+                f"Legitimate clients of the product send {request['method']} {uri} too. Separate the "
+                "exploit by what the log cannot show here, such as a missing Authorization header or "
+                "an unexpected client, using a network capture or the product's own audit log"
+            )
+        output.append(candidate)
     return output

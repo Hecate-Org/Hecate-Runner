@@ -319,8 +319,23 @@ def test_state_changing_requests_outside_usage_sections_become_reference_request
         {"method": "POST", "path": ["/flows"], "origin": "readme"}
     ]
     [rule] = reference_candidates({"http_requests": artifacts["http_requests"]})
-    assert rule["title"] == "Request the PoC README documents: POST /flows"
+    assert rule["title"] == "Hunting lead: POST /flows as the PoC README documents"
     assert rule["detection"]["selection"] == {"cs-method": "POST", "cs-uri-stem": "/flows"}
+
+
+def test_a_readme_request_is_a_low_severity_lead_not_an_alert() -> None:
+    """H-0021 and H-0025 shipped `POST /flows` at medium severity, but every
+    legitimate Node-RED deploy sends it; the source's signature was the missing
+    Authorization header, which web server logs do not record."""
+    from hecate_runner.cti.reference_rules import reference_candidates
+
+    [rule] = reference_candidates(
+        {"http_requests": [{"method": "POST", "path": ["/flows"], "origin": "readme"}]}
+    )
+    assert rule["level"] == "low"
+    assert "Authorization" in rule["falsepositives"]
+    [nuclei] = reference_candidates({"http_requests": [{"method": "POST", "path": ["/flows"]}]})
+    assert nuclei["level"] == "medium" and "falsepositives" not in nuclei
 
 
 def test_the_poc_repository_itself_is_listed_without_a_rule() -> None:

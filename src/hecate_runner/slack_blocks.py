@@ -166,9 +166,7 @@ def _draft_review_signals(result: Any) -> str:
         lines = []
         for item in raw[:6] if isinstance(raw, list) else []:
             if isinstance(item, dict):
-                lines.append(
-                    f"• `{item.get('target') or item.get('check')}` {item.get('message')}"
-                )
+                lines.append(f"• `{item.get('target') or item.get('check')}` {item.get('message')}")
         head = (
             "*Publish check:* blocking. Approval needs a written override."
             if verdict == "block"
@@ -1662,7 +1660,7 @@ def build_sweep_result_card(
     if outcome == "clean":
         icon = "🟢"
         color = COLOR_SUCCESS
-        status_text = "Clean Sweep (0 events)"
+        status_text = "Not observed (0 matching events within tested scope)"
     elif outcome == "hits_detected":
         icon = "⚠️"
         color = COLOR_WARNING
@@ -1710,7 +1708,9 @@ def build_sweep_result_card(
         t_action = getattr(triage, "recommended_action", "pivot")
         entities = getattr(triage, "extracted_entities", {}) or {}
 
-        v_icon = "🟢" if t_verdict == "true_positive" else ("⚠️" if t_verdict == "suspicious" else "⚪")
+        v_icon = (
+            "🟢" if t_verdict == "true_positive" else ("⚠️" if t_verdict == "suspicious" else "⚪")
+        )
         blocks.append(
             {
                 "type": "section",
@@ -1718,7 +1718,7 @@ def build_sweep_result_card(
                     "type": "mrkdwn",
                     "text": (
                         f"*🔎 Automated Triage Assessment:*\n"
-                        f"• *Verdict:* {v_icon} `{t_verdict}` (Confidence: `{t_conf*100:.0f}%`)\n"
+                        f"• *Verdict:* {v_icon} `{t_verdict}` (Uncalibrated score: `{t_conf:.2f}/1`)\n"
                         f"• *Recommendation:* `{t_action}`\n"
                         f"• *Summary:* {t_summary}\n"
                         f"• *Rationale:* _{t_rationale[:200]}_"
@@ -1733,9 +1733,13 @@ def build_sweep_result_card(
         if entities.get("users"):
             ent_lines.append(f"• *Users:* {', '.join(f'`{u}`' for u in entities['users'][:3])}")
         if entities.get("processes"):
-            ent_lines.append(f"• *Processes:* {', '.join(f'`{p}`' for p in entities['processes'][:3])}")
+            ent_lines.append(
+                f"• *Processes:* {', '.join(f'`{p}`' for p in entities['processes'][:3])}"
+            )
         if entities.get("parent_processes"):
-            ent_lines.append(f"• *Parents:* {', '.join(f'`{p}`' for p in entities['parent_processes'][:3])}")
+            ent_lines.append(
+                f"• *Parents:* {', '.join(f'`{p}`' for p in entities['parent_processes'][:3])}"
+            )
         if entities.get("ips"):
             ent_lines.append(f"• *IPs:* {', '.join(f'`{ip}`' for ip in entities['ips'][:3])}")
 
@@ -1772,18 +1776,31 @@ def build_sweep_result_card(
     if pivots:
         pivot_lines = []
         for p in pivots[:3]:
-            p_type = getattr(p, "pivot_type", "") if hasattr(p, "pivot_type") else p.get("pivot_type", "")
-            p_tech = getattr(p, "technique", "") if hasattr(p, "technique") else p.get("technique", "")
-            p_hits = getattr(p, "matched_count", 0) if hasattr(p, "matched_count") else p.get("matched_count", 0)
+            p_type = (
+                getattr(p, "pivot_type", "")
+                if hasattr(p, "pivot_type")
+                else p.get("pivot_type", "")
+            )
+            p_tech = (
+                getattr(p, "technique", "") if hasattr(p, "technique") else p.get("technique", "")
+            )
+            p_hits = (
+                getattr(p, "matched_count", 0)
+                if hasattr(p, "matched_count")
+                else p.get("matched_count", 0)
+            )
             p_out = getattr(p, "outcome", "") if hasattr(p, "outcome") else p.get("outcome", "")
             icon = "⚠️" if p_out == "hits_detected" else ("🟢" if p_out == "clean" else "🚨")
-            pivot_lines.append(f"• {icon} *{p_type.replace('_', ' ').title()}* (`{p_tech}`): `{p_hits}` events ({p_out})")
+            pivot_lines.append(
+                f"• {icon} *{p_type.replace('_', ' ').title()}* (`{p_tech}`): `{p_hits}` events ({p_out})"
+            )
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*🔄 Automated Investigation Pivots ({len(pivots)} executed):*\n" + "\n".join(pivot_lines),
+                    "text": f"*🔄 Automated Investigation Pivots ({len(pivots)} executed):*\n"
+                    + "\n".join(pivot_lines),
                 },
             }
         )
@@ -1829,4 +1846,3 @@ def build_sweep_result_card(
         }
     )
     return [{"color": color, "blocks": sanitize_slack_blocks(blocks)}]
-

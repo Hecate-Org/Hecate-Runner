@@ -1,0 +1,27 @@
+[Unit]
+Description=hecate-runner - Independent publication and SIEM maintenance workers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chemch
+Group=chemch
+WorkingDirectory=/home/chemch/betas/Hecate-Runner
+EnvironmentFile=-/home/chemch/betas/Hecate-Workspace/.env
+EnvironmentFile=-/home/chemch/betas/Hecate-Runner/.env
+ExecStart=/home/chemch/.local/bin/uv run hecate-runner maintenance
+Restart=always
+RestartSec=10s
+TimeoutStopSec=20s
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/chemch/betas/Hecate-Core /home/chemch/betas/Hecate-Runner /home/chemch/betas/Hecate-Workspace
+ReadWritePaths=-/home/chemch/betas/Hecate-Public
+
+[Install]
+WantedBy=multi-user.target

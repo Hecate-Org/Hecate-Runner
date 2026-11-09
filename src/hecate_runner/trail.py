@@ -19,6 +19,8 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from hecate_agent.core.cycle_events import bind_cycle, emit
+
 LOGGER_NAME = "hecate_runner.trail"
 
 _log = logging.getLogger(LOGGER_NAME)
@@ -30,13 +32,32 @@ class CycleTrail:
     def __init__(self) -> None:
         self.cycle_id = uuid.uuid4().hex[:6]
         self._start = time.monotonic()
+        bind_cycle(self.cycle_id)
 
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self._start
 
-    def step(self, stage: str, message: str, *args: Any) -> None:
-        _log.info("[%s +%6.1fs] %-10s " + message, self.cycle_id, self.elapsed, stage, *args)
+    def step(
+        self,
+        stage: str,
+        message: str,
+        *args: Any,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        elapsed = self.elapsed
+        _log.info("[%s +%6.1fs] %-10s " + message, self.cycle_id, elapsed, stage, *args)
+        text = message % args if args else message
+        emit(
+            {
+                "type": "stage",
+                "cycle_id": self.cycle_id,
+                "elapsed": round(elapsed, 3),
+                "stage": stage,
+                "message": text,
+                "data": dict(data or {}),
+            }
+        )
 
 
 def listing(values: Iterable[Any], empty: str = "none") -> str:

@@ -72,7 +72,7 @@ Hecate translates generic Sigma detection rules into native, optimized query lan
 - **Elasticsearch:** Event Query Language (EQL) and Lucene queries.
 - **IBM QRadar:** Ariel Query Language (AQL).
 
-### 2.6 Human-in-the-Loop ChatOps & Operations
+### 2.7 Human-in-the-Loop ChatOps & Operations
 - **Interactive Slack Cards:** When a hunt is drafted, Hecate posts an interactive Slack card displaying the hypothesis, confidence score, MITRE techniques, and candidate rules.
 - **Thread Actions:** Security engineers can trigger queries, request rule tuning, or approve promotions directly from Slack threads.
 - **Live Terminal Monitor:** Run `hecate-agent monitor` in any terminal to see a real-time curses-based view of daemon activity, queue status, and active research cycles.

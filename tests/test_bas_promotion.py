@@ -131,3 +131,18 @@ def test_unreviewed_active_and_rejected_hunts_cannot_be_promoted(
     _set_status(workspace, status, decision)
     with pytest.raises(ValueError, match="review-approved"):
         evaluate_promotion(workspace, "H-0010")
+
+
+def test_hunt_with_unfilled_placeholder_requires_review(tmp_path: Path) -> None:
+    workspace = _setup_test_workspace(
+        tmp_path, bas_verified=True, bas_status="verified_true_positive"
+    )
+    hunt = workspace / "hunts" / "2026" / "Q4" / "H-0010.md"
+    text = hunt.read_text(encoding="utf-8") + "\n| **Actor** | [Review CTI and populate] |\n"
+    hunt.write_text(text, encoding="utf-8")
+
+    decision = evaluate_promotion(workspace, "H-0010")
+    assert decision.eligible is False
+    assert decision.review_required is True
+    assert any("unfinished template placeholder" in r for r in decision.reasons)
+

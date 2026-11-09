@@ -445,29 +445,15 @@ class OrchestratorGroundingMixin:
         started = self.trail.elapsed
         try:
             with self.metrics.measure("source_evidence") as measured:
-                import concurrent.futures
-
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = executor.submit(self.hecate.source_evidence, urls[0])
-                source_timeout_sec = max(900, getattr(self.settings, "llm_timeout_sec", 1500))
-                try:
-                    evidence = future.result(timeout=source_timeout_sec)
-                except concurrent.futures.TimeoutError as exc:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise TimeoutError(
-                        f"Timed out after {source_timeout_sec} seconds reading {urls[0]}"
-                    ) from exc
-
+                evidence, records = self.hecate.source_evidence_with_indicators(
+                    urls[0], indicators, timeout_sec=self.settings.llm_timeout_sec
+                )
                 self._source_evidence = evidence
-                try:
-                    if evidence.text:
-                        self._indicator_records = self.hecate.indicator_records(
-                            indicators, evidence
-                        )
-                finally:
-                    metadata: Any = getattr(evidence, "usage_metadata", dict)()
-                    if isinstance(metadata, dict) and metadata:
-                        measured.set_usage(LLMUsage.from_metadata(metadata))
+                self._indicator_records = records
+                measured.details = getattr(evidence, "extraction_metrics", {})
+                metadata: Any = getattr(evidence, "usage_metadata", dict)()
+                if isinstance(metadata, dict) and metadata:
+                    measured.set_usage(LLMUsage.from_metadata(metadata))
         except Exception as exc:  # evidence is an aid; never fatal
             log.warning("Source evidence failed for %s: %s", urls[0], exc)
             self.trail.step(
@@ -668,6 +654,6 @@ class OrchestratorGroundingMixin:
             return ""
         path = self.settings.hecate_workspace / "research" / f"{research_id}.md"
         try:
-            return path.read_text(encoding="utf-8")
+            return str(path.read_text(encoding="utf-8"))
         except OSError:
             return ""

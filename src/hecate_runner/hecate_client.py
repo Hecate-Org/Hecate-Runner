@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import logging
+import os
 import re
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -167,6 +171,57 @@ class HecateClient:
 
         return self._with_context(extract_source_evidence, url)
 
+    def source_evidence_with_indicators(
+        self,
+        url: str,
+        indicators: dict[str, list[str]],
+        *,
+        timeout_sec: float,
+    ) -> tuple[Any, list[Any]]:
+        """Collect and classify under one deadline in a cancellable process group.
+
+        A thread timeout cannot interrupt a blocking provider call. Killing this
+        worker closes its connections and prevents subsequent chunks/retries or
+        classification calls from continuing after the stage has timed out.
+        """
+        from hecate_agent.core.provenance import IndicatorRecord
+        from hecate_agent.core.source_evidence import SourceArtifact, SourceEvidence
+
+        from hecate_runner.subprocess_utils import run_process_group
+
+        env = {**os.environ, **self.env_overrides}
+        env["HECATE_WORKSPACE"] = str(self.workspace.resolve())
+        try:
+            result = run_process_group(
+                [sys.executable, "-m", "hecate_runner.source_evidence_worker"],
+                input=json.dumps({"url": url, "indicators": indicators}),
+                timeout=timeout_sec,
+                cwd=self.workspace,
+                env=env,
+                check=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"Source extraction and classification timed out after {timeout_sec:g} seconds"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            # Provider errors can contain credentials or source text; do not
+            # copy worker output into the cycle log.
+            raise HecateError(
+                f"Source evidence worker exited with status {exc.returncode}"
+            ) from exc
+
+        payload = json.loads(result.stdout)
+        raw = payload["evidence"]
+        evidence = SourceEvidence(
+            **{
+                **raw,
+                "artifacts": [SourceArtifact(**artifact) for artifact in raw["artifacts"]],
+                "indicators": [IndicatorRecord(**record) for record in raw["indicators"]],
+            }
+        )
+        return evidence, [IndicatorRecord(**record) for record in payload["records"]]
+
     def indicator_records(self, indicators: dict[str, list[str]], evidence: Any) -> list[Any]:
         """The feed's indicators typed by role and status against ``evidence``."""
         from hecate_agent.core.source_evidence import build_indicator_records
@@ -221,6 +276,8 @@ class HecateClient:
             ),
             usage=LLMUsage(
                 llm_calls=getattr(output, "llm_calls", None),
+                max_input_tokens=getattr(output, "max_input_tokens", None),
+                input_token_samples=getattr(output, "input_token_samples", None),
                 input_tokens=getattr(output, "input_tokens", None),
                 output_tokens=getattr(output, "output_tokens", None),
                 llm_duration_ms=getattr(output, "llm_duration_ms", None),

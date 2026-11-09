@@ -40,6 +40,8 @@ def test_env_for_hecate_omits_unset_llm_keys(settings: Settings) -> None:
     assert "HECATE_WORKSPACE" in env
     assert "HECATE_LLM_PROVIDER" not in env
     assert "HECATE_LLM_MODEL" not in env
+    assert "HECATE_LLM_SIMPLE_PROVIDER" not in env
+    assert "HECATE_LLM_COMPLEX_PROVIDER" not in env
 
 
 def test_env_for_hecate_names_the_live_call_log(settings: Settings) -> None:
@@ -48,13 +50,33 @@ def test_env_for_hecate_names_the_live_call_log(settings: Settings) -> None:
     assert settings.llm_calls_file.parent == settings.log_dir
 
 
+def test_source_budget_and_cache_settings_reach_the_worker(settings):
+    settings.source_evidence_max_calls = 3
+    settings.source_evidence_max_tokens = 20000
+    settings.source_evidence_cache_enabled = False
+    settings.source_evidence_cache_ttl_sec = 60
+    env = settings.env_for_hecate()
+    assert env["HECATE_RUNNER_SOURCE_EVIDENCE_MAX_CALLS"] == "3"
+    assert env["HECATE_RUNNER_SOURCE_EVIDENCE_MAX_TOKENS"] == "20000"
+    assert env["HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED"] == "false"
+    assert env["HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_TTL_SEC"] == "60"
+
+
 def test_env_for_hecate_passes_explicit_llm_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HECATE_WORKSPACE", "/tmp/hecate")
     monkeypatch.setenv("HECATE_LLM_PROVIDER", "ollama")
     monkeypatch.setenv("HECATE_LLM_MODEL", "qwen2.5:14b-instruct-q4_K_M")
+    monkeypatch.setenv("HECATE_LLM_SIMPLE_PROVIDER", "ollama")
+    monkeypatch.setenv("HECATE_LLM_SIMPLE_MODEL", "qwen2.5:7b")
+    monkeypatch.setenv("HECATE_LLM_COMPLEX_PROVIDER", "litellm")
+    monkeypatch.setenv("HECATE_LLM_COMPLEX_MODEL", "anthropic/claude-sonnet-4-5-20250514")
     env = Settings(_env_file=None).env_for_hecate()  # type: ignore[call-arg]
     assert env["HECATE_LLM_PROVIDER"] == "ollama"
     assert env["HECATE_LLM_MODEL"] == "qwen2.5:14b-instruct-q4_K_M"
+    assert env["HECATE_LLM_SIMPLE_PROVIDER"] == "ollama"
+    assert env["HECATE_LLM_SIMPLE_MODEL"] == "qwen2.5:7b"
+    assert env["HECATE_LLM_COMPLEX_PROVIDER"] == "litellm"
+    assert env["HECATE_LLM_COMPLEX_MODEL"] == "anthropic/claude-sonnet-4-5-20250514"
 
 
 def test_max_drafts_bounds(monkeypatch: pytest.MonkeyPatch) -> None:

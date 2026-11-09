@@ -182,9 +182,7 @@ def _configure_logging(settings: Settings, *, to_stdout: bool = True) -> None:
         backup_count=1,
     )
     os.environ["HECATE_EVENTS_LOG"] = str(settings.events_file)
-    install_api_call_recorder(
-        settings.api_calls_file, also_propagate=settings.log_level == "DEBUG"
-    )
+    install_api_call_recorder(settings.api_calls_file, also_propagate=settings.log_level == "DEBUG")
 
 
 # --- Commands --------------------------------------------------------------
@@ -221,7 +219,9 @@ def run(
 @app.command()
 def maintenance(
     once: Annotated[bool, typer.Option("--once", help="Run due jobs once, then exit.")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="List enabled jobs without launching workers.")] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="List enabled jobs without launching workers.")
+    ] = False,
 ) -> None:
     """Run independent scheduled publishing, SIEM audit and drift-alert workers."""
     import signal
@@ -233,10 +233,14 @@ def maintenance(
     _configure_logging(settings)
     scheduler = MaintenanceScheduler(settings)
     if dry_run:
-        console.print({job: interval for job, interval in scheduler.intervals().items() if interval > 0})
+        console.print(
+            {job: interval for job, interval in scheduler.intervals().items() if interval > 0}
+        )
         return
     stop = threading.Event()
-    previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
+    previous = {
+        sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
     try:
         scheduler.tick()
         while not stop.is_set() and (not once or scheduler.active):

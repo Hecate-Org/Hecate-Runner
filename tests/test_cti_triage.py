@@ -285,3 +285,43 @@ def test_technical_report_with_whitepaper_keyword_but_real_indicators_passes() -
     )
     verdict = triage(item)
     assert verdict.park is False
+
+
+_TOPIC_ESSAY = " ".join(
+    ["Organizations should rethink how they staff a modern detection program"] * 8
+)
+
+
+def test_a_long_topic_essay_is_parked_before_research() -> None:
+    item = CTIItem(
+        content=_TOPIC_ESSAY,
+        source="rss",
+        title="Why detection engineering needs a new operating model",
+        metadata={},
+    )
+    verdict = triage(item)
+    assert verdict.park is True
+    assert verdict.reason == "topic prose names no intrusion, exploit procedure, or indicator"
+
+
+def test_the_same_essay_passes_when_it_names_a_procedure_or_an_intrusion() -> None:
+    with_cve = CTIItem(
+        content=_TOPIC_ESSAY + " CVE-2026-58115 is exploited by posting to /flows.",
+        source="rss",
+        title="Why detection engineering needs a new operating model",
+        metadata={},
+    )
+    named = CTIItem(content=_TOPIC_ESSAY, source="rss", title="Lynx Ransomware", metadata={})
+    with_command = CTIItem(
+        content=_TOPIC_ESSAY + " The host ran powershell.exe -enc AAAA.",
+        source="rss",
+        title="Notes",
+        metadata={},
+    )
+    assert triage(with_cve).park is False
+    assert triage(named).park is False
+    assert triage(with_command).park is False
+
+
+def test_a_short_blurb_is_not_parked_for_lack_of_detail() -> None:
+    assert triage(_item("Cat's Got Your Files: Lynx Ransomware")).park is False

@@ -10,11 +10,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+
+def splunk_settings(workspace: Path | None = None) -> dict[str, str]:
+    """Read only the selected workspace, with explicit environment overrides.
+
+    Keep file values local so another workspace cannot inherit its credentials.
+    Disable interpolation to prevent ambient variables changing credential values.
+    """
+    from dotenv import dotenv_values
+
+    values = (
+        dotenv_values(Path(workspace) / ".env", interpolate=False) if workspace is not None else {}
+    )
+    return {**{key: value for key, value in values.items() if value is not None}, **os.environ}
 
 
 def forward_events_to_splunk(
@@ -27,6 +42,7 @@ def forward_events_to_splunk(
     password: str | None = None,
     verify_ssl: bool | None = None,
     timeout_sec: float = 15.0,
+    workspace: Path | None = None,
 ) -> int:
     """Ingest a list of telemetry events into Splunk via Simple Receiver REST API.
 
@@ -40,6 +56,7 @@ def forward_events_to_splunk(
         password: Splunk password (default: read from SPLUNK_PASSWORD).
         verify_ssl: Whether to verify SSL certificates (default: SPLUNK_VERIFY_SSL).
         timeout_sec: Request timeout in seconds.
+        workspace: Optional workspace whose .env supplies unset environment values.
 
     Returns:
         Number of events successfully accepted by Splunk.
@@ -47,32 +64,25 @@ def forward_events_to_splunk(
     if not events:
         return 0
 
-    try:
-        from pathlib import Path
+    env = splunk_settings(workspace)
 
-        from dotenv import load_dotenv
+    def setting(name: str, default: str = "") -> str:
+        return env.get(name, default)
 
-        load_dotenv(override=False)
-        for env_path in (
-            Path.cwd() / ".env",
-            Path("/home/chemch/betas/Hecate-Public/.env"),
-            Path.home() / "betas" / "Hecate-Public" / ".env",
-        ):
-            if env_path.exists():
-                load_dotenv(env_path, override=False)
-    except Exception:
-        pass
-
-    splunk_host = (host or os.getenv("SPLUNK_HOST") or "https://localhost:8089").rstrip("/")
+    splunk_host = (host or setting("SPLUNK_HOST") or "https://localhost:8089").rstrip("/")
     if not splunk_host.startswith(("http://", "https://")):
         splunk_host = f"https://{splunk_host}"
 
-    splunk_token = token or os.getenv("SPLUNK_TOKEN")
-    splunk_user = username or os.getenv("SPLUNK_USERNAME") or "admin"
-    splunk_pass = password or os.getenv("SPLUNK_PASSWORD")
+    splunk_token = token or setting("SPLUNK_TOKEN")
+    splunk_user = username or setting("SPLUNK_USERNAME") or "admin"
+    splunk_pass = password or setting("SPLUNK_PASSWORD")
 
     if verify_ssl is None:
-        verify_ssl = os.getenv("SPLUNK_VERIFY_SSL", "false").lower() in ("true", "1", "yes")
+        verify_ssl = setting("SPLUNK_VERIFY_SSL", "true").strip().lower() not in (
+            "false",
+            "0",
+            "no",
+        )
 
     endpoint = f"{splunk_host}/services/receivers/simple"
     params = {"index": index, "sourcetype": sourcetype}

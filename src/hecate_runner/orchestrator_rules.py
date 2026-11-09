@@ -19,6 +19,7 @@ from hecate_runner.cti import CTIItem
 from hecate_runner.cti.reference_rules import reference_candidates
 from hecate_runner.hecate_client import HecateError
 from hecate_runner.hunt_writer import DraftHuntRequest, render_draft
+from hecate_runner.native_queries import transpile_and_write_native
 from hecate_runner.orchestrator_derivations import _RULE_IOC_RE
 from hecate_runner.trail import clip, listing
 
@@ -249,14 +250,7 @@ class OrchestratorRulesMixin:
             try:
                 rule_path.write_text(rule_yaml, encoding="utf-8")
                 try:
-                    from hecate_agent.api import transpile_sigma_rule
-
-                    trans_queries = transpile_sigma_rule(rule_yaml)
-                    for t_res in trans_queries.values():
-                        if getattr(t_res, "success", False) and getattr(t_res, "query", None):
-                            rule_path.with_suffix(t_res.file_extension).write_text(
-                                t_res.query.strip() + "\n", encoding="utf-8"
-                            )
+                    transpile_and_write_native(rule_path, rule_yaml)
                 except Exception as t_err:
                     log.debug("Native EDR transpilation of %s skipped (%s)", rule_path.name, t_err)
             except OSError as exc:
@@ -438,14 +432,7 @@ class OrchestratorRulesMixin:
                 try:
                     rule_path.write_text(rule_yaml, encoding="utf-8")
                     try:
-                        from hecate_agent.api import transpile_sigma_rule
-
-                        trans_queries = transpile_sigma_rule(rule_yaml)
-                        for t_res in trans_queries.values():
-                            if getattr(t_res, "success", False) and getattr(t_res, "query", None):
-                                rule_path.with_suffix(t_res.file_extension).write_text(
-                                    t_res.query.strip() + "\n", encoding="utf-8"
-                                )
+                        transpile_and_write_native(rule_path, rule_yaml)
                     except Exception as t_err:
                         log.debug(
                             "Native EDR transpilation of %s skipped (%s)", rule_path.name, t_err
@@ -640,13 +627,7 @@ class OrchestratorRulesMixin:
                 r_path = out_dir / f"{cat}__{slug or 'rule'}.yml"
             if r_yaml and r_path.parent.exists():
                 try:
-                    from hecate_agent.api import transpile_sigma_rule
-
-                    trans_queries = transpile_sigma_rule(r_yaml)
-                    for t_res in trans_queries.values():
-                        if getattr(t_res, "success", False) and getattr(t_res, "query", None):
-                            q_file = r_path.with_suffix(t_res.file_extension)
-                            q_file.write_text(t_res.query.strip() + "\n", encoding="utf-8")
+                    transpile_and_write_native(r_path, r_yaml)
                 except Exception as t_err:
                     log.debug("Native EDR query generation for %s skipped (%s)", r_path.name, t_err)
 

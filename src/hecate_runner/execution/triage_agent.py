@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+from hecate_agent.core.hunting_knowledge import (
+    EVIDENCE_RULES,
+    load_environment_context,
+    load_stage_guidance,
+)
 
 from hecate_runner.config import Settings
 from hecate_runner.execution.normalizer import NormalizedEvent, extract_entities_from_events
@@ -76,7 +83,8 @@ _LOLBINS = frozenset(
 
 # Highly suspicious argument patterns
 _SUSPICIOUS_CLI_PATTERNS = [
-    re.compile(r"\b(-enc|-encodedcommand)\b", re.IGNORECASE),
+    # Lookbehind: `-enc` is not a word char, so `\b` before the dash never matches.
+    re.compile(r"(?<![\w-])(-enc|-encodedcommand)\b", re.IGNORECASE),
     re.compile(r"\b(downloadstring|downloadfile|invoke-expression|\biex\b)\b", re.IGNORECASE),
     re.compile(r"curl\s+-[a-zA-Z]*f.*\|\s*(bash|sh)", re.IGNORECASE),
     re.compile(r"wget\s+-[a-zA-Z]*O.*\|\s*(bash|sh)", re.IGNORECASE),
@@ -94,7 +102,7 @@ class FindingTriageReport:
     sweep_id: str
     target_siem: str
     verdict: str  # "true_positive" | "suspicious" | "benign_noise" | "inconclusive"
-    confidence: float  # 0.0 - 1.0
+    confidence: float  # Uncalibrated 0.0-1.0 assessment/routing score, not a probability
     summary: str
     rationale: str
     technique_matches: list[str] = field(default_factory=list)
@@ -103,6 +111,9 @@ class FindingTriageReport:
     event_count: int = 0
     triaged_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finding_id: str = ""
+    confidence_kind: str = "uncalibrated_assessment"
+    reviewed_event_count: int = 0
+    assessment_source: str = "heuristic"
 
     @property
     def is_threat(self) -> bool:
@@ -139,7 +150,7 @@ class FindingTriageAgent:
                 confidence=0.0,
                 summary="No telemetry events provided for triage.",
                 rationale="Empty event list.",
-                recommended_action="ignore",
+                recommended_action="pivot",
                 event_count=0,
             )
 
@@ -190,19 +201,17 @@ class FindingTriageAgent:
         known_techniques: list[str],
     ) -> FindingTriageReport:
         """Deterministic heuristic rule evaluation."""
-        server_parent_hits = 0
         suspicious_cli_hits = 0
         interpreter_hits = 0
         lolbin_hits = 0
+        server_command_hits = 0
         matched_techniques = set(known_techniques)
 
         for e in events:
             proc_base = (e.process_name.split("/")[-1].split("\\")[-1]).lower()
             parent_base = (e.parent_process.split("/")[-1].split("\\")[-1]).lower()
 
-            if any(p in parent_base for p in _SERVER_PARENTS):
-                server_parent_hits += 1
-
+            server_parent = parent_base in _SERVER_PARENTS
             if any(proc_base == interp for interp in _INTERPRETERS):
                 interpreter_hits += 1
                 if proc_base in ("sh", "bash", "zsh"):
@@ -214,37 +223,40 @@ class FindingTriageAgent:
 
             if any(proc_base == lol for lol in _LOLBINS):
                 lolbin_hits += 1
-                matched_techniques.add("T1105")
 
             for pat in _SUSPICIOUS_CLI_PATTERNS:
                 if pat.search(e.command_line):
                     suspicious_cli_hits += 1
+                    if server_parent:
+                        server_command_hits += 1
                     break
 
         total_ev = len(events)
 
-        # High Confidence: Server runtime spawned interactive shell or LOLBin
-        if server_parent_hits > 0 and (interpreter_hits > 0 or suspicious_cli_hits > 0):
-            matched_techniques.add("T1190")
+        # A same-event server/command association is a lead, not proof of exploit
+        # success or initial access. Never combine unrelated events to assert it.
+        if server_command_hits > 0:
             return FindingTriageReport(
                 hunt_id=hunt_id,
                 sweep_id=sweep_id,
                 target_siem=target_siem,
-                verdict="true_positive",
-                confidence=0.92,
+                verdict="suspicious",
+                confidence=0.85,
                 summary=(
-                    f"Strong attack corroboration: Application runtime "
-                    f"({', '.join(entities.get('parent_processes', [])[:2])}) spawned "
-                    f"an interactive shell or executed command injection payload."
+                    "Suspicious application runtime activity: "
+                    f"{', '.join(entities.get('parent_processes', [])[:2])} "
+                    "is associated with a suspicious command pattern; authorization and outcome need verification."
                 ),
                 rationale=(
-                    f"Detected {server_parent_hits} event(s) where server processes spawned "
-                    f"interpreters/LOLBins with suspicious command lines matching hypothesis: '{hypothesis[:100]}'."
+                    f"Detected {server_command_hits} event(s) linking a server parent and suspicious command. "
+                    "Heuristics do not establish malicious intent, the entry vector or successful exploitation. "
+                    f"Evaluate the hypothesis and benign alternatives: '{hypothesis[:100]}'."
                 ),
                 technique_matches=sorted(matched_techniques),
                 extracted_entities=entities,
                 recommended_action="escalate_to_soc",
                 event_count=total_ev,
+                reviewed_event_count=total_ev,
             )
 
         # Moderate Confidence: Suspicious commands or LOLBins in environment
@@ -267,24 +279,26 @@ class FindingTriageAgent:
                 extracted_entities=entities,
                 recommended_action="pivot",
                 event_count=total_ev,
+                reviewed_event_count=total_ev,
             )
 
-        # Benign Baseline / Low Suspicion
+        # No heuristic match cannot establish a benign baseline or exclude abuse.
         return FindingTriageReport(
             hunt_id=hunt_id,
             sweep_id=sweep_id,
             target_siem=target_siem,
-            verdict="benign_noise",
-            confidence=0.70,
-            summary="Events appear to reflect routine operational baseline or unweaponized execution.",
+            verdict="inconclusive",
+            confidence=0.0,
+            summary="No configured heuristic identified suspicious activity; intent remains unverified.",
             rationale=(
-                f"Observed {total_ev} event(s) matched query syntax, but lack weaponized flags, "
-                f"anomalous parent relationships, or C2 patterns."
+                f"Reviewed {total_ev} event(s) without a configured heuristic match. "
+                "This does not establish authorized behavior or rule out techniques outside heuristic coverage."
             ),
             technique_matches=sorted(matched_techniques),
             extracted_entities=entities,
-            recommended_action="tune_rule",
+            recommended_action="pivot",
             event_count=total_ev,
+            reviewed_event_count=total_ev,
         )
 
     def _evaluate_llm(
@@ -299,25 +313,37 @@ class FindingTriageAgent:
     ) -> FindingTriageReport | None:
         """Call LLM provider to evaluate findings against the hypothesis."""
         try:
-            from hecate_agent.core.llm_provider import create_provider
+            from hecate_agent.core.llm_router import create_router
 
-            provider = create_provider()
-        except Exception:
-            return None
-
-        sample_lines = []
-        for i, ev in enumerate(events[:5], 1):
-            sample_lines.append(
-                f"Event {i}:\n"
-                f"  Host: {ev.host}\n"
-                f"  User: {ev.user}\n"
-                f"  Process: {ev.process_name}\n"
-                f"  Parent: {ev.parent_process}\n"
-                f"  CommandLine: {ev.command_line}\n"
-                f"  IP: {ev.ip}\n"
+            provider = create_router()
+            # Spread a bounded sample across returned events, while explicitly
+            # retaining the fact that it is not a representative population test.
+            sample = (
+                events
+                if len(events) <= 5
+                else [events[i * (len(events) - 1) // 4] for i in range(5)]
+            )
+            sample_data = [
+                {
+                    "event_id": ev.event_id,
+                    "timestamp": ev.timestamp,
+                    "host": ev.host,
+                    "user": ev.user,
+                    "process": ev.process_name,
+                    "parent": ev.parent_process,
+                    "command_line": ev.command_line,
+                    "ip": ev.ip,
+                }
+                for ev in sample
+            ]
+            workspace = self.settings.hecate_workspace
+            system = (
+                f"Evidence rules:\n{EVIDENCE_RULES}\n\n"
+                f"{load_stage_guidance('triage', workspace=workspace)}\n\n"
+                f"{load_environment_context(workspace=workspace)}"
             )
 
-        prompt = f"""You are an expert Threat Hunter and Incident Responder analyzing live SIEM detection events.
+            prompt = f"""You are an expert Threat Hunter and Incident Responder analyzing live SIEM detection events.
 
 HUNT DETAILS:
 - Hunt ID: {hunt_id}
@@ -325,10 +351,15 @@ HUNT DETAILS:
 - MITRE Techniques: {", ".join(known_techniques)}
 - SIEM Backend: {target_siem}
 
-SAMPLE TELEMETRY EVENTS ({len(events)} total matches):
-{"".join(sample_lines)}
+SAMPLE TELEMETRY EVENTS ({len(sample)} reviewed of {len(events)} returned events;
+upstream population completeness is unverified; this sample is not statistically representative):
+{json.dumps(sample_data, ensure_ascii=True)}
 
 Evaluate whether these events corroborate the threat hypothesis or represent benign operational noise.
+Only cite supplied event IDs and observed facts. Describe missing context and contrary evidence.
+Do not infer malicious success from a command, or benignness from missing heuristic matches.
+Do not generalize a benign sample to unreviewed events. Confidence is an uncalibrated
+assessment score, not a probability. Any observed technique matches are candidate mappings.
 Respond ONLY with a valid JSON object matching this schema:
 {{
   "verdict": "true_positive" | "suspicious" | "benign_noise" | "inconclusive",
@@ -339,24 +370,54 @@ Respond ONLY with a valid JSON object matching this schema:
   "recommended_action": "escalate_to_soc" | "pivot" | "tune_rule" | "ignore"
 }}
 """
-        resp = provider.complete([{"role": "user", "content": prompt}], max_tokens=1024, temperature=0.1)
-        text = resp.text.strip()
-        # Find JSON object in response
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            data = json.loads(text[start : end + 1])
-            return FindingTriageReport(
-                hunt_id=hunt_id,
-                sweep_id=sweep_id,
-                target_siem=target_siem,
-                verdict=data.get("verdict", "suspicious"),
-                confidence=float(data.get("confidence", 0.7)),
-                summary=str(data.get("summary", "")),
-                rationale=str(data.get("rationale", "")),
-                technique_matches=list(data.get("technique_matches", known_techniques)),
-                extracted_entities=entities,
-                recommended_action=data.get("recommended_action", "pivot"),
-                event_count=len(events),
+            resp = provider.complete(
+                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.1,
+                capability="finding_triage",
             )
+            text = resp.text.strip()
+            # Find JSON object in response
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1:
+                data = json.loads(text[start : end + 1])
+                verdict = data.get("verdict", "inconclusive")
+                action = data.get("recommended_action", "pivot")
+                score = float(data.get("confidence", 0.0))
+                if verdict not in {"true_positive", "suspicious", "benign_noise", "inconclusive"}:
+                    return None
+                if action not in {
+                    "escalate_to_soc",
+                    "pivot",
+                    "tune_rule",
+                    "ignore",
+                } or not math.isfinite(score):
+                    return None
+                rationale = str(data.get("rationale", ""))
+                rationale += (
+                    f" Reviewed {len(sample)} of {len(events)} returned events; "
+                    "upstream population completeness is unverified. The assessment score is uncalibrated."
+                )
+                if len(sample) < len(events) and verdict == "benign_noise":
+                    verdict = "inconclusive"
+                    action = "pivot"
+                    rationale += " Only a partial sample was reviewed; unreviewed events cannot be classified as benign."
+                return FindingTriageReport(
+                    hunt_id=hunt_id,
+                    sweep_id=sweep_id,
+                    target_siem=target_siem,
+                    verdict=verdict,
+                    confidence=max(0.0, min(score, 1.0)),
+                    summary=str(data.get("summary", "")),
+                    rationale=rationale,
+                    technique_matches=list(data.get("technique_matches", known_techniques)),
+                    extracted_entities=entities,
+                    recommended_action=action,
+                    event_count=len(events),
+                    reviewed_event_count=len(sample),
+                    assessment_source="llm",
+                )
+        except Exception:
+            return None
         return None

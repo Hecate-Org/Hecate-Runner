@@ -116,9 +116,7 @@ class StageMeasurement:
             if self.usage is None:
                 self.usage = getattr(exc, "usage", None)
         usage_kwargs = (
-            asdict(self.usage)
-            if (self.usage is not None and is_dataclass(self.usage))
-            else {}
+            asdict(self.usage) if (self.usage is not None and is_dataclass(self.usage)) else {}
         )
         self.owner._record(
             StageMetric(

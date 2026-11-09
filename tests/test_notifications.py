@@ -364,7 +364,7 @@ def test_notify_ops_metrics_custom_channel(
 
     assert len(captured) == 1
     assert captured[0][0] == "#custom-metrics"
-    assert "Hecate Daily Autonomous Ops" in captured[0][1]
+    assert "Hecate 24-Hour Autonomous Ops" in captured[0][1]
     assert captured[0][2] is not None
 
 

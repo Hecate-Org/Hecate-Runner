@@ -238,7 +238,10 @@ class SafeExecutionGate:
                     target=self.provider.name,
                     outcome="clean",
                     matched_count=0,
-                    detail=f"Clean sweep: 0 events matched on {self.provider.name}.",
+                    detail=(
+                        f"Not observed: 0 events matched on {self.provider.name} within the tested scope. "
+                        "This does not disprove the hypothesis or establish complete telemetry coverage."
+                    ),
                     executed_at=count_res.executed_at,
                     count_query=count_query_text,
                     raw_query=proposed.query_text,

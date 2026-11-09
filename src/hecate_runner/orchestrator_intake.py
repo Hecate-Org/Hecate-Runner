@@ -47,8 +47,8 @@ class OrchestratorIntakeMixin:
         H-0011 and H-0017 were both drafted from one MISP event (Kunai, open
         recursive DNS), a day apart, when the event reappeared on the feed.
         The second draft cost a research run and a review for nothing the
-        first did not already say. Matched on the rendered references link,
-        which every draft writes, so no separate index has to be kept in step.
+        first did not already say. The incremental index is refreshed from the
+        actual hunt files, including manual edits, before looking up membership.
         """
         url = item.source_url.strip()
         needle = f"]({url})" if url else None
@@ -68,20 +68,51 @@ class OrchestratorIntakeMixin:
         now = datetime.datetime.now(datetime.UTC)
         max_cve_age_sec = 3 * 86400  # 72 hours deduplication window
 
-        for path in sorted(self.settings.hunts_root.rglob("H-*.md"), reverse=True):
-            try:
-                text = path.read_text(encoding="utf-8")
-                if needle and needle in text:
-                    return path.stem
-
-                if cves:
-                    mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime, tz=datetime.UTC)
-                    if (now - mtime).total_seconds() <= max_cve_age_sec:
-                        for cve in cves:
+        if not needle and not cves:
+            return None
+        try:
+            from hecate_agent.core.hunt_catalog import source_catalog
+        except ImportError:
+            # Core and Runner can be upgraded independently. Older Core builds
+            # retain literal matching until the shared index becomes available.
+            for path in sorted(self.settings.hunts_root.rglob("H-*.md"), reverse=True):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    if needle and needle in text:
+                        return str(path.stem)
+                    if path.stat().st_mtime_ns >= int(
+                        (now.timestamp() - max_cve_age_sec) * 1_000_000_000
+                    ):
+                        for cve in sorted(cves):
                             if cve in text:
                                 return f"{path.stem} covering {cve} within 72h window"
-            except OSError:
-                continue
+                except (OSError, UnicodeError):
+                    continue
+            return None
+
+        index = source_catalog(self.settings.hunts_root)
+        url_matches = set(index.lookup("url", url)) if needle else set()
+        cutoff = int((now.timestamp() - max_cve_age_sec) * 1_000_000_000)
+        cve_matches = {
+            path: cve for cve in sorted(cves) for path in index.lookup("cve", cve, since_ns=cutoff)
+        }
+        unusual = {cve for cve in cves if not re.fullmatch(r"CVE-\d{4}-\d{4,32}", cve)}
+        if unusual:
+            # Preserve legacy literal matching for malformed/custom feed values;
+            # normal CVE lookups use the index without reading hunt bodies.
+            for path in self.settings.hunts_root.rglob("H-*.md"):
+                try:
+                    if path.stat().st_mtime_ns >= cutoff:
+                        text = path.read_text(encoding="utf-8")
+                        for cve in sorted(unusual):
+                            if cve in text:
+                                cve_matches[path.absolute()] = cve
+                except (OSError, UnicodeError):
+                    continue
+        for path in sorted(url_matches | cve_matches.keys(), reverse=True):
+            if path in url_matches:
+                return str(path.stem)
+            return f"{path.stem} covering {cve_matches[path]} within 72h window"
         return None
 
     def _next_actionable_item(self) -> tuple[CTIItem | None, int, int]:

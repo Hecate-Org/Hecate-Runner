@@ -64,7 +64,9 @@ class LabProbeReport:
         if not data or not isinstance(data, dict):
             return None
         results = [
-            LabHitResult(**{k: v for k, v in item.items() if k in LabHitResult.__dataclass_fields__})
+            LabHitResult(
+                **{k: v for k, v in item.items() if k in LabHitResult.__dataclass_fields__}
+            )
             for item in (data.get("results") or [])
             if isinstance(item, dict)
         ]
@@ -136,11 +138,7 @@ def _aggregate_status(results: list[LabHitResult]) -> tuple[str, int, str]:
     errors = [r for r in results if r.outcome == "error"]
     hits = [r for r in results if r.outcome in ("hit", "overmatch")]
     if hits:
-        status = (
-            "overmatch"
-            if any(r.outcome == "overmatch" for r in hits)
-            else "hit"
-        )
+        status = "overmatch" if any(r.outcome == "overmatch" for r in hits) else "hit"
         detail = f"{len(results)} quer{'y' if len(results) == 1 else 'ies'}, {total} hit(s)"
         return status, total, detail
     if errors and len(errors) == len(results):
@@ -325,4 +323,3 @@ def format_lab_probe_slack(probe: dict[str, Any] | LabProbeReport | None) -> str
             f"({hits} hits in {window}d — query may be too broad)."
         )
     return f"*Lab hits:* {hits} hit(s) on `{provider}` in {window}d."
-

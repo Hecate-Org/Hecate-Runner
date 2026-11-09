@@ -84,6 +84,10 @@ class DraftHuntRequest:
     campaign_updates: list[dict[str, Any]] = field(default_factory=list)
     #: Automated SIEM and EDR query deployment receipts
     siem_deployments: list[dict[str, Any]] = field(default_factory=list)
+    #: One record per OSINT lookup: observable, kind, service, outcome, verdict.
+    enrichment_citations: list[dict[str, str]] = field(default_factory=list)
+    #: Draft-time lab SIEM probe: provider, window, status, hit counts per query file.
+    lab_probe: dict[str, Any] = field(default_factory=dict)
 
 
 #: Ceiling on the CTI blurb embedded in a draft. Generous on purpose: the
@@ -573,6 +577,56 @@ _RULE_PLACEMENT_NOTE = {
 }
 
 
+_REFERENCE_DOMAINS = frozenset({
+    "cve.org",
+    "first.org",
+    "mitre.org",
+    "nist.gov",
+    "cisa.gov",
+    "cert.org",
+    "sans.org",
+    "owasp.org",
+})
+
+
+def _is_reference_record(record: dict[str, Any], source_url: str = "") -> bool:
+    val = str(record.get("value") or "").strip()
+    rtype = str(record.get("type") or "").strip().lower()
+    if rtype not in {"url", "domain", "hostname", ""}:
+        return False
+    cleaned = (
+        val.replace("[.]", ".")
+        .replace("[dot]", ".")
+        .replace("hxxps://", "https://")
+        .replace("hxxp://", "http://")
+    )
+    if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
+        if cleaned.startswith("/"):
+            return False
+        cleaned = "https://" + cleaned
+    try:
+        from urllib.parse import urlsplit
+
+        host = (urlsplit(cleaned).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    for ref in _REFERENCE_DOMAINS:
+        if host == ref or host.endswith("." + ref):
+            return True
+    if source_url:
+        try:
+            from urllib.parse import urlsplit
+
+            source_host = (urlsplit(source_url).hostname or "").lower()
+            if source_host and (host == source_host or host.endswith("." + source_host)):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _rule_placements(record: dict[str, Any]) -> str:
     """The log sources a record's rules go to, from the same routing the Sigma stage uses.
 
@@ -625,7 +679,7 @@ def _render_source_evidence(req: DraftHuntRequest) -> str:
                 f"| `{_cell(a['value'], 90)}` | {a['kind']} | {_cell(a['role'], 40)} | {a['status']} | {evidence} |"
             )
         lines.append("")
-    records = req.indicator_records
+    records = [r for r in req.indicator_records if not _is_reference_record(r, req.source_url)]
     if records:
         lines += [
             "**Indicators by role** (the feed's indicators, typed against the report):",
@@ -1052,6 +1106,14 @@ def _render_alerting_profile(req: DraftHuntRequest) -> str:
     )
 
 
+def _render_enrichment_citations(req: DraftHuntRequest) -> str:
+    """Per-observable corroboration, from the lookup outcomes rather than their wording."""
+    from hecate_agent.enrichment.result import render_enrichment_citations
+
+    rendered = render_enrichment_citations(req.enrichment_citations)
+    return f"{rendered}\n\n" if rendered else ""
+
+
 def _render_telemetry_prerequisites(req: DraftHuntRequest) -> str:
     """Render platform-specific audit policies and telemetry prerequisites."""
     platforms_lower = {p.strip().lower() for p in req.platforms if p.strip()}
@@ -1362,6 +1424,40 @@ def _render_siem_deployments(req: DraftHuntRequest) -> str:
     return "\n".join(lines)
 
 
+def _render_lab_probe(req: DraftHuntRequest) -> str:
+    """Render draft-time lab SIEM hit/miss next to hunting queries."""
+    probe = req.lab_probe or {}
+    if not probe:
+        return ""
+    status = str(probe.get("status") or "").strip().lower()
+    if not status:
+        return ""
+    provider = str(probe.get("provider") or "lab")
+    window = probe.get("window_days") or "?"
+    detail = str(probe.get("detail") or "")
+    lines = [
+        "### Lab query probe\n",
+        f"- **Provider:** `{provider}`",
+        f"- **Window:** {window} day(s)",
+        f"- **Result:** `{status}`" + (f" — {detail}" if detail else ""),
+    ]
+    results = probe.get("results") or []
+    if isinstance(results, list) and results:
+        lines.append("")
+        lines.append("| Query | Hits | Window | Outcome |")
+        lines.append("| :--- | ---: | ---: | :--- |")
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            qf = str(item.get("query_file") or "query")
+            hits = item.get("hits", 0)
+            w = item.get("window_days", window)
+            outcome = str(item.get("outcome") or "")
+            lines.append(f"| `{qf}` | {hits} | {w}d | `{outcome}` |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_draft(req: DraftHuntRequest) -> str:
     """Return the full markdown content for a draft hunt."""
     hyp = req.hypothesis
@@ -1387,6 +1483,16 @@ def render_draft(req: DraftHuntRequest) -> str:
     # workspace has no CrowdStrike. The rendered body already shows "[TBD]"
     # for the same emptiness.
     data_sources = hyp.data_sources
+    from hecate_agent.core.publish_check import evaluate_hunt
+
+    publish = evaluate_hunt(
+        "",
+        [
+            (str(rule.get("title") or "rule"), str(rule.get("rule_yaml") or ""))
+            for rule in req.sigma_rules
+            if str(rule.get("rule_yaml") or "").strip()
+        ],
+    )
 
     def bullets(items: list[str]) -> str:
         return "\n".join(f"- {i}" for i in items) if items else "- [TBD]"
@@ -1410,6 +1516,19 @@ def render_draft(req: DraftHuntRequest) -> str:
         "false_positives: 0\n"
         "customer_deliverables: []\n"
         f"tags: {json.dumps(_draft_tags(hyp.is_threat_report, hyp.is_indicator_only))}\n"
+        f"publish_check: {publish.verdict}\n"
+        f"publish_findings: {json.dumps([item.to_dict() for item in publish.findings])}\n"
+        + (
+            f"lab_probe: {req.lab_probe.get('status')}\n"
+            f"lab_probe_provider: {json.dumps(req.lab_probe.get('provider') or '')}\n"
+            f"lab_probe_window_days: {int(req.lab_probe.get('window_days') or 0)}\n"
+            f"lab_probe_hits: {int(req.lab_probe.get('total_hits') or 0)}\n"
+            f"lab_probe_queries: {int(req.lab_probe.get('queries_run') or 0)}\n"
+            f"lab_probe_detail: {json.dumps(req.lab_probe.get('detail') or '')}\n"
+            f"lab_probe_results: {json.dumps(req.lab_probe.get('results') or [])}\n"
+            if req.lab_probe.get("status")
+            else ""
+        )
         + (
             # Every evaluated rule, not any: H-0016 read "validated" with 2 of 12.
             f"purple_team_validated: {str(req.purple_team_rules_validated == req.purple_team_rules_evaluated).lower()}\n"
@@ -1529,7 +1648,7 @@ Source CTI:
 
 ### Expected Observables
 
-- **Data Sources:** {", ".join(hyp.data_sources) or "[TBD]"}
+{_render_enrichment_citations(req)}- **Data Sources:** {", ".join(hyp.data_sources) or "[TBD]"}
 - **Observables:** listed under "What Suspicious Looks Like" above
 
 ### Telemetry & Audit Prerequisites
@@ -1552,6 +1671,7 @@ Source CTI:
 {_render_sigma_section(req)}{_render_review_gaps(req)}
 {_render_atomic_tests(techniques, platforms=req.platforms)}
 {_render_bas_verification(req)}
+{_render_lab_probe(req)}
 {_render_siem_deployments(req)}
 ---
 

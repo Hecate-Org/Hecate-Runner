@@ -12,6 +12,9 @@ A practical handbook of step-by-step developer recipes for setting up, extending
 5. [Recipe 5: Running Local Evals and Telemetry Replays](#recipe-5-running-local-evals-and-telemetry-replays)
 6. [Recipe 6: Operating the Autonomous Perpetual Daemon](#recipe-6-operating-the-autonomous-perpetual-daemon)
 7. [Recipe 7: Configuring ChatOps & The Slack Bot](#recipe-7-configuring-chatops--the-slack-bot)
+8. [Recipe 8: Approved Query Execution against Sentinel, Elastic, and LogScale](#recipe-8-approved-query-execution-against-sentinel-elastic-and-logscale)
+9. [Recipe 9: SIEM Drift Detection & Alert Reminders](#recipe-9-siem-drift-detection--alert-reminders)
+10. [Recipe 10: LLM Metrics & Token Estimation](#recipe-10-llm-metrics--token-estimation)
 
 ---
 
@@ -55,7 +58,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 TAVILY_API_KEY=tvly-...
 
 # Workspace Root
-HECATE_WORKSPACE=/home/chemch/betas/Hecate-Workspace
+HECATE_WORKSPACE=/path/to/hecate-public
 ```
 
 ### 1.4 Verify Installation & Run Tests
@@ -105,6 +108,19 @@ uv run hecate-agent hunt promote --hunt H-0885 --output splunk
 uv run hecate-agent hunt promote --hunt H-0885 --output sentinel
 uv run hecate-agent hunt promote --hunt H-0885 --output crowdstrike
 ```
+
+Core reuses successful native conversion text across generation, final artifact
+checks, deployment, and tuning. Its in-memory cache holds up to 256 exact
+Sigma-YAML/target pairs; changed YAML gets a fresh conversion. Every use still
+runs the current syntax validator and returns independent result objects. Failed
+or invalid conversions are not retained. Native query files are rewritten only
+when their canonical contents differ; missing or modified files are repaired
+from the Sigma rule.
+
+The cache lasts for the current process, so new processes convert their first
+use of a rule normally. Restart Core/Runner after backend package changes. When
+changing backend mappings or pipelines inside a running Python process, call
+`SigmaTranspiler.clear_cache()` to invalidate both query and backend caches.
 
 ---
 
@@ -183,7 +199,7 @@ SUPPORTED_TARGETS = {
     "qradar": "IBM QRadar AQL",
 }
 ```
-Define the backend initialization and pipeline options inside `transpile_rule()`.
+Define backend initialization and pipeline options inside `_transpile_single_target()`.
 
 ---
 
@@ -317,16 +333,16 @@ The autonomous runner runs as a resident Linux systemd service.
 ### 6.1 Daemon Commands
 ```bash
 # Check daemon status
-systemctl --user status hecate-runner-daemon.service
+sudo systemctl status hecate-runner-daemon.service hecate-runner-maintenance.service
 
 # View live daemon logs
-journalctl --user -u hecate-runner-daemon.service -f
+sudo journalctl -u hecate-runner-daemon.service -f
 
 # Restart daemon after updating code
-systemctl --user restart hecate-runner-daemon.service
+sudo systemctl restart hecate-runner-daemon.service hecate-runner-maintenance.service
 
 # Stop daemon
-systemctl --user stop hecate-runner-daemon.service
+sudo systemctl stop hecate-runner-daemon.service
 ```
 
 ### 6.2 Running the Daemon Interactively in Foreground
@@ -335,6 +351,46 @@ For debugging or testing without systemd:
 cd ~/betas/Hecate-Runner
 uv run hecate-runner daemon --interval 60 --max-cycles 0
 ```
+
+In a separate terminal, run `uv run hecate-runner maintenance`. Hunt cycles only
+snapshot and queue publication work; they never wait for GitHub/MISP synchronization
+or SIEM drift sweeps. Manual `publish`, `misp publish`, and `audit-siem` commands
+remain synchronous when explicitly requested.
+
+For system services, review workspace paths in `systemd/`, run
+`sudo ./scripts/install-systemd.sh`, then
+`sudo systemctl enable --now hecate-runner-maintenance.service`.
+The supplied hunting daemon unit also requests the maintenance service at startup.
+Update installed units when upgrading; starting the CLI hunting daemon alone does
+not start maintenance. To stop all automatic work, stop both services.
+
+The legacy hourly orchestration service and timer are retired. The installer
+backs up and removes those two units instead of reinstalling them. For an existing
+deployment that only needs cleanup, run:
+
+```bash
+sudo bash scripts/retire-legacy-services.sh
+```
+
+This preserves the running daemon, maintenance, Slack bot, BAS agent and firewall.
+Prior unit files are archived under `/var/backups/hecate-retired-systemd/`.
+
+Maintenance uses independent worker processes for GitHub, MISP, SIEM audits, and
+drift-alert delivery. A slow target cannot block the others or hunt scheduling.
+Each publisher handles one due item per `HECATE_RUNNER_MAINTENANCE_INTERVAL_SEC`
+(default 60 seconds), retaining its existing durable per-item retry policy. Drift
+delivery handles up to 20 cards per batch. SIEM audits use
+`HECATE_RUNNER_SIEM_DRIFT_AUDIT_INTERVAL_SEC` (default 3600; `0` disables audits).
+Per-workspace process locks prevent overlapping jobs across multiple schedulers.
+
+`HECATE_RUNNER_MAINTENANCE_JOB_TIMEOUT_SEC` (default 900 seconds) bounds each worker;
+timeouts kill and reap its process group and apply retry backoff. Configure this
+deadline for the size and response times of the SIEM catalog: an audit must finish
+to publish a new full report. Interrupted audits do not clear prior alert state.
+Last job durations, outcomes and next-run times are stored in
+`.hecate/maintenance/<job>.json`; worker output is in `logs/maintenance.log`.
+Use `hecate-runner maintenance --once` to process currently due work and exit,
+or add `--dry-run` to list enabled jobs without starting workers.
 
 ### 6.3 Checking Pipeline Health & Metrics
 ```bash
@@ -367,11 +423,138 @@ SLACK_CHANNEL_ID=C0123456789
 cd ~/betas/Hecate-Runner
 uv run hecate-runner slack-bot
 
-# Or manage via systemd
-systemctl --user start hecate-runner-slack-bot.service
+# Or install/manage the user service (review paths in the template first)
+mkdir -p ~/.config/systemd/user
+cp systemd/hecate-slack-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hecate-slack-bot.service
 ```
 
 ### 7.3 Available Slash Commands in Slack
 - `/hecate status`: Returns active queue depth, recent hunts, and daily quota consumption.
 - `/hecate hunt H-0882`: Returns the summary, hypothesis, and candidate Sigma rules for hunt `H-0882`.
 - `/hecate promote H-0882`: Triggers the CI promotion check and generates a pull request.
+
+---
+
+## Recipe 8: Approved Query Execution against Sentinel, Elastic, and LogScale
+
+Hecate supports live query validation against enterprise SIEM backends using a strict "propose, don't execute" approval gate:
+
+```bash
+# Propose a bounded query
+hecate-runner propose H-0001 --data-source sentinel --query 'SecurityEvent | where EventID == 4688' --time-range-days 1 --limit 100
+
+# Explicitly approve and execute
+hecate-runner approve H-0001
+```
+
+### Supported Providers & Configuration
+
+Set `HECATE_RUNNER_QUERY_PROVIDER` to `sentinel`, `elastic`, or `crowdstrike`. Credentials can be supplied through `.env` or environment variables:
+
+| Provider | Required Configuration | Query Dialect |
+| :--- | :--- | :--- |
+| `sentinel` | `SENTINEL_WORKSPACE_ID`, `SENTINEL_BEARER_TOKEN` (or `AZURE_ACCESS_TOKEN`) | Azure Monitor Logs (KQL) |
+| `elastic` | `ELASTIC_URL`, `ELASTIC_API_KEY`, `ELASTIC_INDEX` | Elasticsearch EQL |
+| `crowdstrike` | `FALCON_LOGSCALE_URL`, `FALCON_LOGSCALE_REPO`, `FALCON_LOGSCALE_TOKEN` | LogScale CQL |
+
+- **Guardrails:** Adapters independently enforce maximum lookbacks (`HECATE_RUNNER_MAX_QUERY_TIME_RANGE_DAYS`) and result caps (`HECATE_RUNNER_MAX_QUERY_LIMIT`).
+- **Redaction:** `hecate-runner config` automatically redacts query tokens, API keys, and secrets.
+- **Diagnostics:** `hecate-runner doctor` checks configuration completeness without contacting the remote services.
+
+---
+
+## Recipe 9: SIEM Drift Detection & Alert Reminders
+
+The runner audits committed workspace queries against deployed SIEM states to detect drift, orphaned rules, or missing detections:
+
+```bash
+# Run SIEM drift audit
+hecate-runner audit-siem
+
+# Audit and dispatch Slack notifications for drifted queries
+hecate-runner audit-siem --alert-slack
+```
+
+- **Workspace Scoping:** `HECATE_WORKSPACE` must point to the target detection repository containing `hunts/` and `queries/`.
+- **Deduplicated Alerts:** Maintenance queues a single consolidated card per affected hunt. Unchanged drift states are suppressed across restarts.
+- **Reminder Frequency:** Controlled by `HECATE_RUNNER_SIEM_DRIFT_ALERT_REMINDER_SEC` (default: 86400s / 24 hours; `0` disables reminders). Stored locally in `.hecate/siem/drift_alerts.db`.
+
+Drift cards are durable outbox records. Observation, claim, and acknowledgement
+use short SQLite transactions; Slack requests run after commit. A per-hunt process
+lock prevents concurrent sends even if a slow request exceeds its claim lease.
+Failures retry with backoff; crashed claims become retryable after five minutes.
+Acknowledgements cannot suppress a newer condition or a resolved condition's
+recurrence. Existing suppression records migrate automatically. As with any
+nontransactional remote delivery, a crash after Slack accepts a message but before
+the local acknowledgement can result in a retry of that message.
+
+---
+
+## Recipe 10: LLM Metrics & Token Estimation
+
+Track LLM resource consumption, stage latencies, and token allocations across pipeline cycles:
+
+```bash
+# Show 7-day token usage breakdown
+hecate-runner metrics --days 7
+
+# Export raw JSON metrics with sample counts and maximums
+hecate-runner metrics --days 7 --json
+```
+
+- **Request Tracking:** Logs full-request prompt and completion usage after each LLM call. The reported largest prompt is the maximum across individual requests, not a cumulative sum.
+- **Pre-Run Payload Estimates:** The runner logs pre-run payload character counts and token estimates for recognized model tokenizers prior to dispatching prompts.
+
+Primary-source extraction re-fetches the report before looking up cached replies.
+The cache key includes the source URL and content, extractor version, prompts,
+and model settings. Cached replies are checked against the source again; malformed,
+ungrounded, or failed responses are not reused. The workspace stores up to 512
+entries in `.hecate/source_evidence.db`, with a default maximum age of 24 hours.
+Set `HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_ENABLED=false` to disable reuse, or adjust
+`HECATE_RUNNER_SOURCE_EVIDENCE_CACHE_TTL_SEC` (`0` also disables it).
+
+Extraction, recovery attempts, and indicator classification share
+`HECATE_RUNNER_SOURCE_EVIDENCE_MAX_CALLS` (default `16`) and
+`HECATE_RUNNER_SOURCE_EVIDENCE_MAX_TOKENS` (default `256000`). The token limit
+reserves conservative UTF-8 prompt bytes and capped output allowances; these
+reservations are separate from provider-reported or billed tokens. Failed calls
+consume their reservation, and cache hits spend no model budget. Original source
+chunks run before recovery attempts. On budget exhaustion, verified artifacts are
+retained and diagnostics flag incomplete coverage or unclassified indicators.
+
+In `logs/stage_metrics.jsonl`, the `source_evidence` stage's `details` field records
+per-chunk/classification duration, retry depth, cache status, reported input/output
+tokens, and budget status. Cache hits do not repeat the original token usage or
+cost. The existing `HECATE_RUNNER_LLM_TIMEOUT_SEC` remains the shared hard deadline
+for fetching, extraction, and classification.
+
+### Catalog indexing
+
+Core maintains a disposable `.hecate/catalog.sqlite3` beside the workspace's
+`hunts/`, `research/`, and `sessions/` directories. Runner's source-link/CVE
+deduplication, research listing/reuse, and similarity corpus loading share this
+index. It is built automatically; update Core and Runner together to use the
+indexed intake path. Older Core versions retain the original source-file scan.
+
+Readers still discover files and check size, inode, nanosecond modification and
+change timestamps on each lookup. Only new or changed files are read; a content
+hash avoids reparsing touched files whose contents did not change. Added, renamed,
+deleted, and manually edited files are reflected without a cache TTL. Research
+selection keeps its existing age, topic, and technique rules. Source deduplication
+keeps literal URL matching and the 72-hour CVE window.
+
+Similarity search reuses unchanged parsed hunt and session components. A metadata
+or results-only edit updates returned metadata without refitting TF-IDF when the
+searchable text is identical. Changes to searchable text or document membership
+still refit TF-IDF to preserve vocabulary, IDF weights, and ranking behavior.
+The fitted matrices are held in process memory for up to 16 workspaces; a fresh
+process rebuilds its matrix from the persisted parsed corpus.
+
+The index is a cache, not hunt or research history. If it is unavailable or cannot
+be written, readers use the current source files. Damaged cached payloads are
+rebuilt, and malformed source files never retain an older cached interpretation.
+It is safe to remove the cache database while readers are stopped; the next
+lookup rebuilds it. This is separate from the source-extraction cache and requires
+no model calls or scheduled maintenance service.

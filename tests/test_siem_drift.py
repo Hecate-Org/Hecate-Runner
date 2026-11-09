@@ -161,7 +161,38 @@ def test_cli_reconcile_queries_command(mock_workspace: Path):
         assert "splunk_spl" in result.output
 
 
-def test_siem_history_sqlite_records_sweeps_and_events(mock_workspace: Path):
+@pytest.fixture
+def mock_live_reconcile(monkeypatch):
+    monkeypatch.setattr(
+        "hecate_runner.siem_drift.sync_queries_for_hunt",
+        lambda *args, **kwargs: [
+            {"file": "process__chmod.spl", "target": "splunk_spl", "status": "in_sync", "ok": True},
+            {
+                "file": "process__chmod.kql",
+                "target": "sentinel_kql",
+                "status": "in_sync",
+                "ok": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "hecate_agent.api.deploy_transpiled_query",
+        lambda **kwargs: {
+            "ok": True,
+            "remote_id": "test-saved-search",
+            "detail": "Simulated deployment",
+        },
+    )
+    monkeypatch.setattr(
+        "hecate_agent.api.sync_transpiled_query",
+        lambda **kwargs: {
+            "ok": True,
+            "status": "in_sync",
+        },
+    )
+
+
+def test_siem_history_sqlite_records_sweeps_and_events(mock_workspace: Path, mock_live_reconcile):
     from hecate_runner.siem_drift import get_drift_db_path, get_drift_history
 
     # Trigger audit sweep
@@ -276,7 +307,9 @@ def test_build_siem_status_and_history_cards(mock_workspace: Path):
     assert any("Detection-as-Code Sync" in f for f in all_fields)
 
 
-def test_cli_drift_history_and_siem_status_and_query_versions(mock_workspace: Path):
+def test_cli_drift_history_and_siem_status_and_query_versions(
+    mock_workspace: Path, mock_live_reconcile
+):
     from hecate_runner.siem_drift import record_query_version
 
     record_query_version(
@@ -537,7 +570,24 @@ def test_hunt_lifecycle_transitions(mock_workspace: Path) -> None:
     assert ret_res["is_retired"] is True
 
 
-def test_decommission_hunt_queries(mock_workspace: Path) -> None:
+@pytest.fixture
+def mock_live_undeploy(monkeypatch):
+    """Lifecycle tests exercise local persistence using a simulated SIEM response."""
+    monkeypatch.setattr(
+        "hecate_runner.siem_drift.undeploy_queries_for_hunt",
+        lambda **kwargs: [
+            {
+                "file": "process__chmod.spl",
+                "target": "splunk_spl",
+                "status": "undeployed",
+                "ok": True,
+                "remote_id": "Hecate_H-0007_chmod",
+            }
+        ],
+    )
+
+
+def test_decommission_hunt_queries(mock_workspace: Path, mock_live_undeploy) -> None:
     import sqlite3
 
     from hecate_runner.siem_drift import (
@@ -593,7 +643,9 @@ def test_decommission_hunt_queries(mock_workspace: Path) -> None:
         conn.close()
 
 
-def test_audit_workspace_with_decommissioned_queries(mock_workspace: Path) -> None:
+def test_audit_workspace_with_decommissioned_queries(
+    mock_workspace: Path, mock_live_undeploy
+) -> None:
     from unittest import mock
 
     from hecate_runner.siem_drift import (

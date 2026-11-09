@@ -683,9 +683,9 @@ def is_actionable(cti_content: str) -> bool:
     AI to Reason Through Detection Triage appear in telemetry", a sweep for
     indicators that do not exist.
 
-    This is a floor, not a quality bar. It does not ask whether the prose is
-    *about* a specific threat; a conference write-up passes. That is the
-    harder half of C4 and is deliberately still open.
+    This is a floor, not a quality bar. Whether the prose is about a specific
+    intrusion is decided in ``cti_triage.topic_without_intrusion``, which parks
+    a long topic essay before research and leaves a short blurb alone.
     """
     return (
         has_narrative(cti_content)

@@ -52,6 +52,9 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
     ) -> None:
         probes[name] = (enabled, method, url, {header: key} if header and key else {}, body)
         configured_probes[name] = enabled if configured is None else configured
+        from hecate_agent.integration_registry import require_integration
+
+        require_integration(name)
 
     def token(*names: str) -> str:
         return next((str(env[n]) for n in names if env.get(n)), "")

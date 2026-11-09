@@ -78,9 +78,14 @@ dmypy.json
 !.env.example
 
 # Runtime state (should live in the Hecate workspace, not the repo)
+.hecate/
 logs/
 *.log
 *.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 hunts/
 .orchestrator_state.json
 
