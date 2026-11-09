@@ -17,10 +17,13 @@ against attack telemetry" with "0 false positives".
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 #: Benign events every rule must not match. Deliberately small and generic: it
 #: is a sanity floor, not a model of anyone's environment.
@@ -441,15 +444,17 @@ def replay_events(
                 for cat, evts in atomic_by_cat.items():
                     for evt in evts:
                         add(cat, evt)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Atomic telemetry synthesis skipped for %s: %s", tid, exc)
 
     return events
 
 
 @dataclass
 class ReplayResult:
-    status: str  # "validated" | "no_match" | "baseline_match" | "no_replay_events" | "error"
+    # "self_consistent" means the rule matched events synthesised from the report and
+    # none of the benign sample. It is not validation: nothing was executed.
+    status: str  # "self_consistent" | "no_match" | "baseline_match" | "no_replay_events" | "error"
     replay_events: int = 0
     true_positives: int = 0
     false_positives: int = 0
@@ -461,13 +466,13 @@ class ReplayResult:
     atomic_tests: list[str] = field(default_factory=list)
 
     @property
-    def validated(self) -> bool:
-        return self.status == "validated"
+    def matched(self) -> bool:
+        return self.status == "self_consistent"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
-            "validated": self.validated,
+            "matched": self.matched,
             "tuned": self.tuned,
             "replay_events": self.replay_events,
             "tp": self.true_positives,
@@ -536,7 +541,7 @@ def replay_rule(
     elif result.false_positives:
         status = "baseline_match"
     else:
-        status = "validated"
+        status = "self_consistent"
     return ReplayResult(
         status=status,
         replay_events=len(events),

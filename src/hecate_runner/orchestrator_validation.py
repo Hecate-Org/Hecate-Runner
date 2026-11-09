@@ -93,11 +93,11 @@ def run_purple_team_validation(
                             "command": t.get("command", ""),
                         }
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed querying atomic tests map for technique %s: %s", tid, exc)
     req.purple_team_atomic_tests = atomic_test_details
 
-    replayed = validated = tuned = baseline_matches = 0
+    replayed = matched = tuned = baseline_matches = 0
     for rule in rules:
         rule_yaml = str(rule.get("rule_yaml", "")).strip()
         if not rule_yaml:
@@ -114,16 +114,18 @@ def run_purple_team_validation(
         if outcome.status == "no_replay_events":
             continue
         replayed += 1
-        validated += outcome.validated
+        matched += outcome.matched
         baseline_matches += outcome.status == "baseline_match"
         if outcome.tuned:
             tuned += 1
             rule["rule_yaml"] = outcome.final_rule
         path = Path(str(rule.get("path") or ""))
-        if path.is_file() and (outcome.tuned or outcome.validated):
+        if path.is_file() and (outcome.tuned or outcome.matched):
             text = outcome.final_rule.rstrip() + "\n"
-            if outcome.validated:
-                text += "x_hecate_purple_team_validated: true\n"
+            if outcome.matched:
+                # Synthesised from the report, so it shows the rule can match what the
+                # report describes; only BAS or real telemetry may mark a rule validated.
+                text += "x_hecate_replay_matched: true\n"
             if outcome.tuned:
                 text += "x_hecate_tuned: true\n"
             path.write_text(text, encoding="utf-8")
@@ -136,28 +138,28 @@ def run_purple_team_validation(
                         path.with_suffix(t_res.file_extension).write_text(
                             t_res.query.strip() + "\n", encoding="utf-8"
                         )
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("Failed transpiling tuned Sigma rule %s: %s", path, exc)
 
     req.purple_team_rules_evaluated = replayed
-    req.purple_team_rules_validated = validated
+    req.purple_team_rules_replay_matched = matched
     req.purple_team_rules_tuned = tuned
     req.purple_team_telemetry_count = sum(len(v) for v in events.values())
 
     emulation_desc = (
-        f" ({len(techniques)} technique(s) dynamically emulated via Atomic Red Team)"
+        f" synthesised (source artifacts and {len(techniques)} Atomic Red Team technique definition(s))"
         if (enable_atomic and techniques)
-        else " source-artifact"
+        else " synthesised source-artifact"
     )
     orch.trail.step(
         "purple_team",
         f"replayed %d of %d rule(s) against %d{emulation_desc} event(s) in %.0fs: "
-        "%d validated, %d matched the benign sample, %d tuned, %d with nothing to replay",
+        "%d matched, %d matched the benign sample, %d tuned, %d with nothing to replay",
         replayed,
         len(rules),
         req.purple_team_telemetry_count,
         orch.trail.elapsed - started,
-        validated,
+        matched,
         baseline_matches,
         tuned,
         len(rules) - replayed,
@@ -173,16 +175,17 @@ def run_purple_team_validation(
             else (str(tech_list[0]) if tech_list else "Adversary TTPs")
         )
         summary_msg = (
-            f"{validated} of {replayed} evaluated rules validated "
+            f"{matched} of {replayed} replayed rules matched "
             f"({baseline_matches} baseline matches, {tuned} tuned) "
-            f"against {req.purple_team_telemetry_count} telemetry events"
-            f"{' (Atomic Red Team dynamic emulation enabled)' if enable_atomic and techniques else ''}."
+            f"{req.purple_team_telemetry_count} events synthesised from the report"
+            f"{' and Atomic Red Team test definitions' if enable_atomic and techniques else ''}. "
+            "Nothing was executed, so no rule is validated by this replay."
         )
         notify_purple_team(
             orch.settings,
             hunt_id=req.hunt_id,
             technique=tech_label,
-            success=validated > 0,
+            success=matched > 0,
             telemetry_count=req.purple_team_telemetry_count,
             summary=summary_msg,
         )

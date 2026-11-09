@@ -328,14 +328,27 @@ def test_short_title_leaves_short_hypothesis_untouched() -> None:
     )
 
 
+def test_short_title_ends_at_a_clause_when_one_fits() -> None:
+    """H-0025's title read "...flows via port 1880 to execute..."."""
+    assert _short_title(
+        "Adversaries use unauthenticated deployment of malicious Node-RED flows via port 1880 "
+        "to execute arbitrary root commands on SIMATIC IoT2050 devices."
+    ) == "Adversaries use unauthenticated deployment of malicious Node-RED flows via port 1880"
+    assert _short_title(
+        "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures "
+        "on high-value cloud tenants via supply chain compromise"
+    ) == "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures on high-value cloud tenants"
+
+
 def test_short_title_truncates_on_word_boundary_with_ellipsis() -> None:
     # Regression test: the old `hyp.hypothesis[:80]` hard-cut sliced
     # mid-word with no ellipsis, so a reader saw what looked like a
     # complete (but nonsensical) title -- e.g. "...on high-valu" -- with no
-    # indication anything had been cut off.
+    # indication anything had been cut off. With no clause boundary in
+    # reach, the cut falls on a word.
     hypothesis = (
-        "Adversaries use JADEPUFFER ransomware to disrupt AI infrastructures "
-        "on high-value cloud tenants via supply chain compromise"
+        "Adversaries deploy JADEPUFFER ransomware across AI infrastructure clusters "
+        "on high-value cloud tenants after supply chain compromise of build systems"
     )
     title = _short_title(hypothesis)
     assert len(title) <= 104  # 100-char cap + "..."

@@ -93,20 +93,20 @@ def test_events_come_from_the_source_and_skip_victims_and_history() -> None:
 def test_a_rule_matching_its_events_validates() -> None:
     events = replay_events(_records(), _artifacts())
     outcome = replay_rule(_FILE_RULE, events["file_event"], BENIGN_SAMPLE)
-    assert outcome.status == "validated"
+    assert outcome.status == "self_consistent"
     assert (outcome.true_positives, outcome.false_positives) == (1, 0)
 
 
 def test_a_rule_with_nothing_to_replay_is_not_validated() -> None:
     outcome = replay_rule(_FILE_RULE, [], BENIGN_SAMPLE)
     assert outcome.status == "no_replay_events"
-    assert outcome.validated is False
+    assert outcome.matched is False
 
 
 def test_a_condition_without_its_selections_does_not_validate() -> None:
     events = replay_events(_records(), _artifacts())
     outcome = replay_rule(_BROKEN_RULE, events["network_connection"], BENIGN_SAMPLE)
-    assert outcome.validated is False
+    assert outcome.matched is False
 
 
 def test_a_rule_matching_the_benign_sample_is_not_validated() -> None:
@@ -157,17 +157,20 @@ def test_the_stage_replays_by_log_source_and_marks_only_validated_files(tmp_path
     _orchestrator(tmp_path)._run_purple_team_validation(req, rules, out_dir, MagicMock())
 
     assert [r["purple_team"]["status"] for r in rules] == [
-        "validated",
+        "self_consistent",
         "no_match",
         "no_replay_events",
     ]
-    assert (req.purple_team_rules_evaluated, req.purple_team_rules_validated) == (2, 1)
     assert (
-        "x_hecate_purple_team_validated: true" in (out_dir / "file_event__kw2s11.yml").read_text()
-    )
+        req.purple_team_rules_evaluated,
+        req.purple_team_rules_replay_matched,
+        req.purple_team_rules_validated,
+    ) == (2, 1, 0)
+    matched_rule = (out_dir / "file_event__kw2s11.yml").read_text()
+    assert "x_hecate_replay_matched: true" in matched_rule
+    assert "x_hecate_purple_team_validated" not in matched_rule
     assert (
-        "x_hecate_purple_team_validated"
-        not in (out_dir / "network_connection__dual_use.yml").read_text()
+        "x_hecate_replay_matched" not in (out_dir / "network_connection__dual_use.yml").read_text()
     )
     assert yaml.safe_load((out_dir / "file_event__kw2s11.yml").read_text())["detection"]
 
@@ -183,13 +186,13 @@ def test_the_draft_claims_only_what_the_replay_showed(sample_hypothesis: Hypothe
                 "logsource_category": "file_event",
                 "title": "a",
                 "rule_yaml": _FILE_RULE,
-                "purple_team": {"status": "no_match", "validated": False},
+                "purple_team": {"status": "no_match", "matched": False},
             },
             {
                 "logsource_category": "dns_query",
                 "title": "b",
                 "rule_yaml": _IP_RULE,
-                "purple_team": {"status": "no_replay_events", "validated": False},
+                "purple_team": {"status": "no_replay_events", "matched": False},
             },
         ],
         purple_team_rules_evaluated=1,
@@ -234,7 +237,7 @@ detection:
     - 45.153.212.101
   condition: selection
 """
-    assert replay_rule(rule, events["webserver"], BENIGN_SAMPLE).status == "validated"
+    assert replay_rule(rule, events["webserver"], BENIGN_SAMPLE).status == "self_consistent"
 
 
 def test_cloud_audit_and_identity_audit_replay_events() -> None:
@@ -271,7 +274,7 @@ detection:
   condition: selection
 """
     sts_outcome = replay_rule(sts_rule, cloud_events, BENIGN_SAMPLE)
-    assert sts_outcome.status == "validated"
+    assert sts_outcome.status == "self_consistent"
     assert sts_outcome.false_positives == 0
 
     # Validate an Entra ID identity_audit rule
@@ -285,7 +288,7 @@ detection:
   condition: selection
 """
     entra_outcome = replay_rule(entra_rule, identity_events, BENIGN_SAMPLE)
-    assert entra_outcome.status == "validated"
+    assert entra_outcome.status == "self_consistent"
     assert entra_outcome.false_positives == 0
 
 
@@ -323,7 +326,7 @@ detection:
   condition: selection
 """
     outcome = replay_rule(jarm_rule, net_events, BENIGN_SAMPLE)
-    assert outcome.status == "validated"
+    assert outcome.status == "self_consistent"
     assert outcome.true_positives == 1
     assert outcome.false_positives == 0
 
@@ -346,7 +349,7 @@ detection:
   condition: selection
 """
     outcome = replay_rule(k8s_rule, k8s_events, BENIGN_SAMPLE)
-    assert outcome.status == "validated"
+    assert outcome.status == "self_consistent"
     assert outcome.true_positives == 1
     assert outcome.false_positives == 0
 
@@ -367,7 +370,7 @@ detection:
   condition: selection
 """
     outcome = replay_rule(web_rule, web_events, BENIGN_SAMPLE)
-    assert outcome.status == "validated"
+    assert outcome.status == "self_consistent"
     assert outcome.true_positives >= 1
     assert outcome.false_positives == 0
 

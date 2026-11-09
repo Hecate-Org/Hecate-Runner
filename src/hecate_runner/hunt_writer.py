@@ -67,9 +67,11 @@ class DraftHuntRequest:
     review_gaps: list[dict[str, str]] = field(default_factory=list)
     #: Purple-team replay (hecate_runner.purple_team): rules that had source
     #: events to replay, rules that matched them and no benign event, rules
-    #: tuned, and the number of synthesised events.
+    #: tuned, and the number of synthesised events. ``validated`` is reserved for
+    #: rules proven against executed activity; the synthetic replay never sets it.
     purple_team_rules_evaluated: int = 0
     purple_team_rules_validated: int = 0
+    purple_team_rules_replay_matched: int = 0
     purple_team_rules_tuned: int = 0
     purple_team_telemetry_count: int = 0
     purple_team_atomic_techniques: list[str] = field(default_factory=list)
@@ -309,12 +311,24 @@ def draft_hunt_path(hunts_root: Path, hunt_id: str, when: datetime) -> Path:
 # replaced, which routinely sliced mid-word ("...on high-valu") with no
 # ellipsis, silently presenting a truncated fragment as if it were complete.
 _TITLE_MAX_LEN = 100
+_TITLE_MIN_CLAUSE = 60
+#: Where a hypothesis can end early and still read as a complete phrase: H-0025's
+#: "... flows via port 1880 to execute arbitrary root commands ..." reads whole
+#: as "... flows via port 1880".
+_TITLE_CLAUSE_RE = re.compile(r",\s|;\s|\s(?:to|by|via|which|that|in order to|resulting in)\s")
 
 
 def _short_title(hypothesis: str) -> str:
     text = (hypothesis or "Untitled draft").strip()
     if len(text) <= _TITLE_MAX_LEN:
         return text
+    cuts = [
+        m.start()
+        for m in _TITLE_CLAUSE_RE.finditer(text)
+        if _TITLE_MIN_CLAUSE <= m.start() <= _TITLE_MAX_LEN
+    ]
+    if cuts:
+        return text[: cuts[-1]].rstrip(" ,;:.")
     truncated = text[:_TITLE_MAX_LEN]
     if " " in truncated:
         truncated = truncated.rsplit(" ", 1)[0]
@@ -427,8 +441,8 @@ def _clean_rule_yaml_for_display(rule_yaml: str) -> str:
         if isinstance(data, dict) and "hecate_provenance" in data:
             data.pop("hecate_provenance", None)
             return yaml.safe_dump(data, sort_keys=False).rstrip()
-    except Exception:
-        pass
+    except yaml.YAMLError as exc:
+        log.debug("YAML load error during provenance strip: %s", exc)
     cleaned = re.sub(r"(?m)^hecate_provenance:\s*\n(^(?:  |-|\s).*\n)*", "", rule_yaml)
     return cleaned.rstrip()
 
@@ -452,31 +466,30 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
         )
 
     replay = [r.get("purple_team") or {} for r in req.sigma_rules]
-    validated = sum(1 for r in replay if r.get("validated"))
+    matched = sum(1 for r in replay if r.get("matched"))
     replayed = sum(1 for r in replay if r.get("status") and r.get("status") != "no_replay_events")
     parts = [
         f"> {len(req.sigma_rules)} Sigma rule(s) auto-drafted from the source intelligence, "
         "one per applicable log source.",
     ]
     if replayed:
+        # H-0021 read "validated against dynamic adversary emulation telemetry" when
+        # every event was synthesised and BAS was skipped.
+        sources = "the report's own artifacts"
         if req.purple_team_atomic_techniques:
             emulated_str = ", ".join(f"`{t}`" for t in req.purple_team_atomic_techniques[:4])
-            parts.append(
-                f"> **Adversary Emulation (Atomic Red Team):** {validated} of {replayed} evaluated rule(s) validated "
-                f"against dynamic adversary emulation telemetry across {emulated_str} and none of the benign baseline."
+            sources += f" and Atomic Red Team test definitions for {emulated_str}"
+        parts.append(
+            f"> **Purple-team replay:** {matched} of {replayed} replayed rule(s) matched events synthesised "
+            f"from {sources} and none of a small benign sample"
+            + (
+                f"; {len(req.sigma_rules) - replayed} had no source artifact to replay"
+                if replayed < len(req.sigma_rules)
+                else ""
             )
-        else:
-            parts.append(
-                f"> **Purple-team replay:** {validated} of {replayed} replayed rule(s) matched events synthesised "
-                "from the report's own artifacts and none of a small benign sample"
-                + (
-                    f"; {len(req.sigma_rules) - replayed} had no source artifact to replay"
-                    if replayed < len(req.sigma_rules)
-                    else ""
-                )
-                + ". A replay of what the report names, not emulation: it shows a rule can match the "
-                "described activity, not that it is quiet in your environment."
-            )
+            + ". Nothing was executed, so this is not validation: it shows a rule can match the "
+            "described activity, not that it fires on real activity or is quiet in your environment."
+        )
     parts.append(
         "> **Unreviewed.** Sigma is platform-neutral: convert with "
         "`sigma convert -t <backend>` once a target is chosen. Field names and "
@@ -540,8 +553,8 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
                     if is_deterministic_ioc:
                         parts.append("</details>")
                         parts.append("")
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Failed transpiling rule for hunt display: %s", exc)
 
     return "\n".join(parts)
 
@@ -1402,6 +1415,7 @@ def render_draft(req: DraftHuntRequest) -> str:
             f"purple_team_validated: {str(req.purple_team_rules_validated == req.purple_team_rules_evaluated).lower()}\n"
             f"purple_team_rules_evaluated: {req.purple_team_rules_evaluated}\n"
             f"purple_team_rules_validated: {req.purple_team_rules_validated}\n"
+            f"purple_team_rules_replay_matched: {req.purple_team_rules_replay_matched}\n"
             f"purple_team_rules_tuned: {req.purple_team_rules_tuned}\n"
             f"purple_team_telemetry_events: {req.purple_team_telemetry_count}\n"
             if req.purple_team_rules_evaluated > 0

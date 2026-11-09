@@ -7,6 +7,7 @@ A configured credential alone never confirms an integration.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -18,6 +19,8 @@ from dotenv import dotenv_values
 
 from hecate_runner.config import Settings
 from hecate_runner.integration_health import protect_request_logs, record_health
+
+log = logging.getLogger(__name__)
 
 
 def check_integrations(settings: Settings, *, client: httpx.Client | None = None) -> dict[str, Any]:
@@ -434,8 +437,8 @@ def check_integrations(settings: Settings, *, client: httpx.Client | None = None
                                 detail = f"quota exceeded (resets {m_reset.group(1)})"
                             else:
                                 detail = "quota exceeded"
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, KeyError, ValueError) as json_err:
+                    log.debug("Could not parse upstream error JSON for %s: %s", name, json_err)
                 if detail == "HTTP 502":
                     detail = "HTTP 502 (upstream degraded)"
             elif isinstance(exc, httpx.TimeoutException):

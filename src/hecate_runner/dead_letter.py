@@ -76,7 +76,8 @@ def record_failure(queue_dir: Path, item: CTIItem, error: str) -> int:
     if tracker_path.exists():
         try:
             data = json.loads(tracker_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Corrupted retry tracker %s; resetting: %s", tracker_path, exc)
             data = {}
 
     key = _item_key(item)
@@ -107,8 +108,8 @@ def clear_retry(queue_dir: Path, item: CTIItem) -> None:
         if key in data:
             del data[key]
             atomic_write_text(tracker_path, json.dumps(data, indent=2) + "\n")
-    except Exception:
-        pass
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Failed clearing retry entry from %s: %s", tracker_path, exc)
 
 
 def quarantine(
