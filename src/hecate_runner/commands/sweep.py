@@ -291,3 +291,102 @@ def sweep_findings(
         )
 
     console.print(table)
+
+
+@sweep_app.command("pivots")
+def sweep_pivots(
+    finding_id: Annotated[str, typer.Argument(help="Finding ID to inspect pivots for")],
+) -> None:
+    """View automated investigation pivot queries executed for a finding."""
+    settings = Settings()
+    scheduler = HuntExecutionScheduler(settings=settings)
+    finding = scheduler.store.get_finding(finding_id)
+
+    if not finding:
+        console.print(f"[red]Finding '{finding_id}' not found in ledger.[/red]")
+        raise typer.Exit(code=1)
+
+    pivots = finding.get("pivots") or []
+    if not pivots:
+        console.print(f"[dim]No investigation pivots recorded for finding '{finding_id}'.[/dim]")
+        return
+
+    table = Table(
+        title=f"Automated Investigation Pivots for {finding_id} ({finding['hunt_id']})",
+        box=box.ROUNDED,
+    )
+    table.add_column("Pivot ID", style="bold cyan")
+    table.add_column("Type", style="bold yellow")
+    table.add_column("Technique", style="magenta")
+    table.add_column("Outcome", style="white")
+    table.add_column("Hits", justify="right")
+    table.add_column("Query", style="dim")
+
+    for p in pivots:
+        outcome = p.get("outcome", "")
+        if outcome == "hits_detected":
+            out_badge = "[bold yellow]Hits Detected[/bold yellow]"
+        elif outcome == "clean":
+            out_badge = "[green]Clean (0)[/green]"
+        elif outcome == "overmatch":
+            out_badge = "[red]Overmatch[/red]"
+        else:
+            out_badge = f"[red]{outcome}[/red]"
+
+        q = p.get("query_text", "")
+        short_q = (q[:40] + "...") if len(q) > 40 else q
+        table.add_row(
+            p.get("pivot_id", ""),
+            p.get("pivot_type", ""),
+            p.get("technique", ""),
+            out_badge,
+            str(p.get("matched_count", 0)),
+            short_q,
+        )
+
+    console.print(table)
+
+
+@sweep_app.command("tune")
+def sweep_tune(
+    finding_id: Annotated[str, typer.Argument(help="Finding ID to tune (e.g. FINDING-H-0021-...)")],
+    instruction: Annotated[
+        str | None,
+        typer.Option("--instruction", "-i", help="Custom tuning instruction (e.g. 'Exclude User svc_backup')"),
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview tuning diff without applying")] = False,
+) -> None:
+    """Auto-tune a Sigma detection rule based on a triaged finding to exclude false positives."""
+    settings = Settings()
+    scheduler = HuntExecutionScheduler(settings=settings)
+    finding = scheduler.store.get_finding(finding_id)
+
+    if not finding:
+        console.print(f"[red]Finding '{finding_id}' not found in ledger.[/red]")
+        raise typer.Exit(code=1)
+
+    from hecate_runner.rule_tuner import RuleTuner
+
+    tuner = RuleTuner(workspace=settings.hecate_workspace)
+    res = tuner.auto_tune_from_finding(finding, instruction=instruction)
+
+    if not res.ok:
+        console.print(f"[red]✗ Rule Tuning Failed for {res.hunt_id}:[/red] {res.error}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold green]✓ Successfully Tuned Detection Rule for {res.hunt_id}![/bold green]")
+    console.print(f"  • [bold]Action:[/bold] {res.action_summary}")
+    console.print(f"  • [bold]Target Dialects Re-transpiled:[/bold] {', '.join(res.transpiled_targets)}")
+
+    if res.diff:
+        console.print("\n[bold cyan]Rule Diff:[/bold cyan]")
+        console.print(res.diff)
+
+    if not dry_run:
+        scheduler.store.update_finding_tuning(
+            finding_id=finding_id,
+            status="tuned",
+            instruction=instruction or "auto-derived",
+            summary=res.action_summary,
+        )
+        console.print("[dim]Updated finding ledger with tuning outcome.[/dim]")

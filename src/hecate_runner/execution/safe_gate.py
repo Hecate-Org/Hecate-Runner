@@ -128,6 +128,8 @@ class SafeExecutionResult:
     count_query: str = ""
     raw_query: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
+    triage_report: Any | None = None
+    pivot_results: list[Any] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

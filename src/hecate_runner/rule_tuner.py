@@ -13,6 +13,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -341,7 +342,6 @@ class RuleTuner:
                 dedup = SigmaDeduplicator()
                 corpus_dirs = [
                     self.workspace / "queries",
-                    Path("/home/chemch/betas/Hecate-Public/queries"),
                 ]
                 corpus: list[SigmaRuleAST] = []
                 for cd in corpus_dirs:
@@ -393,3 +393,45 @@ class RuleTuner:
             transpiled_targets=successful_targets,
             subsumption_warnings=subsumption_warnings,
         )
+
+    def auto_tune_from_finding(
+        self,
+        finding: dict[str, Any],
+        instruction: str | None = None,
+    ) -> RuleTuningResult:
+        """Derive an exclusion filter from a finding and mutate the hunt's Sigma rule."""
+        hunt_id = str(finding.get("hunt_id") or "").strip().upper()
+        if not hunt_id:
+            return RuleTuningResult(
+                ok=False,
+                hunt_id="",
+                action_summary="",
+                error="No hunt_id found in finding",
+            )
+
+        if not instruction:
+            entities = finding.get("extracted_entities") or {}
+            users = entities.get("users") or []
+            parents = entities.get("parent_processes") or []
+            processes = entities.get("processes") or []
+
+            benign_users = [
+                u
+                for u in users
+                if u.lower() not in ("root", "admin", "administrator", "system")
+            ]
+            if benign_users:
+                instruction = f"Exclude User {benign_users[0]}"
+            elif parents:
+                instruction = f"Exclude ParentImage {parents[0]}"
+            elif processes:
+                instruction = f"Exclude Image {processes[0]}"
+            else:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=hunt_id,
+                    action_summary="",
+                    error=f"No viable exclusion entity (user, parent, or process) found in finding {finding.get('finding_id')}",
+                )
+
+        return self.tune_hunt_rule(hunt_id, instruction)

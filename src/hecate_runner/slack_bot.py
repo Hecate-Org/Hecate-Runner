@@ -364,9 +364,29 @@ def list_pending_hunts(workspace: Path) -> list[dict[str, Any]]:
                 "path": str(path),
                 "publish_check": str(fm.get("publish_check") or ""),
                 "publish_blocking": _blocking_count(fm.get("publish_findings")),
+                "lab_probe": str(fm.get("lab_probe") or ""),
+                "lab_probe_provider": _frontmatter_scalar(fm.get("lab_probe_provider")),
+                "lab_probe_window_days": fm.get("lab_probe_window_days") or 0,
+                "lab_probe_hits": fm.get("lab_probe_hits") or 0,
             }
         )
     return pending
+
+
+def _frontmatter_scalar(raw: Any) -> str:
+    """JSON-encoded frontmatter scalars decode to a plain string."""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith('"') or text.startswith("'"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return text.strip("\"'")
+            return str(parsed) if parsed is not None else ""
+        return text
+    return str(raw)
 
 
 def _blocking_count(raw: Any) -> int:
@@ -819,6 +839,56 @@ class SlackBotService:
             msg = f"⏹️ *Hunt Sweep `{sweep_id}` Skipped / Cancelled* by <@{user_id}>"
             say(text=msg, thread_ts=thread_ts)
 
+        @self._app.action("hecate_tune_finding")
+        def handle_tune_finding(ack: Any, body: dict[str, Any], say: Any) -> None:
+            ack()
+            action = body.get("actions", [{}])[0]
+            finding_id = str(action.get("value") or "").strip()
+            thread_ts = body.get("message", {}).get("ts") or body.get("container", {}).get(
+                "message_ts"
+            )
+            user_info = body.get("user", {})
+            user_name = user_info.get("username") or user_info.get("name") or "analyst"
+            user_id = str(user_info.get("id") or "unknown")
+
+            log.info(
+                "Slack HITL action: auto-tune rule for finding %s by %s",
+                finding_id,
+                user_name,
+            )
+            from hecate_runner.execution.watermark_store import WatermarkStore
+            from hecate_runner.rule_tuner import RuleTuner
+
+            store = WatermarkStore(db_path=self.settings.hunt_executions_db)
+            finding = store.get_finding(finding_id)
+            if not finding:
+                say(text=f"❌ *Finding `{finding_id}` not found in ledger.*", thread_ts=thread_ts)
+                return
+
+            tuner = RuleTuner(workspace=self.workspace)
+            res = tuner.auto_tune_from_finding(finding)
+
+            if res.ok:
+                store.update_finding_tuning(
+                    finding_id=finding_id,
+                    status="tuned",
+                    instruction="Auto-derived from finding",
+                    summary=res.action_summary,
+                )
+                diff_snip = f"```diff\n{res.diff[:600]}\n```" if res.diff else ""
+                msg = (
+                    f"🛠️ *Sigma Detection Rule Tuned by <@{user_id}>*\n"
+                    f"• *Hunt ID:* `{res.hunt_id}`\n"
+                    f"• *Finding:* `{finding_id}`\n"
+                    f"• *Action:* {res.action_summary}\n"
+                    f"• *Re-transpiled Dialects:* {', '.join(f'`{t}`' for t in res.transpiled_targets)}\n"
+                    f"{diff_snip}"
+                )
+            else:
+                msg = f"⚠️ *Rule Tuning Failed for `{res.hunt_id}`:* {res.error}"
+
+            say(text=msg, thread_ts=thread_ts)
+
         def _reviewer(user: dict[str, Any]) -> str:
             name = user.get("username") or user.get("name") or ""
             return f"slack:{user.get('id', 'unknown')}" + (f" ({name})" if name else "")
@@ -844,17 +914,28 @@ class SlackBotService:
 
             hunt_path = find_hunt_path(self.settings.hecate_workspace, hunt_id)
             findings: list[dict[str, Any]] = []
+            lab_probe: dict[str, Any] | None = None
             if hunt_path is not None:
+                content = hunt_path.read_text(encoding="utf-8")
                 report = evaluate_saved_hunt(
                     self.settings.hecate_workspace,
                     hunt_id,
-                    hunt_path.read_text(encoding="utf-8"),
+                    content,
                 )
                 findings = [item.to_dict() for item in report.blocking()]
+                from hecate_runner.lifecycle import parse_hunt_frontmatter
+                from hecate_runner.slack_blocks import _frontmatter_lab_probe
+
+                fm, _, _ = parse_hunt_frontmatter(content)
+                lab_probe = _frontmatter_lab_probe(fm)
             client.views_open(
                 trigger_id=trigger_id,
                 view=build_approve_hunt_modal(
-                    hunt_id, json.dumps(metadata), destination=destination, findings=findings
+                    hunt_id,
+                    json.dumps(metadata),
+                    destination=destination,
+                    findings=findings,
+                    lab_probe=lab_probe,
                 ),
             )
 

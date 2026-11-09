@@ -141,6 +141,34 @@ class SlackBotSimulator:
             msg = f"⏹️ *Hunt Sweep `{value}` Skipped / Cancelled* by <@{user}>"
             return {"ok": staged is not None, "action": action_id, "message": msg, "data": staged}
 
+        elif action_id == "hecate_tune_finding":
+            from hecate_runner.execution.watermark_store import WatermarkStore
+            from hecate_runner.rule_tuner import RuleTuner
+
+            store = WatermarkStore(db_path=self.settings.hunt_executions_db)
+            finding = store.get_finding(value)
+            if not finding:
+                return {
+                    "ok": False,
+                    "action": action_id,
+                    "message": f"Finding `{value}` not found in ledger",
+                }
+
+            tuner = RuleTuner(workspace=self.workspace)
+            res = tuner.auto_tune_from_finding(finding)
+            if res.ok:
+                store.update_finding_tuning(
+                    finding_id=value,
+                    status="tuned",
+                    instruction="Auto-derived from finding",
+                    summary=res.action_summary,
+                )
+                msg = f"🛠️ *Sigma Detection Rule Tuned for `{res.hunt_id}`:* {res.action_summary}"
+            else:
+                msg = f"⚠️ *Rule Tuning Failed for `{res.hunt_id}`:* {res.error}"
+
+            return {"ok": res.ok, "action": action_id, "message": msg, "data": res}
+
         return {
             "ok": False,
             "action": action_id,

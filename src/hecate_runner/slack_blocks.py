@@ -1767,6 +1767,56 @@ def build_sweep_result_card(
                 }
             )
 
+    # Automated Investigation Pivots
+    pivots = getattr(result, "pivot_results", []) or []
+    if pivots:
+        pivot_lines = []
+        for p in pivots[:3]:
+            p_type = getattr(p, "pivot_type", "") if hasattr(p, "pivot_type") else p.get("pivot_type", "")
+            p_tech = getattr(p, "technique", "") if hasattr(p, "technique") else p.get("technique", "")
+            p_hits = getattr(p, "matched_count", 0) if hasattr(p, "matched_count") else p.get("matched_count", 0)
+            p_out = getattr(p, "outcome", "") if hasattr(p, "outcome") else p.get("outcome", "")
+            icon = "⚠️" if p_out == "hits_detected" else ("🟢" if p_out == "clean" else "🚨")
+            pivot_lines.append(f"• {icon} *{p_type.replace('_', ' ').title()}* (`{p_tech}`): `{p_hits}` events ({p_out})")
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*🔄 Automated Investigation Pivots ({len(pivots)} executed):*\n" + "\n".join(pivot_lines),
+                },
+            }
+        )
+
+    # Interactive HITL Action Buttons (Self-Tuning)
+    if triage:
+        t_verdict = getattr(triage, "verdict", "")
+        finding_id = getattr(triage, "finding_id", "")
+        if finding_id and t_verdict in ("benign_noise", "suspicious"):
+            btn_text = (
+                "🛠️ Auto-Tune (Exclude FP)"
+                if t_verdict == "benign_noise"
+                else "🛠️ Tune Rule (Narrow Filter)"
+            )
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": btn_text,
+                                "emoji": True,
+                            },
+                            "style": "primary",
+                            "action_id": "hecate_tune_finding",
+                            "value": finding_id,
+                        }
+                    ],
+                }
+            )
+
     blocks.append(
         {
             "type": "context",

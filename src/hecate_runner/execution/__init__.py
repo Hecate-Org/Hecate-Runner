@@ -8,6 +8,11 @@ from hecate_runner.execution.normalizer import (
     normalize_event,
     normalize_events,
 )
+from hecate_runner.execution.pivot_engine import (
+    PivotExecutionEngine,
+    PivotExecutionResult,
+    synthesize_pivot_queries,
+)
 from hecate_runner.execution.safe_gate import (
     SafeExecutionGate,
     SafeExecutionResult,
@@ -31,6 +36,8 @@ __all__ = [
     "HuntExecutionScheduler",
     "HuntExecutionWatermark",
     "NormalizedEvent",
+    "PivotExecutionEngine",
+    "PivotExecutionResult",
     "SafeExecutionGate",
     "SafeExecutionResult",
     "StagedSweep",
@@ -40,4 +47,5 @@ __all__ = [
     "extract_entities_from_events",
     "normalize_event",
     "normalize_events",
+    "synthesize_pivot_queries",
 ]

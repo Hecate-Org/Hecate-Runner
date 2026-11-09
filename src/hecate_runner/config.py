@@ -87,6 +87,32 @@ class Settings(BaseSettings):
     # orchestrated runs.
     hecate_llm_provider: str | None = Field(default=None)
     hecate_llm_model: str | None = Field(default=None)
+    # Optional dual-backend overrides (local simple / cloud complex). Unset means
+    # Core uses the legacy single HECATE_LLM_* backend for both tiers.
+    hecate_llm_simple_provider: str | None = Field(
+        default=None,
+        alias="HECATE_LLM_SIMPLE_PROVIDER",
+    )
+    hecate_llm_simple_model: str | None = Field(
+        default=None,
+        alias="HECATE_LLM_SIMPLE_MODEL",
+    )
+    hecate_llm_simple_base_url: str | None = Field(
+        default=None,
+        alias="HECATE_LLM_SIMPLE_BASE_URL",
+    )
+    hecate_llm_complex_provider: str | None = Field(
+        default=None,
+        alias="HECATE_LLM_COMPLEX_PROVIDER",
+    )
+    hecate_llm_complex_model: str | None = Field(
+        default=None,
+        alias="HECATE_LLM_COMPLEX_MODEL",
+    )
+    hecate_llm_complex_base_url: str | None = Field(
+        default=None,
+        alias="HECATE_LLM_COMPLEX_BASE_URL",
+    )
 
     # --- Orchestrator guardrails -------------------------------------------
     daily_budget_usd: float = Field(
@@ -1270,6 +1296,22 @@ class Settings(BaseSettings):
         alias="HECATE_RUNNER_MAX_QUERY_LIMIT",
         description="Hard ceiling on a proposed query's result limit. Matches AGENTS.md's Query Guardrails.",
     )
+    lab_hit_probe_enabled: bool = Field(
+        default=True,
+        alias="HECATE_RUNNER_LAB_HIT_PROBE",
+        description=(
+            "After drafting native queries, run a bounded COUNT-FIRST probe against the "
+            "configured query provider and surface hit/miss on the review card. Skips when "
+            "the provider is mock or unconfigured."
+        ),
+    )
+    lab_hit_probe_window_days: int = Field(
+        default=1,
+        ge=1,
+        le=30,
+        alias="HECATE_RUNNER_LAB_HIT_PROBE_WINDOW_DAYS",
+        description="Lookback window (days) for the draft-time lab hit probe.",
+    )
 
     # --- Auto Hunt Execution Engine -------------------------------------------
     auto_hunt_execution_enabled: bool = Field(
@@ -1307,6 +1349,25 @@ class Settings(BaseSettings):
         default=None,
         alias="HECATE_HUNT_EXECUTIONS_DB",
         description="Custom path to hunt execution watermarks SQLite database.",
+    )
+    auto_hunt_pivots_enabled: bool = Field(
+        default=True,
+        alias="HECATE_AUTO_HUNT_PIVOTS_ENABLED",
+        description="Enable autonomous investigation pivots on detected findings.",
+    )
+    auto_hunt_max_pivots: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        alias="HECATE_AUTO_HUNT_MAX_PIVOTS",
+        description="Maximum number of secondary pivot queries per triaged finding.",
+    )
+    auto_hunt_pivot_min_confidence: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        alias="HECATE_AUTO_HUNT_PIVOT_MIN_CONFIDENCE",
+        description="Minimum triage confidence required to trigger autonomous investigation pivoting.",
     )
     cti_priority_tiers: bool = Field(
         default=True,
@@ -1559,6 +1620,17 @@ class Settings(BaseSettings):
             env["HECATE_LLM_PROVIDER"] = self.hecate_llm_provider
         if self.hecate_llm_model:
             env["HECATE_LLM_MODEL"] = self.hecate_llm_model
+        for attr, env_key in (
+            ("hecate_llm_simple_provider", "HECATE_LLM_SIMPLE_PROVIDER"),
+            ("hecate_llm_simple_model", "HECATE_LLM_SIMPLE_MODEL"),
+            ("hecate_llm_simple_base_url", "HECATE_LLM_SIMPLE_BASE_URL"),
+            ("hecate_llm_complex_provider", "HECATE_LLM_COMPLEX_PROVIDER"),
+            ("hecate_llm_complex_model", "HECATE_LLM_COMPLEX_MODEL"),
+            ("hecate_llm_complex_base_url", "HECATE_LLM_COMPLEX_BASE_URL"),
+        ):
+            value = getattr(self, attr, None)
+            if value:
+                env[env_key] = value
         return env
 
     def redacted_dict(self) -> dict[str, Any]:

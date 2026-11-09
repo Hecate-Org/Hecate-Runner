@@ -239,6 +239,7 @@ def record_hunt_execution(
     detail: str = "",
     events: list[dict[str, Any]] | None = None,
     triage_report: Any | None = None,
+    pivot_results: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Update frontmatter and execution history in hunt markdown following a live sweep.
 
@@ -273,6 +274,15 @@ def record_hunt_execution(
             fm["true_positives"] = int(fm.get("true_positives") or 0) + 1
         elif verdict == "benign_noise":
             fm["false_positives"] = int(fm.get("false_positives") or 0) + 1
+
+    if pivot_results:
+        fm["pivots_executed"] = len(pivot_results)
+        fm["pivot_hits_detected"] = sum(
+            1
+            for p in pivot_results
+            if (getattr(p, "outcome", "") == "hits_detected")
+            or (isinstance(p, dict) and p.get("outcome") == "hits_detected")
+        )
 
     yaml_rt = _get_yaml_rt()
     stream = StringIO()
@@ -310,6 +320,16 @@ def record_hunt_execution(
             f"- **Parent Processes:** {parents_str}\n"
             f"- **IPs:** {ips_str}\n"
         )
+        if pivot_results:
+            exec_entry += f"\n#### Automated Investigation Pivots ({len(pivot_results)} executed)\n"
+            for p in pivot_results:
+                p_type = getattr(p, "pivot_type", "") if hasattr(p, "pivot_type") else p.get("pivot_type", "")
+                p_tech = getattr(p, "technique", "") if hasattr(p, "technique") else p.get("technique", "")
+                p_hits = getattr(p, "matched_count", 0) if hasattr(p, "matched_count") else p.get("matched_count", 0)
+                p_out = getattr(p, "outcome", "") if hasattr(p, "outcome") else p.get("outcome", "")
+                p_q = getattr(p, "query_text", "") if hasattr(p, "query_text") else p.get("query_text", "")
+                icon = "⚠️" if p_out == "hits_detected" else ("🟢" if p_out == "clean" else "🚨")
+                exec_entry += f"- {icon} **{p_type}** (`{p_tech}`): `{p_hits}` hits ({p_out}) | `{p_q}`\n"
     else:
         exec_entry = (
             f"\n\n### Automated Hunt Execution ({now_iso[:19].replace('T', ' ')} UTC)\n"

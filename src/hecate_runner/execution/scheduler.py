@@ -8,6 +8,7 @@ and invokes the SafeExecutionGate.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -282,10 +283,43 @@ class HuntExecutionScheduler:
                     hypothesis=hypothesis,
                     techniques=techniques,
                 )
-                self.store.record_finding(triage_report)
+                finding_id = self.store.record_finding(triage_report)
+                triage_report.finding_id = finding_id
                 result.triage_report = triage_report
             except Exception as exc:
                 log.warning("Finding triage failed for sweep %s (%s)", staged.sweep_id, exc)
+
+        # Execute autonomous pivots for confirmed or suspicious threat findings
+        if (
+            triage_report
+            and triage_report.verdict in ("true_positive", "suspicious")
+            and getattr(self.settings, "auto_hunt_pivots_enabled", True)
+            and triage_report.confidence
+            >= getattr(self.settings, "auto_hunt_pivot_min_confidence", 0.70)
+        ):
+            try:
+                from hecate_runner.execution.pivot_engine import PivotExecutionEngine
+
+                pivot_engine = PivotExecutionEngine(
+                    gate=self.gate,
+                    store=self.store,
+                    settings=self.settings,
+                )
+                finding_id = (
+                    triage_report.finding_id
+                    or f"FINDING-{staged.hunt_id}-{uuid.uuid4().hex[:6]}"
+                )
+                pivot_results = pivot_engine.execute_pivots(
+                    finding_id=finding_id,
+                    hunt_id=staged.hunt_id,
+                    target_siem=staged.target_siem,
+                    entities=triage_report.extracted_entities,
+                    techniques=triage_report.technique_matches,
+                    lookback_days=staged.time_range_days,
+                )
+                result.pivot_results = pivot_results
+            except Exception as exc:
+                log.warning("Pivot execution failed for sweep %s (%s)", staged.sweep_id, exc)
 
         # Record execution in hunt frontmatter and markdown body
         try:
@@ -298,6 +332,7 @@ class HuntExecutionScheduler:
                 detail=result.detail,
                 events=result.events,
                 triage_report=triage_report,
+                pivot_results=result.pivot_results,
             )
         except Exception as exc:
             log.warning("Could not record execution in hunt markdown (%s)", exc)

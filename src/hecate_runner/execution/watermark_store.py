@@ -5,6 +5,7 @@ Tracks execution history, sliding lookback windows, and pending human approvals.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -149,6 +150,17 @@ class WatermarkStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_findings_sweep_id ON hunt_execution_findings(sweep_id)"
             )
+            # Schema migrations for Phase 3 Pivot and Tuning attributes
+            for col, col_def in (
+                ("pivots_json", "TEXT DEFAULT '[]'"),
+                ("tuning_status", "TEXT DEFAULT 'none'"),
+                ("tuning_instruction", "TEXT DEFAULT ''"),
+                ("tuning_summary", "TEXT DEFAULT ''"),
+            ):
+                with contextlib.suppress(sqlite3.OperationalError):
+                    conn.execute(
+                        f"ALTER TABLE hunt_execution_findings ADD COLUMN {col} {col_def}"
+                    )
 
     def get_watermark(self, hunt_id: str) -> HuntExecutionWatermark | None:
         with self._connect() as conn:
@@ -449,6 +461,34 @@ class WatermarkStore:
             )
         return finding_id
 
+    def update_finding_pivots(
+        self, finding_id: str, pivots: list[dict[str, Any]]
+    ) -> None:
+        """Attach automated investigation pivot results to a finding."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE hunt_execution_findings SET pivots_json = ? WHERE finding_id = ?",
+                (json.dumps(pivots), finding_id.strip()),
+            )
+
+    def update_finding_tuning(
+        self,
+        finding_id: str,
+        status: str,
+        instruction: str = "",
+        summary: str = "",
+    ) -> None:
+        """Update rule tuning state on a finding."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE hunt_execution_findings
+                SET tuning_status = ?, tuning_instruction = ?, tuning_summary = ?
+                WHERE finding_id = ?
+                """,
+                (status, instruction, summary, finding_id.strip()),
+            )
+
     def list_findings(self, hunt_id: str | None = None) -> list[dict[str, Any]]:
         """List findings from the ledger, newest first."""
         with self._connect() as conn:
@@ -464,21 +504,32 @@ class WatermarkStore:
                 )
             findings = []
             for row in cursor.fetchall():
+                d = dict(row)
+                pivots_raw = d.get("pivots_json", "[]")
+                try:
+                    pivots = json.loads(pivots_raw) if pivots_raw else []
+                except (json.JSONDecodeError, TypeError):
+                    pivots = []
+
                 findings.append(
                     {
-                        "finding_id": row["finding_id"],
-                        "hunt_id": row["hunt_id"],
-                        "sweep_id": row["sweep_id"],
-                        "target_siem": row["target_siem"],
-                        "verdict": row["verdict"],
-                        "confidence": row["confidence"],
-                        "summary": row["summary"],
-                        "rationale": row["rationale"],
-                        "extracted_entities": json.loads(row["entities_json"]),
-                        "technique_matches": json.loads(row["technique_matches_json"]),
-                        "recommended_action": row["recommended_action"],
-                        "event_count": row["event_count"],
-                        "triaged_at": row["triaged_at"],
+                        "finding_id": d["finding_id"],
+                        "hunt_id": d["hunt_id"],
+                        "sweep_id": d["sweep_id"],
+                        "target_siem": d["target_siem"],
+                        "verdict": d["verdict"],
+                        "confidence": d["confidence"],
+                        "summary": d["summary"],
+                        "rationale": d["rationale"],
+                        "extracted_entities": json.loads(d["entities_json"]),
+                        "technique_matches": json.loads(d["technique_matches_json"]),
+                        "recommended_action": d["recommended_action"],
+                        "event_count": d["event_count"],
+                        "triaged_at": d["triaged_at"],
+                        "pivots": pivots,
+                        "tuning_status": d.get("tuning_status", "none"),
+                        "tuning_instruction": d.get("tuning_instruction", ""),
+                        "tuning_summary": d.get("tuning_summary", ""),
                     }
                 )
             return findings
@@ -494,18 +545,30 @@ class WatermarkStore:
             row = cursor.fetchone()
             if not row:
                 return None
+
+            d = dict(row)
+            pivots_raw = d.get("pivots_json", "[]")
+            try:
+                pivots = json.loads(pivots_raw) if pivots_raw else []
+            except (json.JSONDecodeError, TypeError):
+                pivots = []
+
             return {
-                "finding_id": row["finding_id"],
-                "hunt_id": row["hunt_id"],
-                "sweep_id": row["sweep_id"],
-                "target_siem": row["target_siem"],
-                "verdict": row["verdict"],
-                "confidence": row["confidence"],
-                "summary": row["summary"],
-                "rationale": row["rationale"],
-                "extracted_entities": json.loads(row["entities_json"]),
-                "technique_matches": json.loads(row["technique_matches_json"]),
-                "recommended_action": row["recommended_action"],
-                "event_count": row["event_count"],
-                "triaged_at": row["triaged_at"],
+                "finding_id": d["finding_id"],
+                "hunt_id": d["hunt_id"],
+                "sweep_id": d["sweep_id"],
+                "target_siem": d["target_siem"],
+                "verdict": d["verdict"],
+                "confidence": d["confidence"],
+                "summary": d["summary"],
+                "rationale": d["rationale"],
+                "extracted_entities": json.loads(d["entities_json"]),
+                "technique_matches": json.loads(d["technique_matches_json"]),
+                "recommended_action": d["recommended_action"],
+                "event_count": d["event_count"],
+                "triaged_at": d["triaged_at"],
+                "pivots": pivots,
+                "tuning_status": d.get("tuning_status", "none"),
+                "tuning_instruction": d.get("tuning_instruction", ""),
+                "tuning_summary": d.get("tuning_summary", ""),
             }

@@ -102,6 +102,7 @@ class FindingTriageReport:
     recommended_action: str = "pivot"  # "escalate_to_soc" | "pivot" | "tune_rule" | "ignore"
     event_count: int = 0
     triaged_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    finding_id: str = ""
 
     @property
     def is_threat(self) -> bool:
