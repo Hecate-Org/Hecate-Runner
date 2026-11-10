@@ -81,10 +81,12 @@ class HuntExecutionScheduler:
                     channel = self.settings.slack_channel_hunts_exec or "#all-hecate-hunt"
 
                     def _notify(b: list[dict[str, Any]] | str) -> None:
+                        is_attachment = isinstance(b, list) and len(b) > 0 and "color" in b[0]
                         notifier.post_message(
                             channel,
                             "Hecate Auto Hunt Notification",
-                            blocks=b if isinstance(b, list) else None,
+                            blocks=None if is_attachment else (b if isinstance(b, list) else None),
+                            attachments=b if is_attachment else None,
                         )
 
                     self.notify_fn = _notify
