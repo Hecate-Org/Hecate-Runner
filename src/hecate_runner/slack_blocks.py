@@ -195,12 +195,24 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
         else "• Clean triage: zero items parked"
     )
 
+    is_enrichment = result.outcome == "incremental_enrichment"
+    header_text = (
+        f"🔄 Campaign Dossier Enriched: {result.hunt_id}"
+        if is_enrichment
+        else f"📝 New Draft Hunt Initiated: {result.hunt_id}"
+    )
+    status_label = (
+        "`active` (Dossier incrementally updated)"
+        if is_enrichment
+        else "`planning` (Awaiting review)"
+    )
+
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📝 New Draft Hunt Initiated: {result.hunt_id}",
+                "text": header_text,
                 "emoji": True,
             },
         },
@@ -209,9 +221,9 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*Draft Hunt ID:* `{result.hunt_id}`\n"
-                    f"*Research Context:* {research_ctx}\n"
-                    f"*Draft Location:* `{result.draft_path}`"
+                    f"*Hunt ID:* `{result.hunt_id}`\n"
+                    f"*Context:* {research_ctx}\n"
+                    f"*Location:* `{result.draft_path}`"
                 ),
             },
         },
@@ -220,7 +232,7 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": "*Status:*\n`planning` (Awaiting review)",
+                    "text": f"*Status:*\n{status_label}",
                 },
                 {
                     "type": "mrkdwn",
@@ -229,6 +241,13 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
             ],
         },
     ]
+    if is_enrichment and result.detail:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Enrichment Update:*\n{result.detail}"},
+            }
+        )
     review_text = _draft_review_signals(result)
     if review_text:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": review_text}})

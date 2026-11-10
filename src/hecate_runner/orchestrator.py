@@ -379,13 +379,17 @@ class Orchestrator(
                 )
                 clear_retry(self.settings.cti_queue_dir_resolved, item)
                 self._advance_past(item)
-                return RunResult(
+                result = RunResult(
                     outcome="incremental_enrichment",
                     hunt_id=match.hunt_id,
                     draft_path=match.hunt_path,
                     detail=enrichment.details,
                     parked_count=parked_count,
                 )
+                self._publish_github(match.hunt_id)
+                self._publish_misp(match.hunt_id)
+                self._notify_cycle(result)
+                return result
 
         is_sweep = item.metadata.get("processing_track") != "deep" and (
             bool(parse_indicator_inventory(item.content))

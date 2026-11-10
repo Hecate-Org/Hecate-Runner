@@ -237,11 +237,18 @@ def notify_draft_created(settings: Settings, result: RunResult) -> None:
         if result.parked_count > 0
         else ""
     )
-    text = (
-        f":memo: New draft hunt *{result.hunt_id}* ({research_context})\n"
-        f"`{result.draft_path}`\n"
-        f"Status: `planning` — human review required before execution.{parked_note}"
-    )
+    if result.outcome == "incremental_enrichment":
+        text = (
+            f":repeat: Incremental Enrichment applied to *{result.hunt_id}*\n"
+            f"`{result.draft_path}`\n"
+            f"Details: {result.detail}{parked_note}"
+        )
+    else:
+        text = (
+            f":memo: New draft hunt *{result.hunt_id}* ({research_context})\n"
+            f"`{result.draft_path}`\n"
+            f"Status: `planning` — human review required before execution.{parked_note}"
+        )
 
     attachments = build_draft_card(result, interactive=settings.slack_interactive_enabled)
     router.post_message(settings.slack_channel_hunts_exec, text, attachments=attachments)
