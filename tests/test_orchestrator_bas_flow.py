@@ -28,7 +28,7 @@ def test_render_draft_with_bas_verification() -> None:
         platforms=["windows"],
         threat_intel="Adversary PowerShell execution detected.",
         bas_verification={
-            "status": "verified_true_positive",
+            "status": "simulation_match",
             "provider": "mock",
             "technique_id": "T1059.001",
             "ability_id": "ability-powershell-test",
@@ -43,14 +43,14 @@ def test_render_draft_with_bas_verification() -> None:
     rendered = render_draft(req)
 
     # Frontmatter assertions
-    assert "bas_verified: true" in rendered
+    assert "bas_verified: false" in rendered
     assert 'bas_provider: "mock"' in rendered
-    assert 'bas_status: "verified_true_positive"' in rendered
+    assert 'bas_status: "simulation_match"' in rendered
     assert "bas_detection_triggered: true" in rendered
 
     # Body assertions
-    assert "### Live Adversary Emulation & Breach Simulation (BAS)" in rendered
-    assert "VERIFIED TRUE POSITIVE" in rendered
+    assert "### Adversary Emulation & Breach Simulation (BAS)" in rendered
+    assert "SIMULATION MATCH" in rendered
     assert "- **Provider:** `MOCK`" in rendered
     assert "- **Target Technique:** `T1059.001` (ability-powershell-test)" in rendered
     assert "- **Telemetry Observed:** Yes" in rendered
@@ -117,7 +117,11 @@ detection:
     orchestrator._run_bas_validation(req, rules, out_dir, item)
 
     assert req.bas_verification is not None
-    assert req.bas_verification["status"] == "verified_true_positive"
+    assert req.bas_verification["status"] == "simulation_match"
+    assert req.bas_verification["simulation_rules_matched"] == 1
+    assert req.bas_verification["validated_rules_count"] == 0
+    assert req.bas_rules_validated == 0
+    assert rules[0]["bas_validated"] is False
     assert req.bas_verification["provider"] == "mock"
     assert req.bas_verification["telemetry_arrived"] is True
     assert req.bas_verification["rule_triggered"] is True

@@ -19,6 +19,8 @@ def create_mock_caldera_client(
     link_results=None,
     agents=None,
     calls=None,
+    cleanup_links=None,
+    command="powershell.exe -enc ...",
 ):
     if abilities is None:
         abilities = [
@@ -81,11 +83,12 @@ def create_mock_caldera_client(
                             "id": "link-1",
                             "paw": "agent-01",
                             "status": 0 if state == "finished" else -3,
-                            "command": "powershell.exe -enc ...",
+                            "command": command,
                             "collect": "2026-10-27T00:00:00Z",
                             "finish": "2026-10-27T00:00:05Z" if state == "finished" else None,
                         }
-                    ],
+                    ]
+                    + (cleanup_links or []),
                 },
             )
 
@@ -115,7 +118,19 @@ def test_caldera_lookup_technique():
 
 
 def test_caldera_detonation_success():
-    client = create_mock_caldera_client(poll_states=["running", "finished"])
+    client = create_mock_caldera_client(
+        poll_states=["running", "finished"],
+        cleanup_links=[
+            {
+                "id": "cleanup-1",
+                "paw": "agent-01",
+                "cleanup": True,
+                "status": 0,
+                "finish": "2026-10-27T00:00:06Z",
+                "command": "rm /tmp/canary",
+            }
+        ],
+    )
     connector = CalderaConnector(client=client, allowed_hosts=["agent-01"])
     request = DetonationRequest(
         hunt_id="H-0885",
@@ -302,3 +317,160 @@ def test_timeout_stops_remote_operation_and_does_not_claim_cleanup():
         and json.loads(call.content).get("state") == "finished"
         for call in calls
     )
+
+
+@pytest.mark.parametrize(
+    "cleanup_links,expected",
+    [
+        ([], "unconfirmed"),
+        ([{"cleanup": True, "status": 0, "paw": "agent-01"}], "unconfirmed"),
+        ([{"cleanup": True, "finish": "done", "paw": "agent-01"}], "unconfirmed"),
+        ([{"cleanup": True, "status": -3, "paw": "agent-01"}], "unconfirmed"),
+        ([{"cleanup": True, "status": 1, "finish": "done", "paw": "agent-01"}], "failed"),
+        ([{"cleanup": True, "status": 0, "finish": "done", "paw": "another-agent"}], "unconfirmed"),
+        (
+            [
+                {"cleanup": True, "status": 0, "finish": "done", "paw": "agent-01"},
+                {"cleanup": True, "status": 1, "finish": "done", "paw": "agent-01"},
+            ],
+            "failed",
+        ),
+    ],
+)
+def test_execution_success_is_not_cleanup_proof(cleanup_links, expected):
+    connector = CalderaConnector(
+        client=create_mock_caldera_client(cleanup_links=cleanup_links), allowed_hosts=["agent-01"]
+    )
+    result = connector.detonate(
+        DetonationRequest(
+            hunt_id="H-TEST",
+            technique_id="T1059.001",
+            target=DetonationTarget(environment="staging", host="agent-01"),
+        )
+    )
+    assert result.raw_details["execution_success"]
+    assert not result.success
+    assert not result.cleanup_success
+    assert result.cleanup_error
+    assert result.raw_details["cleanup_status"] == expected
+
+
+def test_only_reviewed_artifact_free_procedures_can_omit_cleanup():
+    from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+    proc = APPROVED_PROCEDURES["T1033"]
+    abilities = [
+        {
+            "ability_id": proc.ability_id,
+            "technique_id": proc.technique_id,
+            "executors": [{"name": "sh", "platform": "linux", "command": proc.command}],
+        }
+    ]
+    connector = CalderaConnector(
+        client=create_mock_caldera_client(abilities=abilities, command=proc.command),
+        allowed_hosts=["agent-01"],
+    )
+    result = connector.detonate(
+        DetonationRequest(
+            hunt_id="H-TEST",
+            technique_id="T1033",
+            target=DetonationTarget(environment="lab", host="agent-01"),
+        )
+    )
+    assert result.success
+    assert result.cleanup_success
+    assert result.raw_details["cleanup_status"] == "not_required"
+    assert result.raw_details["cleanup_link_ids"] == []
+
+
+def test_readonly_exemption_does_not_cover_unexpected_executed_command():
+    from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+    proc = APPROVED_PROCEDURES["T1033"]
+    abilities = [
+        {
+            "ability_id": proc.ability_id,
+            "technique_id": proc.technique_id,
+            "executors": [{"name": "sh", "platform": "linux", "command": proc.command}],
+        }
+    ]
+    connector = CalderaConnector(
+        client=create_mock_caldera_client(abilities=abilities, command="touch /tmp/unexpected"),
+        allowed_hosts=["agent-01"],
+    )
+    result = connector.detonate(
+        DetonationRequest(
+            hunt_id="H-TEST",
+            technique_id="T1033",
+            target=DetonationTarget(environment="lab", host="agent-01"),
+        )
+    )
+    assert not result.cleanup_success
+    assert not result.success
+
+
+def test_classic_operation_evidence_is_retained_when_cleanup_is_unconfirmed():
+    import json
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.url.path == "/api/v2/agents":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "paw": "agent-01",
+                        "host": "agent-01",
+                        "platform": "linux",
+                        "trusted": True,
+                        "group": "staging",
+                    }
+                ],
+            )
+        if request.url.path == "/api/v2/operations":
+            return httpx.Response(404)
+        if request.url.path == "/api/rest":
+            payload = json.loads(request.content)
+            if request.method == "PUT":
+                return httpx.Response(200, json={"id": "classic-op"})
+            if payload["index"] == "operations":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": "classic-op",
+                            "state": "finished",
+                            "chain": [
+                                {
+                                    "id": "attack",
+                                    "paw": "agent-01",
+                                    "status": 0,
+                                    "command": "whoami",
+                                    "finish": "2026-11-10T00:00:00Z",
+                                }
+                            ],
+                        }
+                    ],
+                )
+            return httpx.Response(200, json={"output": "lab"})
+        return httpx.Response(404)
+
+    connector = CalderaConnector(
+        client=httpx.Client(transport=httpx.MockTransport(handler), base_url="http://caldera.test"),
+        allowed_hosts=["agent-01"],
+    )
+    result = connector.detonate(
+        DetonationRequest(
+            hunt_id="H-TEST",
+            technique_id="T1033",
+            ability_id="explicit",
+            target=DetonationTarget(host="agent-01", environment="staging"),
+        )
+    )
+    assert not result.success
+    assert not result.cleanup_success
+    assert result.raw_details["operation_id"] == "classic-op"
+    assert result.raw_details["cleanup_status"] == "unconfirmed"
+    assert not any(call.method == "DELETE" for call in calls)

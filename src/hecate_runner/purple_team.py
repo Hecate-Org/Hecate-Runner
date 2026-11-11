@@ -17,6 +17,8 @@ against attack telemetry" with "0 false positives".
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import logging
 import re
 from collections.abc import Iterable
@@ -25,22 +27,128 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-#: Benign events every rule must not match. Deliberately small and generic: it
-#: is a sanity floor, not a model of anyone's environment.
-BENIGN_SAMPLE: list[dict[str, Any]] = [
+#: Benign baseline samples partitioned by category/platform to provide realistic,
+#: noise-floor negative testing for rules without cross-platform false alarms.
+#:
+#: NOTE: These samples provide a local sanity gate and noise-floor smoke check for
+#: automated rule tuning. They do not constitute an operational false-positive rate
+#: for production telemetry, which requires an independent holdout corpus.
+
+BENIGN_SAMPLE_LINUX: list[dict[str, Any]] = [
     {"Image": "/usr/sbin/cron", "CommandLine": "/usr/sbin/cron -f", "User": "root"},
     {
         "Image": "/usr/sbin/anacron",
         "CommandLine": "/usr/sbin/anacron -s /etc/cron.d",
         "User": "root",
     },
+    {"Image": "/usr/bin/curl", "CommandLine": "curl https://pypi.org/simple", "User": "app"},
+    {
+        "Image": "/usr/lib/systemd/systemd-journald",
+        "CommandLine": "/usr/lib/systemd/systemd-journald",
+        "User": "root",
+    },
+    {
+        "Image": "/usr/sbin/logrotate",
+        "CommandLine": "logrotate /etc/logrotate.conf",
+        "User": "root",
+    },
+    {
+        "Image": "/bin/bash",
+        "CommandLine": "/bin/bash /etc/profile.d/lang.sh",
+        "User": "root",
+    },
+    {
+        "TargetFilename": "/var/log/syslog",
+        "User": "syslog",
+    },
+]
+
+BENIGN_SAMPLE_WINDOWS: list[dict[str, Any]] = [
     {
         "Image": "C:\\Windows\\System32\\svchost.exe",
         "CommandLine": "svchost.exe -k netsvcs",
         "User": "SYSTEM",
     },
-    {"Image": "/usr/bin/curl", "CommandLine": "curl https://pypi.org/simple", "User": "app"},
+    {
+        "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "CommandLine": "powershell.exe -File C:\\Program Files\\Monitoring\\agent.ps1",
+        "User": "SYSTEM",
+    },
+    {
+        "Image": "C:\\Windows\\explorer.exe",
+        "CommandLine": "C:\\Windows\\explorer.exe",
+        "User": "CORP\\alice",
+    },
+    {
+        "Image": "C:\\Windows\\System32\\taskhostw.exe",
+        "CommandLine": "taskhostw.exe {2227A56E-0000-0000-0000-000000000000}",
+        "User": "SYSTEM",
+    },
+    {
+        "TargetObject": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Start",
+        "Details": "2",
+        "Image": "services.exe",
+    },
+    {
+        "TargetFilename": "C:\\Windows\\System32\\drivers\\etc\\hosts",
+        "User": "SYSTEM",
+    },
+]
+
+BENIGN_SAMPLE_WEBSERVER: list[dict[str, Any]] = [
+    {
+        "cs-method": "GET",
+        "cs-uri-stem": "/index.html",
+        "sc-status": "200",
+        "cs-user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    },
+    {
+        "cs-method": "GET",
+        "cs-uri-stem": "/healthz",
+        "sc-status": "200",
+        "cs-user-agent": "kube-probe/1.28",
+    },
+    {
+        "cs-method": "GET",
+        "cs-uri-stem": "/robots.txt",
+        "sc-status": "200",
+        "cs-user-agent": "Googlebot/2.1",
+    },
+    {
+        "cs-method": "GET",
+        "cs-uri-stem": "/favicon.ico",
+        "sc-status": "200",
+        "cs-user-agent": "Mozilla/5.0",
+    },
+    {
+        "cs-method": "GET",
+        "cs-uri-stem": "/static/css/main.css",
+        "sc-status": "200",
+        "cs-user-agent": "Mozilla/5.0",
+    },
+    {
+        "cs-method": "POST",
+        "cs-uri-stem": "/api/v1/auth",
+        "sc-status": "200",
+        "cs-user-agent": "Mozilla/5.0",
+    },
+]
+
+BENIGN_SAMPLE_NETWORK: list[dict[str, Any]] = [
     {"DestinationIp": "8.8.8.8", "DestinationPort": 53, "QueryName": "microsoft.com"},
+    {
+        "c-uri": "https://www.google.com/search?q=weather",
+        "cs-host": "www.google.com",
+        "cs-method": "GET",
+    },
+    {
+        "DestinationIp": "1.1.1.1",
+        "DestinationPort": 443,
+        "Protocol": "tcp",
+    },
+]
+
+BENIGN_SAMPLE_CLOUD: list[dict[str, Any]] = [
     {
         "eventSource": "ec2.amazonaws.com",
         "eventName": "DescribeInstances",
@@ -52,34 +160,98 @@ BENIGN_SAMPLE: list[dict[str, Any]] = [
         "result": "success",
         "initiatedBy": {"user": {"userPrincipalName": "developer@example.com"}},
     },
+]
+
+BENIGN_SAMPLE_CONTAINER: list[dict[str, Any]] = [
     {
         "Image": "k8s.gcr.io/pause:3.6",
         "ContainerName": "pause",
         "CommandLine": "/pause",
         "Privileged": "false",
     },
-    {
-        "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-        "CommandLine": "powershell.exe -File C:\\Program Files\\Monitoring\\agent.ps1",
-        "User": "SYSTEM",
-    },
-    {
-        "TargetObject": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Start",
-        "Details": "2",
-        "Image": "services.exe",
-    },
-    {
-        "cs-method": "GET",
-        "cs-uri-stem": "/index.html",
-        "sc-status": "200",
-        "cs-user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    },
-    {
-        "c-uri": "https://www.google.com/search?q=weather",
-        "cs-host": "www.google.com",
-        "cs-method": "GET",
-    },
 ]
+
+#: Benign events every rule must not match. Deliberately small and generic: it
+#: is a sanity floor, not a model of anyone's environment.
+BENIGN_SAMPLE: list[dict[str, Any]] = (
+    BENIGN_SAMPLE_LINUX
+    + BENIGN_SAMPLE_WINDOWS
+    + BENIGN_SAMPLE_WEBSERVER
+    + BENIGN_SAMPLE_NETWORK
+    + BENIGN_SAMPLE_CLOUD
+    + BENIGN_SAMPLE_CONTAINER
+)
+
+
+def get_benign_sample_for_rule(rule_yaml: str) -> list[dict[str, Any]]:
+    """Return a baseline event sample tailored to the rule's logsource category and product.
+
+    Falls back to `BENIGN_SAMPLE` if the logsource is unknown or cannot be parsed.
+    """
+    if not rule_yaml or not isinstance(rule_yaml, str):
+        return BENIGN_SAMPLE
+
+    try:
+        import yaml
+
+        doc = yaml.safe_load(rule_yaml)
+        if not isinstance(doc, dict):
+            return BENIGN_SAMPLE
+        logsource = doc.get("logsource") or {}
+        if not isinstance(logsource, dict):
+            return BENIGN_SAMPLE
+    except Exception:
+        return BENIGN_SAMPLE
+
+    product = str(logsource.get("product") or "").lower().strip()
+    category = str(logsource.get("category") or "").lower().strip()
+    service = str(logsource.get("service") or "").lower().strip()
+
+    if category in ("webserver", "apache", "nginx", "iis") or service in (
+        "apache",
+        "nginx",
+        "iis",
+        "webserver",
+    ):
+        return BENIGN_SAMPLE_WEBSERVER + BENIGN_SAMPLE_NETWORK
+
+    if category in ("network_connection", "dns_query", "dns", "firewall", "jarm") or service in (
+        "dns",
+        "firewall",
+    ):
+        return BENIGN_SAMPLE_NETWORK
+
+    if product in ("aws", "azure", "gcp", "cloud") or service in (
+        "cloudtrail",
+        "signin",
+        "signinlogs",
+    ):
+        return BENIGN_SAMPLE_CLOUD
+
+    if product in ("kubernetes", "k8s") or category in ("container", "k8s"):
+        return BENIGN_SAMPLE_CONTAINER
+
+    if (
+        product == "windows"
+        or category in _REGISTRY_CATEGORIES
+        or service
+        in (
+            "security",
+            "system",
+            "powershell",
+        )
+    ):
+        return BENIGN_SAMPLE_WINDOWS
+
+    if product == "linux":
+        return BENIGN_SAMPLE_LINUX
+
+    # If category is process_creation or file_event without specific product, include OS baselines
+    if category in ("process_creation", "file_event"):
+        return BENIGN_SAMPLE_LINUX + BENIGN_SAMPLE_WINDOWS
+
+    return BENIGN_SAMPLE
+
 
 #: Roles and statuses that are not this intrusion's infrastructure.
 _NOT_INFRASTRUCTURE = {"historical", "target"}
@@ -401,14 +573,29 @@ def replay_events(
                 "c-uri": request["uri"],
             },
         )
-    web_endpoints = (
-        []
-        if http_requests is not None
-        else re.findall(
-            r"/(?:api|v\d+|wp-admin|console|owa|autodiscover|actuator|oa_servlets|OA_HTML|scripts|logon|vpn|nitro|mgmt|rest)/[a-zA-Z0-9_\-./?=&#%]+",
-            combined_intel,
+    web_endpoints: list[str] = []
+    if not http_requests:
+        # Extract endpoints with known sensitive API prefixes
+        web_endpoints.extend(
+            re.findall(
+                r"/(?:api|v\d+|wp-admin|console|owa|autodiscover|actuator|oa_servlets|OA_HTML|scripts|logon|vpn|nitro|mgmt|rest)/[a-zA-Z0-9_\-./?=&#%]+",
+                combined_intel,
+            )
         )
-    )
+        # Extract script endpoints (.php, .jsp, .action, .do, .aspx, .cgi, .phtml)
+        web_endpoints.extend(
+            re.findall(
+                r"/(?:[a-zA-Z0-9_\-./]+/)*[a-zA-Z0-9_\-]+\.(?:php|jsp|action|do|aspx|cgi|phtml|ashx)(?:\?[a-zA-Z0-9_\-./?=&#%]*)?",
+                combined_intel,
+            )
+        )
+        # Extract URL paths from embedded HTTP/HTTPS URLs
+        for m_url in re.findall(
+            r"https?://[a-zA-Z0-9_\-.:]+(/[a-zA-Z0-9_\-./?=&#%]*)", combined_intel
+        ):
+            if m_url and m_url not in web_endpoints:
+                web_endpoints.append(m_url)
+
     for ep in web_endpoints:
         path = ep.split("?")[0]
         query = ep.split("?", 1)[1] if "?" in ep else ""
@@ -418,8 +605,21 @@ def replay_events(
                 "cs-method": "POST"
                 if any(
                     w in ep.lower()
-                    for w in ("api", "upload", "audit", "login", "auth", "sqli", "create", "update")
+                    for w in (
+                        "api",
+                        "upload",
+                        "audit",
+                        "login",
+                        "auth",
+                        "sqli",
+                        "create",
+                        "update",
+                        "ping",
+                        "cmd",
+                        "shell",
+                    )
                 )
+                or _posted(path, cti_text)
                 else "GET",
                 "cs-uri-stem": path,
                 **({"cs-uri-query": query} if query else {}),
@@ -428,6 +628,61 @@ def replay_events(
             },
         )
         add("proxy", {"c-uri": ep})
+
+    # Synthesize web application server and execution telemetry
+    if any(
+        k in lowered_intel
+        for k in (
+            "php-fpm",
+            "php-cgi",
+            "apache",
+            "httpd",
+            "nginx",
+            "webshell",
+            "cve-2026",
+            "php2shell",
+            "remote code execution",
+            "rce",
+        )
+    ):
+        add(
+            "process_creation",
+            {
+                "ParentImage": "/usr/sbin/php-fpm",
+                "Image": "/bin/sh",
+                "CommandLine": "/bin/sh -c id",
+                "User": "www-data",
+            },
+        )
+        add(
+            "process_creation",
+            {
+                "ParentImage": "/usr/sbin/php-cgi",
+                "Image": "/bin/bash",
+                "CommandLine": "/bin/bash -c whoami",
+                "User": "www-data",
+            },
+        )
+        add(
+            "process_creation",
+            {
+                "ParentImage": "/usr/sbin/apache2",
+                "Image": "/bin/sh",
+                "CommandLine": "/bin/sh -i",
+                "User": "apache",
+            },
+        )
+
+    if any(k in lowered_intel for k in ("checker.py", "tooling/checker", "poc tooling")):
+        add(
+            "process_creation",
+            {
+                "Image": "/usr/bin/python3",
+                "CommandLine": "python3 tooling/checker/checker.py --authorized",
+                "ParentImage": "/bin/bash",
+                "User": "app",
+            },
+        )
 
     # Dynamic Adversary Emulation via Atomic Red Team
     if enable_atomic and techniques:
@@ -464,6 +719,11 @@ class ReplayResult:
     emulation_type: str = "static"  # "static" | "atomic_red_team" | "hybrid"
     emulated_techniques: list[str] = field(default_factory=list)
     atomic_tests: list[str] = field(default_factory=list)
+    baseline_scope: str = "smoke_check_noise_floor"
+    evaluation_scope: str = "replay_sanity"
+    training_metrics: dict[str, Any] = field(default_factory=dict)
+    holdout: dict[str, Any] = field(default_factory=lambda: {"status": "unavailable"})
+    tuning_rejected: bool = False
 
     @property
     def matched(self) -> bool:
@@ -480,62 +740,156 @@ class ReplayResult:
             "emulation_type": self.emulation_type,
             "emulated_techniques": self.emulated_techniques,
             "atomic_tests": self.atomic_tests,
+            "baseline_scope": self.baseline_scope,
+            "evaluation_scope": self.evaluation_scope,
+            "training_metrics": self.training_metrics,
+            "holdout": self.holdout,
+            "tuning_rejected": self.tuning_rejected,
+            "notes": list(self.notes),
         }
 
 
 def replay_rule(
     rule_yaml: str,
     events: list[dict[str, Any]],
-    baseline: list[dict[str, Any]],
+    baseline: list[dict[str, Any]] | None = None,
     tuner: Any = None,
     emulated_techniques: list[str] | None = None,
     atomic_tests: list[str] | None = None,
 ) -> ReplayResult:
-    """Replay one rule against intrusion telemetry and benign baseline. Tuning only ever removes benign-sample matches.
+    """Tune on training groups and grade a frozen candidate on withheld groups once.
 
-    The tuner's other repair -- appending a missed event's Image/CommandLine to
-    the rule -- would fit the rule to the very events grading it, so it is
-    never offered missed events: only the ones the rule already matches.
+    With insufficient independent groups, perform the original replay sanity
+    check without automatic tuning or an independent-quality claim. The tuner
+    never receives held-out positives, negatives, or their scoring feedback.
     """
     from hecate_agent.core.sigma_evaluator import SigmaEvaluator
 
-    em_type = "atomic_red_team" if (emulated_techniques or atomic_tests) else "static"
+    from hecate_runner.replay_holdout import reserve_holdout
 
+    if baseline is None:
+        baseline = get_benign_sample_for_rule(rule_yaml)
+    em_type = "atomic_red_team" if (emulated_techniques or atomic_tests) else "static"
+    common: dict[str, Any] = {
+        "emulation_type": em_type,
+        "emulated_techniques": list(emulated_techniques or []),
+        "atomic_tests": list(atomic_tests or []),
+    }
     if not events:
-        return ReplayResult(
-            status="no_replay_events",
-            final_rule=rule_yaml,
-            emulation_type=em_type,
-            emulated_techniques=list(emulated_techniques or []),
-            atomic_tests=list(atomic_tests or []),
-        )
+        return ReplayResult(status="no_replay_events", final_rule=rule_yaml, **common)
+    split = reserve_holdout(events, baseline)
+    notes: list[str] = []
+    holdout: dict[str, Any] = {"status": "unavailable", "reason": split.reason}
+
+    def metrics(report: Any, positive_count: int, benign_count: int) -> dict[str, Any]:
+        return {
+            "positive_events": positive_count,
+            "benign_events": benign_count,
+            "tp": report.true_positives,
+            "fp": report.false_positives,
+            "fn": report.false_negatives,
+            "tn": report.true_negatives,
+            "recall": report.recall,
+            "false_positive_rate": report.false_positives / benign_count if benign_count else None,
+        }
+
     try:
-        result = SigmaEvaluator.evaluate_rule(rule_yaml, events, baseline)
-    except Exception as exc:  # a rule the evaluator cannot read is a finding, not a crash
+        result = SigmaEvaluator.evaluate_rule(rule_yaml, split.positive, split.benign)
+    except Exception as exc:
         return ReplayResult(
             status="error",
             replay_events=len(events),
             final_rule=rule_yaml,
             notes=[str(exc)],
-            emulation_type=em_type,
-            emulated_techniques=list(emulated_techniques or []),
-            atomic_tests=list(atomic_tests or []),
+            holdout=holdout,
+            **common,
         )
-
     final_rule, tuned = rule_yaml, False
-    if result.false_positives and result.true_positives and tuner is not None:
+    if not split.available:
+        notes.append("Independent holdout unavailable; automatic tuning disabled. " + split.reason)
+    elif result.false_positives and result.true_positives and tuner is not None:
         matched = [
-            e for e in events if SigmaEvaluator.evaluate_rule(rule_yaml, [e], []).true_positives
+            e
+            for e in split.positive
+            if SigmaEvaluator.evaluate_rule(rule_yaml, [e], []).true_positives
         ]
-        tuning = tuner.tune(rule_yaml, matched, baseline)
-        candidate = SigmaEvaluator.evaluate_rule(tuning.final_rule, events, baseline)
-        if (
-            tuning.final_rule != rule_yaml
-            and candidate.false_positives == 0
-            and candidate.true_positives >= result.true_positives
-        ):
-            final_rule, tuned, result = tuning.final_rule, True, candidate
-
+        try:
+            tuning = tuner.tune(rule_yaml, copy.deepcopy(matched), copy.deepcopy(split.benign))
+            candidate = SigmaEvaluator.evaluate_rule(
+                tuning.final_rule, split.positive, split.benign
+            )
+            if (
+                tuning.final_rule != rule_yaml
+                and not candidate.errors
+                and candidate.false_positives == 0
+                and candidate.true_positives >= result.true_positives
+            ):
+                final_rule, tuned, result = tuning.final_rule, True, candidate
+        except Exception as exc:
+            notes.append(f"Training-only tuning failed; original rule retained: {exc}")
+    training_metrics = metrics(result, len(split.positive), len(split.benign))
+    tuning_rejected = False
+    evaluation_scope = "replay_sanity"
+    if split.available:
+        evaluation_scope = "synthetic_holdout"
+        frozen_digest = hashlib.sha256(final_rule.encode()).hexdigest()
+        try:
+            # One evaluation after model selection is complete. Never offer
+            # failures back to the tuner, and never test another candidate here.
+            held = SigmaEvaluator.evaluate_rule(
+                final_rule, split.holdout_positive, split.holdout_benign
+            )
+            passed = not held.errors and held.is_perfect
+            holdout = {
+                "status": "passed" if passed else "failed",
+                "scope": "reserved_synthetic_samples",
+                "split_digest": split.digest,
+                "evaluated_rule_sha256": frozen_digest,
+                **metrics(held, len(split.holdout_positive), len(split.holdout_benign)),
+            }
+            if not passed and tuned:
+                tuning_rejected = True
+                final_rule, tuned = rule_yaml, False
+                notes.append(
+                    "Frozen candidate failed the untouched holdout; no retry or automatic rule replacement."
+                )
+                return ReplayResult(
+                    status="holdout_failed",
+                    replay_events=len(events),
+                    true_positives=held.true_positives,
+                    false_positives=held.false_positives,
+                    final_rule=final_rule,
+                    training_metrics=training_metrics,
+                    holdout=holdout,
+                    evaluation_scope=evaluation_scope,
+                    tuning_rejected=tuning_rejected,
+                    notes=notes,
+                    **common,
+                )
+            if not passed:
+                notes.append(
+                    "Original rule did not cover all withheld source-event groups; independent score failed. Replay matching is reported separately."
+                )
+        except Exception as exc:
+            return ReplayResult(
+                status="error",
+                replay_events=len(events),
+                final_rule=rule_yaml,
+                holdout={
+                    "status": "error",
+                    "reason": str(exc),
+                    "evaluated_rule_sha256": frozen_digest,
+                },
+                training_metrics=training_metrics,
+                evaluation_scope=evaluation_scope,
+                notes=["Holdout evaluation failed; original rule retained."],
+                **common,
+            )
+    if split.available:
+        # Keep the existing descriptive replay counts (some named source
+        # artifacts may target different rules). This is a frozen-rule sanity
+        # report after training, never feedback to the tuner or holdout score.
+        result = SigmaEvaluator.evaluate_rule(final_rule, events, baseline)
     if result.true_positives == 0:
         status = "no_match"
     elif result.false_positives:
@@ -549,7 +903,9 @@ def replay_rule(
         false_positives=result.false_positives,
         tuned=tuned,
         final_rule=final_rule,
-        emulation_type=em_type,
-        emulated_techniques=list(emulated_techniques or []),
-        atomic_tests=list(atomic_tests or []),
+        training_metrics=training_metrics,
+        holdout=holdout,
+        evaluation_scope=evaluation_scope,
+        notes=notes,
+        **common,
     )

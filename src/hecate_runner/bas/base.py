@@ -155,7 +155,7 @@ class DetonationResult:
     stdout: str
     stderr: str
     stage: DetonationStage = DetonationStage.COMPLETED
-    cleanup_success: bool = True
+    cleanup_success: bool = False
     cleanup_error: str | None = None
     telemetry_signatures: list[dict[str, Any]] = field(default_factory=list)
     raw_details: dict[str, Any] = field(default_factory=dict)

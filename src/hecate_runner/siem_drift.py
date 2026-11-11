@@ -674,6 +674,23 @@ def init_drift_db(workspace: Path) -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass
 
+        # Existing rows have no authoritative alert proof. Preserve their
+        # history without counting them as verified alert firings.
+        alert_columns = {
+            "siem_alert_fired": "INTEGER NOT NULL DEFAULT 0",
+            "query_match_latency_sec": "REAL",
+            "alert_search_id": "TEXT NOT NULL DEFAULT ''",
+            "alert_name": "TEXT NOT NULL DEFAULT ''",
+            "alert_time_utc": "TEXT NOT NULL DEFAULT ''",
+        }
+        with conn:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(detection_validations)")}
+            for column, declaration in alert_columns.items():
+                if column not in existing:
+                    conn.execute(
+                        f"ALTER TABLE detection_validations ADD COLUMN {column} {declaration}"
+                    )
+
         _drift_db_initialized.add(resolved)
 
     return conn
@@ -1015,6 +1032,11 @@ def record_detection_validation(
     search_job_id: str = "",
     detonation_time_utc: str = "",
     notes: str = "",
+    siem_alert_fired: bool = False,
+    query_match_latency_sec: float | None = None,
+    alert_search_id: str = "",
+    alert_name: str = "",
+    alert_time_utc: str = "",
 ) -> int:
     """Record a closed-loop BAS adversary emulation and SIEM alert verification result."""
     conn = init_drift_db(workspace)
@@ -1027,8 +1049,9 @@ def record_detection_validation(
                     timestamp, hunt_id, technique_id, ability_id,
                     bas_provider, siem_backend, status, rule_triggered,
                     telemetry_arrived, detection_latency_sec, matched_events_count,
-                    query_used, search_job_id, detonation_time_utc, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    query_used, search_job_id, detonation_time_utc, notes,
+                    siem_alert_fired, query_match_latency_sec, alert_search_id, alert_name, alert_time_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now_iso,
@@ -1046,6 +1069,11 @@ def record_detection_validation(
                     search_job_id,
                     detonation_time_utc or now_iso,
                     notes,
+                    int(siem_alert_fired),
+                    query_match_latency_sec,
+                    alert_search_id,
+                    alert_name,
+                    alert_time_utc,
                 ),
             )
             return cur.lastrowid or 0
@@ -1142,12 +1170,18 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
                 (since_iso,),
             ).fetchall()
 
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(detection_validations)")}
+            alert_proven = (
+                "siem_alert_fired = 1 AND alert_search_id != '' AND alert_name != '' AND alert_time_utc != ''"
+                if "siem_alert_fired" in columns
+                else "0"
+            )
             val_stats = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) as total_validations,
-                    COUNT(CASE WHEN status = 'verified_true_positive' THEN 1 END) as verified_count,
-                    AVG(CASE WHEN status = 'verified_true_positive' THEN detection_latency_sec END) as avg_latency_sec
+                    COUNT(CASE WHEN status = 'verified_true_positive' AND {alert_proven} THEN 1 END) as verified_count,
+                    AVG(CASE WHEN status = 'verified_true_positive' AND {alert_proven} THEN detection_latency_sec END) as avg_latency_sec
                 FROM detection_validations
                 WHERE timestamp >= ?
                 """,
@@ -1155,8 +1189,9 @@ def get_siem_drift_metrics(workspace: Path, days: int = 7) -> dict[str, Any]:
             ).fetchone()
 
             latest_val = conn.execute(
-                """
+                f"""
                 SELECT * FROM detection_validations
+                WHERE status = 'verified_true_positive' AND {alert_proven}
                 ORDER BY timestamp DESC, id DESC LIMIT 1
                 """
             ).fetchone()
@@ -1303,7 +1338,7 @@ def build_siem_markdown_report(
                     "error": 0,
                 }
             target_counts[tgt]["total"] += 1
-            if st == "in_sync":
+            if st in ("in_sync", "dry_run"):
                 target_counts[tgt]["in_sync"] += 1
             elif st == "decommissioned":
                 target_counts[tgt]["decommissioned"] += 1

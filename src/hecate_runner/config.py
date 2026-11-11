@@ -357,7 +357,7 @@ class Settings(BaseSettings):
     bas_mode: Literal["mock", "caldera", "stratus", "local_sandbox", "live_lab"] = Field(
         default="mock",
         alias="HECATE_BAS_MODE",
-        description="Operational mode for BAS execution (mock, local_sandbox, live_lab).",
+        description="Operational mode for BAS execution ('caldera', 'stratus', 'mock'; 'local_sandbox' and 'live_lab' alias to 'caldera').",
     )
     bas_allowed_hosts: Any = Field(
         default_factory=list,
@@ -511,7 +511,7 @@ class Settings(BaseSettings):
         default=True,
         alias="HECATE_RUNNER_PURPLE_TEAM_VALIDATION_ENABLED",
         description=(
-            "Run closed-loop sandbox emulation and detection self-tuning on all "
+            "Replay synthetic telemetry and perform detection self-tuning on all "
             "generated Sigma detection rules before finalizing the hunt package."
         ),
     )
@@ -519,17 +519,17 @@ class Settings(BaseSettings):
         default=True,
         alias="HECATE_RUNNER_PURPLE_TEAM_ATOMIC_EMULATION",
         description=(
-            "Synthesize and execute dynamic adversary emulation via Atomic Red Team "
-            "procedures for scoped MITRE ATT&CK techniques."
+            "Include synthetic telemetry derived from Atomic Red Team test definitions "
+            "for scoped MITRE ATT&CK techniques during replay."
         ),
     )
-    purple_team_atomic_mode: Literal["simulation", "subprocess", "bwrap"] = Field(
+    purple_team_atomic_mode: Literal["simulation"] = Field(
         default="simulation",
         alias="HECATE_RUNNER_PURPLE_TEAM_ATOMIC_MODE",
         description=(
-            "Execution backend for Atomic Red Team adversary emulation: 'simulation' "
-            "(in-memory high-fidelity structured telemetry), 'subprocess' (local sandbox), "
-            "or 'bwrap' (rootless Linux container)."
+            "Purple-team replay supports only 'simulation' (in-memory telemetry synthesis). "
+            "The unsupported 'subprocess' and 'bwrap' values are rejected. "
+            "Reviewed live execution is configured separately through BAS."
         ),
     )
     sigma_timeout_sec: int = Field(
@@ -1588,6 +1588,18 @@ class Settings(BaseSettings):
         return self.hecate_workspace / ".pending_queries"
 
     # --- Validators ---------------------------------------------------------
+
+    @field_validator("purple_team_atomic_mode", mode="before")
+    @classmethod
+    def _supported_atomic_mode(cls, value: Any) -> Any:
+        if isinstance(value, str) and value in {"subprocess", "bwrap"}:
+            raise ValueError(
+                f"HECATE_RUNNER_PURPLE_TEAM_ATOMIC_MODE={value!r} is unsupported: "
+                "purple-team replay implements only 'simulation'. Remove this setting "
+                "or set it to 'simulation'. Configure reviewed live BAS separately "
+                "with HECATE_BAS_MODE=caldera."
+            )
+        return value
 
     @field_validator("hecate_workspace")
     @classmethod

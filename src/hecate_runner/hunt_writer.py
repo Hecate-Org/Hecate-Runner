@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from hecate_runner.atomic_write import atomic_write_text
+from hecate_runner.bas.approved import confirms_technique, result_fidelity_scope, result_status
 from hecate_runner.hecate_client import HypothesisResult
 
 log = logging.getLogger(__name__)
@@ -77,6 +78,9 @@ class DraftHuntRequest:
     purple_team_atomic_techniques: list[str] = field(default_factory=list)
     purple_team_atomic_tests: list[dict[str, str]] = field(default_factory=list)
     #: Closed-loop live adversary emulation & breach simulation (BAS) verification results
+    bas_rules_evaluated: int = 0
+    bas_rules_validated: int = 0
+    bas_matched_events: int = 0
     bas_verification: dict[str, Any] | None = None
     #: Claim excerpts and exact source passages checked by the Runner.
     claim_evidence: list[dict[str, str]] = field(default_factory=list)
@@ -493,6 +497,16 @@ def _render_sigma_section(req: DraftHuntRequest) -> str:
             )
             + ". Nothing was executed, so this is not validation: it shows a rule can match the "
             "described activity, not that it fires on real activity or is quiet in your environment."
+        )
+    if replayed:
+        holdouts = [r.get("holdout") or {} for r in replay if r.get("status") != "no_replay_events"]
+        tested = sum(h.get("status") in {"passed", "failed", "error"} for h in holdouts)
+        passed = sum(h.get("status") == "passed" for h in holdouts)
+        parts.append(
+            f"> **Withheld synthetic samples:** {passed} of {tested} scored rule(s) passed; "
+            f"{sum(h.get('status') in {'failed', 'error'} for h in holdouts)} failed; "
+            f"{len(holdouts) - tested} unavailable. Samples are reserved before tuning and "
+            "never supplied to the tuner. This does not measure production detection quality."
         )
     parts.append(
         "> **Unreviewed.** Sigma is platform-neutral: convert with "
@@ -924,7 +938,7 @@ def _render_bas_verification(req: DraftHuntRequest) -> str:
     if not req.bas_verification:
         return ""
     bas = req.bas_verification
-    status = bas.get("status", "unknown")
+    status = result_status(bas)
     if status == "skipped":
         return (
             "\n### Breach & Attack Simulation (BAS)\n\n**Skipped:** "
@@ -932,6 +946,8 @@ def _render_bas_verification(req: DraftHuntRequest) -> str:
             + "\n"
         )
     status_badge = {
+        "smoke_check_match": "🧪 **SMOKE CHECK MATCH (Technique behavior not validated)**",
+        "simulation_match": "🧪 **SIMULATION MATCH (Synthetic Sigma logic probe)**",
         "verified_true_positive": "✅ **VERIFIED TRUE POSITIVE**",
         "detection_miss": "⚠️ **DETECTION MISS (Telemetry arrived, rule missed)**",
         "telemetry_missing": "❌ **TELEMETRY MISSING (Sensor blind spot - no events observed)**",
@@ -948,11 +964,12 @@ def _render_bas_verification(req: DraftHuntRequest) -> str:
 
     lines = [
         "",
-        "### Live Adversary Emulation & Breach Simulation (BAS)",
+        "### Adversary Emulation & Breach Simulation (BAS)",
         "",
         f"> **Closed-Loop Validation Result:** {status_badge}",
         "> ",
         f"> - **Provider:** `{provider}`",
+        f"> - **Fidelity:** `{result_fidelity_scope(bas)}`",
         f"> - **Verification scope:** `{bas.get('verification_scope', 'rule_evaluation')}`",
         f"> - **Target Technique:** `{technique}` ({bas.get('ability_id', '')})",
         f"> - **Telemetry Observed:** {'Yes' if bas.get('telemetry_arrived') else 'No'}",
@@ -1544,15 +1561,20 @@ def render_draft(req: DraftHuntRequest) -> str:
         )
         + (
             (
-                f"bas_verified: {str(req.bas_verification.get('status') == 'verified_true_positive').lower()}\n"
+                f"bas_verified: {str(confirms_technique(req.bas_verification)).lower()}\n"
                 if req.bas_verification.get("status") != "skipped"
                 else ""
             )
             + f"bas_run_id: {json.dumps(req.bas_verification.get('run_id', ''))}\n"
             f"bas_provider: {json.dumps(req.bas_verification.get('provider', ''))}\n"
-            f"bas_status: {json.dumps(req.bas_verification.get('status', ''))}\n"
+            f"bas_status: {json.dumps(result_status(req.bas_verification))}\n"
             f"bas_backend: {json.dumps(req.bas_verification.get('backend', ''))}\n"
+            f"bas_fidelity_scope: {json.dumps(result_fidelity_scope(req.bas_verification))}\n"
+            f"bas_type: {json.dumps('synthesized_probe' if req.bas_verification.get('provider') == 'mock' else 'live_detonation')}\n"
             f"bas_detection_triggered: {str(bool(req.bas_verification.get('rule_triggered'))).lower()}\n"
+            f"bas_rules_evaluated: {req.bas_rules_evaluated}\n"
+            f"bas_rules_validated: {req.bas_rules_validated if confirms_technique(req.bas_verification) else 0}\n"
+            f"bas_matched_events: {req.bas_matched_events}\n"
             if req.bas_verification
             else ""
         )

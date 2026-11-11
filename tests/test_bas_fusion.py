@@ -368,3 +368,77 @@ detection:
     assert "file_event" in result["telemetry_categories"]
     assert "process_creation" in result["telemetry_categories"]
     assert result["sensor_events_count"] == 2
+
+
+def test_correlate_lineage_pid_reuse():
+    """Verify that PID reuse does not misattribute earlier events to later processes."""
+    events = [
+        # Process 1 (curl) runs at 04:00:00
+        {
+            "category": "process_creation",
+            "ProcessId": 500,
+            "Image": "/usr/bin/curl",
+            "CommandLine": "curl https://example.com/one",
+            "UtcTime": "2026-10-31T04:00:00Z",
+        },
+        # Network event from Process 1 at 04:00:01
+        {
+            "category": "network_connection",
+            "ProcessId": 500,
+            "DestinationIp": "93.184.216.34",
+            "DestinationPort": 443,
+            "UtcTime": "2026-10-31T04:00:01Z",
+        },
+        # PID 500 reused by Process 2 (wget) at 04:00:10
+        {
+            "category": "process_creation",
+            "ProcessId": 500,
+            "Image": "/usr/bin/wget",
+            "CommandLine": "wget https://example.com/two",
+            "UtcTime": "2026-10-31T04:00:10Z",
+        },
+        # Network event from Process 2 at 04:00:11
+        {
+            "category": "network_connection",
+            "ProcessId": 500,
+            "DestinationIp": "93.184.216.35",
+            "DestinationPort": 443,
+            "UtcTime": "2026-10-31T04:00:11Z",
+        },
+    ]
+
+    correlated = LabSensorFusion.correlate_lineage(events)
+    # Event at 04:00:01 must be attributed to curl (Process 1), not wget
+    assert correlated[1]["Image"] == "/usr/bin/curl"
+    assert correlated[1]["CommandLine"] == "curl https://example.com/one"
+    # Event at 04:00:11 must be attributed to wget (Process 2)
+    assert correlated[3]["Image"] == "/usr/bin/wget"
+    assert correlated[3]["CommandLine"] == "wget https://example.com/two"
+
+
+def test_fuse_distinct_network_connections_not_collapsed():
+    """Verify that distinct network destinations at the same timestamp are preserved."""
+    events = [
+        {
+            "category": "network_connection",
+            "DestinationIp": "1.1.1.1",
+            "DestinationPort": 53,
+            "DestinationHostname": "one.one.one.one",
+            "Protocol": "udp",
+            "UtcTime": "2026-10-31T04:00:00Z",
+        },
+        {
+            "category": "network_connection",
+            "DestinationIp": "8.8.8.8",
+            "DestinationPort": 53,
+            "DestinationHostname": "dns.google",
+            "Protocol": "udp",
+            "UtcTime": "2026-10-31T04:00:00Z",
+        },
+    ]
+
+    fused = LabSensorFusion.fuse(events)
+    assert len(fused) == 2
+    ips = {e["DestinationIp"] for e in fused}
+    assert ips == {"1.1.1.1", "8.8.8.8"}
+

@@ -150,3 +150,64 @@ def test_local_dotenv_cannot_enable_publication_during_tests(
     config = Settings()
     assert not config.github_publishing_enabled
     assert not config.misp_publishing_enabled
+
+
+@pytest.mark.parametrize("mode", ["subprocess", "bwrap"])
+@pytest.mark.parametrize("source", ["field", "alias", "environment", "dotenv"])
+def test_unsupported_atomic_modes_fail_configuration_loading(mode, source, tmp_path, monkeypatch):
+    key = "HECATE_RUNNER_PURPLE_TEAM_ATOMIC_MODE"
+    kwargs = {"_env_file": None}
+    if source == "field":
+        kwargs["purple_team_atomic_mode"] = mode
+    elif source == "alias":
+        kwargs[key] = mode
+    elif source == "environment":
+        monkeypatch.setenv(key, mode)
+    else:
+        config_file = tmp_path / ".env"
+        config_file.write_text(f"{key}={mode}\n")
+        kwargs["_env_file"] = config_file
+    with pytest.raises(ValidationError) as error:
+        Settings(**kwargs)
+    message = str(error.value)
+    assert key in message
+    assert repr(mode) in message
+    assert "implements only 'simulation'" in message
+    assert "HECATE_BAS_MODE=caldera" in message
+
+
+@pytest.mark.parametrize("source", ["default", "field", "alias", "environment", "dotenv"])
+def test_simulation_remains_supported_from_every_config_source(source, tmp_path, monkeypatch):
+    key = "HECATE_RUNNER_PURPLE_TEAM_ATOMIC_MODE"
+    kwargs = {"_env_file": None}
+    if source == "field":
+        kwargs["purple_team_atomic_mode"] = "simulation"
+    elif source == "alias":
+        kwargs[key] = "simulation"
+    elif source == "environment":
+        monkeypatch.setenv(key, "simulation")
+    elif source == "dotenv":
+        config_file = tmp_path / ".env"
+        config_file.write_text(f"{key}=simulation\n")
+        kwargs["_env_file"] = config_file
+    settings = Settings(**kwargs)
+    assert settings.purple_team_atomic_mode == "simulation"
+    assert settings.bas_mode == "mock"
+    assert not settings.bas_enabled
+
+
+@pytest.mark.parametrize("mode", ["subprocess", "bwrap"])
+def test_disabling_replay_does_not_silently_accept_unsupported_execution_mode(mode):
+    with pytest.raises(ValidationError, match="implements only 'simulation'"):
+        Settings(
+            _env_file=None,
+            purple_team_atomic_mode=mode,
+            purple_team_validation_enabled=False,
+            purple_team_atomic_emulation=False,
+        )
+
+
+def test_only_supported_atomic_mode_is_advertised_in_settings_schema():
+    schema = Settings.model_json_schema()
+    mode = schema["properties"]["HECATE_RUNNER_PURPLE_TEAM_ATOMIC_MODE"]
+    assert mode["const"] == "simulation"

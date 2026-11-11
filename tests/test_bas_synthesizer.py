@@ -143,22 +143,26 @@ def test_automatic_pipeline_bas_validates_multiple_rules(tmp_path: Path) -> None
     orchestrator._run_bas_validation(req, rules, out_dir, item)
 
     assert req.bas_verification is not None
-    assert req.bas_verification["status"] == "verified_true_positive"
+    assert req.bas_verification["status"] == "simulation_match"
     assert req.bas_verification["rule_triggered"] is True
     assert req.bas_verification["telemetry_arrived"] is True
     assert req.bas_verification["matched_events_count"] == 4
-    assert req.bas_verification["validated_rules_count"] == 4
+    assert req.bas_verification["validated_rules_count"] == 0
+    assert req.bas_verification["simulation_rules_matched"] == 4
+    assert req.bas_rules_evaluated == 4
+    assert req.bas_rules_validated == 0
+    assert all(not rule["bas_validated"] for rule in rules)
 
-    assert req.purple_team_rules_evaluated == 4
-    assert req.purple_team_rules_validated == 4
+    assert req.purple_team_rules_evaluated == 0
+    assert req.purple_team_rules_validated == 0
 
     # Verify hunt draft frontmatter & Markdown rendering
     rendered = render_draft(req)
-    assert "purple_team_validated: true" in rendered
-    assert "purple_team_rules_evaluated: 4" in rendered
-    assert "purple_team_rules_validated: 4" in rendered
-    assert "bas_verified: true" in rendered
-    assert 'bas_status: "verified_true_positive"' in rendered
+    assert "purple_team_validated: true" not in rendered
+    assert "bas_rules_evaluated: 4" in rendered
+    assert "bas_rules_validated: 0" in rendered
+    assert "bas_verified: false" in rendered
+    assert 'bas_status: "simulation_match"' in rendered
     assert "bas_detection_triggered: true" in rendered
-    assert "✅ **VERIFIED TRUE POSITIVE**" in rendered
+    assert "🧪 **SIMULATION MATCH" in rendered
     assert "- **Detection Triggered:** Yes (4 hit(s))" in rendered

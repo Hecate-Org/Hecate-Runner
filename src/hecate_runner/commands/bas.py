@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -67,7 +68,7 @@ def bas_check_cmd() -> None:
         console.print(f"{procedure.technique_id} ({procedure.command}): {result['status']}")
         if result.get("reason"):
             console.print(result["reason"])
-        failed |= result["status"] != "verified_true_positive"
+        failed |= result["status"] not in {"verified_true_positive", "smoke_check_match"}
     console.print(
         "Scope: independent local process sensor + Sigma evaluation; no SIEM alert claimed."
     )
@@ -287,6 +288,9 @@ def bas_detonate_cmd(
     console.print(
         f"Status: [{status_color}]{result.stage.value.upper()}[/{status_color}] ({result.duration_seconds:.2f}s)"
     )
+    console.print(f"Cleanup: {'CONFIRMED' if result.cleanup_success else 'UNCONFIRMED'}")
+    if result.cleanup_error:
+        console.print(f"[yellow]{result.cleanup_error}[/yellow]")
     if result.ability_id:
         console.print(f"Adversary/Ability ID: [bold]{result.ability_id}[/bold]")
     if result.error_message:
@@ -338,10 +342,15 @@ def bas_detonate_cmd(
         if siem_res.detection_latency_sec is not None:
             latency_ms = siem_res.detection_latency_sec * 1000.0
             siem_table.add_row(
-                "True Positive Detection Latency",
+                "Alert Trigger Latency",
                 f"[bold bright_green]{siem_res.detection_latency_sec:.3f}s ({latency_ms:.0f} ms)[/bold bright_green]",
             )
-        siem_table.add_row("Alert Fired / Matched Hits", f"{siem_res.matched_events_count} hit(s)")
+        siem_table.add_row("Candidate Query Matches", f"{siem_res.matched_events_count} hit(s)")
+        siem_table.add_row("SIEM Alert Fired", "Yes" if siem_res.siem_alert_fired else "Unverified")
+        if siem_res.alert_search_id:
+            siem_table.add_row("Alert Search ID", siem_res.alert_search_id)
+        if siem_res.query_match_latency_sec is not None:
+            siem_table.add_row("Query Match Latency", f"{siem_res.query_match_latency_sec:.3f}s")
         siem_table.add_row("SPL Query Evaluated", siem_res.query_used)
         if siem_res.notes:
             siem_table.add_row("Verification Notes", "; ".join(siem_res.notes))
@@ -396,7 +405,6 @@ def bas_verify_cmd(
 ) -> None:
     """Run closed-loop live adversary emulation & detection verification against a hunt draft."""
     import os
-    import shlex
 
     import yaml
 
@@ -406,7 +414,12 @@ def bas_verify_cmd(
         get_bas_provider,
         normalize_platform,
     )
-    from hecate_runner.bas.approved import APPROVED_PROCEDURES
+    from hecate_runner.bas.approved import (
+        APPROVED_PROCEDURES,
+        confirms_technique,
+        resolve_fidelity_scope,
+        result_status,
+    )
     from hecate_runner.bas.verifier import DetectionVerifier
 
     settings = _get_settings()
@@ -491,43 +504,37 @@ def bas_verify_cmd(
         console.print(f"[bold red]Provider / Safety Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    # Find candidate Sigma rule file and SIEM query
-    sigma_yaml = ""
-    candidate_query = None
+    # Find candidate Sigma rule file and SIEM query from the hunt itself
+    from hecate_runner.bas.siem_verifier import SiemAlertVerifier
 
-    # If an approved procedure is used, formulate rule and SPL query
-    if proc:
-        rule_def = {
-            "title": f"BAS Detection Verification: {proc.command}",
-            "status": "test",
-            "logsource": {"product": "linux", "category": "process_creation"},
-            "tags": ["attack." + proc.technique_id.lower()],
-            "detection": {
-                "selection": {
-                    "Image|endswith": "/" + proc.argv[0],
-                    "CommandLine": shlex.join(proc.argv),
-                },
-                "condition": "selection",
-            },
-        }
-        sigma_yaml = yaml.safe_dump(rule_def)
-        candidate_query = f'Image="*/{proc.argv[0]}" CommandLine="{shlex.join(proc.argv)}"'
-    else:
-        from hecate_runner.bas.siem_verifier import SiemAlertVerifier
+    candidate_query, candidate_rule, resolved_yaml = SiemAlertVerifier(
+        settings.hecate_workspace
+    ).resolve_candidate_rule(hunt_id, technique_id)
 
-        candidate_query, _, resolved_yaml = SiemAlertVerifier(
-            settings.hecate_workspace
-        ).resolve_candidate_rule(hunt_id, technique_id)
-        if resolved_yaml:
-            sigma_yaml = resolved_yaml
-        else:
-            query_dir = settings.hecate_workspace / "queries" / hunt_id
-            sigma_files = sorted(query_dir.glob("*.yml")) + sorted(query_dir.glob("*.yaml"))
-            if sigma_files:
-                sigma_yaml = sigma_files[0].read_text(encoding="utf-8")
+    query_dir = settings.hecate_workspace / "queries" / hunt_id
+    candidate_path = query_dir / candidate_rule if candidate_rule else None
+    sigma_yaml = resolved_yaml
+    sigma_files = (
+        [candidate_path]
+        if candidate_path
+        and candidate_path.is_file()
+        and candidate_path.suffix in {".yml", ".yaml"}
+        else []
+    )
+    try:
+        parsed_rule = yaml.safe_load(sigma_yaml) if sigma_yaml else None
+        detection = parsed_rule.get("detection") if isinstance(parsed_rule, dict) else None
+        valid_rule = isinstance(detection, dict) and bool(detection.get("condition"))
+    except yaml.YAMLError:
+        valid_rule = False
+    if not sigma_files or not valid_rule:
+        console.print(
+            f"[bold red]Detection Error:[/bold red] Hunt {hunt_id} has no matching Sigma detection in queries/{hunt_id} to verify."
+        )
+        raise typer.Exit(code=1)
 
     siem_provider = None
-    if use_siem:
+    if use_siem and resolved_provider != "mock":
         splunk_host = os.getenv("SPLUNK_HOST") or os.getenv("SPLUNK_URL")
         if splunk_host or settings.query_provider == "splunk":
             from hecate_runner.query_execution import SplunkQueryProvider
@@ -535,6 +542,13 @@ def bas_verify_cmd(
             siem_provider = SplunkQueryProvider(
                 settings.hecate_bin_resolved, settings.hecate_workspace
             )
+
+    if siem_provider and not candidate_query:
+        console.print(
+            "[bold red]Detection Error:[/bold red] Live SIEM verification requires "
+            "the selected hunt rule's companion .spl file."
+        )
+        raise typer.Exit(code=1)
 
     det_req = DetonationRequest(
         hunt_id=hunt_id,
@@ -587,14 +601,21 @@ def bas_verify_cmd(
         raw_events = det_result.telemetry_signatures
 
     verifier = DetectionVerifier(
-        query_provider=siem_provider, max_wait_sec=30, workspace=settings.hecate_workspace
+        query_provider=None, max_wait_sec=30, workspace=settings.hecate_workspace
     )
     res = verifier.verify_detonation(
         detonation=det_result,
         rule_yaml=sigma_yaml,
         candidate_query=candidate_query,
-        backend=siem_provider.name if siem_provider else "mock",
+        backend=(
+            siem_provider.name
+            if siem_provider
+            else "lab_fusion"
+            if sensor and proc and det_result.provider != "mock"
+            else "mock"
+        ),
         raw_events=raw_events,
+        fidelity_scope=proc.fidelity_scope if proc else None,
         t0_detonate=t0_detonate,
     )
 
@@ -602,7 +623,13 @@ def bas_verify_cmd(
     siem_job_sid = res.search_job_id
 
     # If SIEM verification requested and live Splunk configured, run search jobs validation
-    if use_siem and (siem_provider or os.getenv("SPLUNK_HOST")):
+    if (
+        use_siem
+        and det_result.provider != "mock"
+        and det_result.success
+        and det_result.cleanup_success
+        and (siem_provider or os.getenv("SPLUNK_HOST"))
+    ):
         from hecate_runner.bas.siem_verifier import SiemAlertVerifier
 
         siem_verifier = SiemAlertVerifier(settings.hecate_workspace)
@@ -612,21 +639,34 @@ def bas_verify_cmd(
             candidate_query=candidate_query,
             siem_target=siem_provider.name if siem_provider else "splunk",
             t0_detonate=t0_detonate,
+            raw_events=raw_events,
+            fidelity_scope=proc.fidelity_scope if proc else None,
         )
         siem_latency_sec = siem_res.detection_latency_sec
         siem_job_sid = siem_res.search_job_id
-        if siem_res.rule_triggered:
-            from hecate_runner.bas.verifier import VerificationStatus
+        from hecate_runner.bas.verifier import VerificationStatus
 
-            res.rule_triggered = True
-            res.status = VerificationStatus.VERIFIED_TRUE_POSITIVE
-            res.matched_events_count = siem_res.matched_events_count
-            res.detection_latency_sec = siem_res.detection_latency_sec
-            res.search_job_id = siem_res.search_job_id
-            res.backend = siem_res.siem_backend
-            for n in siem_res.notes:
-                if n not in res.notes:
-                    res.notes.append(n)
+        res.rule_triggered = siem_res.rule_triggered
+        res.status = (
+            VerificationStatus(siem_res.status)
+            if siem_res.status in VerificationStatus._value2member_map_
+            else VerificationStatus.ERROR
+        )
+        res.matched_events_count = siem_res.matched_events_count
+        res.detection_latency_sec = siem_res.detection_latency_sec
+        res.query_match_latency_sec = siem_res.query_match_latency_sec
+        res.search_job_id = siem_res.search_job_id
+        res.backend = siem_res.siem_backend
+        res.siem_alert_fired = siem_res.siem_alert_fired
+        res.alert_search_id = siem_res.alert_search_id
+        res.alert_name = siem_res.alert_name
+        res.alert_time_utc = siem_res.alert_time_utc
+        res.verification_scope = siem_res.verification_scope
+        res.fidelity_scope = resolve_fidelity_scope(det_result, siem_res.fidelity_scope)
+        res.status = VerificationStatus(result_status(res.to_dict()))
+        for n in siem_res.notes:
+            if n not in res.notes:
+                res.notes.append(n)
 
     table = Table(
         title=f"BAS Verification Results: {hunt_id}",
@@ -639,11 +679,18 @@ def bas_verify_cmd(
     table.add_row("Status", f"[bold]{res.status.value.upper()}[/bold]")
     table.add_row("BAS Provider", res.provider.upper())
     table.add_row("Technique", res.technique_id)
+    table.add_row("Fidelity", res.fidelity_scope)
     table.add_row("Telemetry Arrived", f"{'Yes' if res.telemetry_arrived else 'No'}")
     table.add_row(
         "Rule Triggered",
         f"{'Yes' if res.rule_triggered else 'No'} ({res.matched_events_count} hits)",
     )
+    table.add_row("SIEM Alert Fired", "Yes" if res.siem_alert_fired else "Unverified")
+    table.add_row("Cleanup", "Confirmed" if det_result.cleanup_success else "Unconfirmed")
+    if res.alert_search_id:
+        table.add_row("Alert Search ID", res.alert_search_id)
+    if res.query_match_latency_sec is not None:
+        table.add_row("Query Match Latency", f"{res.query_match_latency_sec:.3f}s")
     if siem_provider or res.backend:
         table.add_row("SIEM Backend", res.backend.upper())
     if siem_job_sid:
@@ -651,7 +698,7 @@ def bas_verify_cmd(
     if siem_latency_sec is not None:
         latency_ms = siem_latency_sec * 1000.0
         table.add_row(
-            "True Positive Detection Latency",
+            "Alert Trigger Latency",
             f"[bold bright_green]{siem_latency_sec:.3f}s ({latency_ms:.0f} ms)[/bold bright_green]",
         )
     if candidate_query:
@@ -664,19 +711,48 @@ def bas_verify_cmd(
     console.print(table)
 
     if write_back:
-        fm["bas_verified"] = res.status.value == "verified_true_positive"
+        fm["bas_verified"] = confirms_technique(res.to_dict())
         fm["bas_provider"] = res.provider
         fm["bas_status"] = res.status.value
         fm["bas_backend"] = res.backend
         fm["bas_detection_triggered"] = res.rule_triggered
+        fm["bas_type"] = "synthesized_probe" if res.provider == "mock" else "live_detonation"
+        fm["bas_rules_evaluated"] = len(sigma_files)
+        fm["bas_rules_validated"] = len(sigma_files) if fm["bas_verified"] else 0
+        fm.pop("bas_verified_rules", None)
+        fm.pop("bas_detection_latency_sec", None)
+        fm.pop("bas_search_job_id", None)
+        if fm["bas_verified"]:
+            if sigma_files:
+                fm["bas_verified_rules"] = [sigma_files[0].name]
+            elif candidate_rule:
+                fm["bas_verified_rules"] = [Path(candidate_rule).name]
         if siem_latency_sec is not None:
             fm["bas_detection_latency_sec"] = round(siem_latency_sec, 3)
         if siem_job_sid:
             fm["bas_search_job_id"] = siem_job_sid
-        fm["bas_siem_alert_fired"] = res.rule_triggered
+        fm["bas_siem_alert_fired"] = res.siem_alert_fired
+        fm["bas_verification_scope"] = res.verification_scope
+        fm["bas_fidelity_scope"] = res.fidelity_scope
+        fm["bas_cleanup_success"] = det_result.cleanup_success
+        for key in (
+            "bas_alert_search_id",
+            "bas_alert_name",
+            "bas_alert_time_utc",
+            "bas_query_match_latency_sec",
+        ):
+            fm.pop(key, None)
+        if res.siem_alert_fired:
+            fm["bas_alert_search_id"] = res.alert_search_id
+            fm["bas_alert_name"] = res.alert_name
+            fm["bas_alert_time_utc"] = res.alert_time_utc
+        if res.query_match_latency_sec is not None:
+            fm["bas_query_match_latency_sec"] = round(res.query_match_latency_sec, 3)
         new_fm = yaml.safe_dump(fm, sort_keys=False)
         updated_content = f"---\n{new_fm}---\n" + fm_parts[2].lstrip()
         atomic_write_text(hunt_file, updated_content)
         console.print(
             f"[bold green]Updated hunt draft frontmatter in[/bold green] {hunt_file.name}"
         )
+    if not det_result.success or not det_result.cleanup_success or res.status.value == "error":
+        raise typer.Exit(code=1)

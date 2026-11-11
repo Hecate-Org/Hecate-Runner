@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from hecate_runner.bas.approved import resolve_fidelity_scope
 from hecate_runner.bas.base import DetonationResult
 from hecate_runner.query_execution import ProposedQuery, QueryProvider
 
@@ -23,6 +24,9 @@ log = logging.getLogger(__name__)
 class VerificationStatus(StrEnum):
     """Categorized status of detection verification against an adversary emulation."""
 
+    SMOKE_CHECK_MATCH = "smoke_check_match"
+    QUERY_MATCH = "query_match"
+    SIMULATION_MATCH = "simulation_match"
     VERIFIED_TRUE_POSITIVE = "verified_true_positive"
     DETECTION_MISS = "detection_miss"
     TELEMETRY_MISSING = "telemetry_missing"
@@ -54,6 +58,12 @@ class VerificationResult:
     detection_latency_sec: float | None = None
     search_job_id: str = ""
     siem_alert_fired: bool = False
+    query_match_latency_sec: float | None = None
+    fidelity_scope: str = "behavioral"
+    verification_scope: str = "rule_evaluation"
+    alert_search_id: str = ""
+    alert_name: str = ""
+    alert_time_utc: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -134,12 +144,21 @@ class DetectionVerifier:
         baseline_query: str | None = None,
         raw_events: list[dict[str, Any]] | None = None,
         t0_detonate: float | None = None,
+        fidelity_scope: str | None = None,
     ) -> VerificationResult:
         """Run closed-loop verification on an adversary emulation detonation."""
         hunt_id = detonation.hunt_id
         technique_id = detonation.technique_id
         ability_id = detonation.ability_id
         provider = detonation.provider
+        fidelity_scope = resolve_fidelity_scope(detonation, fidelity_scope)
+        simulation = (
+            provider == "mock"
+            or (self.query_provider is not None and self.query_provider.name == "mock")
+            or (backend == "mock" and not self.query_provider)
+        )
+        if simulation:
+            backend = "mock"
 
         # 1. Check if detonation actually succeeded
         if not detonation.success:
@@ -156,7 +175,26 @@ class DetectionVerifier:
                 window_start_utc=detonation.start_time_utc,
                 window_end_utc=detonation.end_time_utc,
                 backend=backend,
+                fidelity_scope=fidelity_scope,
                 notes=[f"Detonation failed: {detonation.stderr or detonation.error_message}"],
+            )
+
+        if provider != "mock" and not detonation.cleanup_success:
+            return VerificationResult(
+                hunt_id=hunt_id,
+                technique_id=technique_id,
+                ability_id=ability_id,
+                provider=provider,
+                status=VerificationStatus.ERROR,
+                telemetry_arrived=False,
+                rule_triggered=False,
+                detonation_start_utc=detonation.start_time_utc,
+                detonation_end_utc=detonation.end_time_utc,
+                window_start_utc=detonation.start_time_utc,
+                window_end_utc=detonation.end_time_utc,
+                backend=backend,
+                fidelity_scope=fidelity_scope,
+                notes=[detonation.cleanup_error or "Remote cleanup is unconfirmed."],
             )
 
         # 2. Formulate execution time window
@@ -179,7 +217,8 @@ class DetectionVerifier:
         events_to_evaluate = [
             e
             for e in events_to_evaluate
-            if e.get("data_source") != "caldera_link" and e.get("sensor") != "lab_file_delta"
+            if e.get("data_source") not in {"caldera_link", "cloud_control_plane"}
+            and e.get("sensor") != "lab_file_delta"
         ]
         if events_to_evaluate:
             telemetry_arrived = True
@@ -188,7 +227,12 @@ class DetectionVerifier:
             )
 
         # Forward telemetry to live SIEM if provider is configured and not mock
-        if self.query_provider and self.query_provider.name != "mock" and events_to_evaluate:
+        if (
+            not simulation
+            and self.query_provider
+            and self.query_provider.name == "splunk"
+            and events_to_evaluate
+        ):
             try:
                 from hecate_runner.bas.forwarder import forward_events_to_splunk
 
@@ -210,7 +254,7 @@ class DetectionVerifier:
             )
 
         # Check live SIEM baseline query if configured
-        if self.query_provider and baseline_query:
+        if not simulation and self.query_provider and baseline_query:
             try:
                 base_prop = ProposedQuery(
                     hunt_id=hunt_id,
@@ -250,12 +294,16 @@ class DetectionVerifier:
             except Exception as eval_exc:
                 notes.append(f"Sigma AST evaluation error: {eval_exc}")
 
-        latency_sec: float | None = None
+        query_latency_sec: float | None = None
         search_job_id: str = ""
         siem_alert_fired: bool = False
 
         # Path B: Live SIEM query execution via QueryProvider with polling
-        if self.query_provider and candidate_query:
+        if not simulation and self.query_provider and candidate_query:
+            # A local Sigma match cannot substitute for the native SIEM query.
+            rule_triggered = False
+            matched_count = 0
+            samples = []
             t0 = t0_detonate if t0_detonate is not None else time.perf_counter()
             poll_start = time.time()
             query_matched = False
@@ -278,14 +326,14 @@ class DetectionVerifier:
                             query_matched = True
                             rule_triggered = True
                             telemetry_arrived = True
-                            siem_alert_fired = True
-                            latency_sec = max(0.001, time.perf_counter() - t0)
+                            query_latency_sec = max(0.001, time.perf_counter() - t0)
                             matched_count = q_res.row_count
                             backend = active_backend
-                            notes.append(
-                                f"Live {active_backend.upper()} SIEM alert verified! Matched {matched_count} event(s) "
-                                f"(Detection Latency: {latency_sec:.3f}s)."
+                            msg = (
+                                f"Live {active_backend.upper()} query matched {matched_count} log event(s) "
+                                f"in {query_latency_sec:.3f}s; SIEM alert firing remains unverified."
                             )
+                            notes.append(msg)
                             break
                     else:
                         last_err = q_res.detail
@@ -299,7 +347,23 @@ class DetectionVerifier:
 
         # 5. Determine Final Verification Status
         if rule_triggered:
-            status = VerificationStatus.VERIFIED_TRUE_POSITIVE
+            status = (
+                VerificationStatus.SIMULATION_MATCH
+                if simulation
+                else VerificationStatus.SMOKE_CHECK_MATCH
+                if fidelity_scope != "behavioral"
+                else VerificationStatus.QUERY_MATCH
+                if self.query_provider and candidate_query
+                else VerificationStatus.VERIFIED_TRUE_POSITIVE
+            )
+            if simulation:
+                notes.append(
+                    "Synthetic Sigma logic probe; no live detection, alert, or latency verified."
+                )
+            if not simulation and fidelity_scope != "behavioral":
+                notes.append(
+                    "Smoke check matched locally; this does not validate the attack technique."
+                )
         elif telemetry_arrived:
             status = VerificationStatus.DETECTION_MISS
             notes.append(
@@ -326,9 +390,20 @@ class DetectionVerifier:
             matched_events_count=matched_count,
             query_used=candidate_query or "",
             backend=backend,
+            fidelity_scope=fidelity_scope,
             sample_matched_events=samples,
             notes=notes,
-            detection_latency_sec=latency_sec,
+            detection_latency_sec=None,
+            query_match_latency_sec=query_latency_sec,
+            verification_scope=(
+                "synthetic_sigma_logic"
+                if simulation
+                else "smoke_check"
+                if fidelity_scope != "behavioral"
+                else "siem_query"
+                if self.query_provider and candidate_query
+                else "local_sensor_sigma"
+            ),
             search_job_id=search_job_id,
             siem_alert_fired=siem_alert_fired,
         )

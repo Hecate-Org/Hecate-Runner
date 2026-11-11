@@ -22,7 +22,18 @@ from hecate_runner.config import Settings
 from hecate_runner.hecate_client import HypothesisResult
 from hecate_runner.hunt_writer import DraftHuntRequest, render_draft
 from hecate_runner.orchestrator import Orchestrator
-from hecate_runner.purple_team import BENIGN_SAMPLE, replay_events, replay_rule
+from hecate_runner.purple_team import (
+    BENIGN_SAMPLE,
+    BENIGN_SAMPLE_CLOUD,
+    BENIGN_SAMPLE_CONTAINER,
+    BENIGN_SAMPLE_LINUX,
+    BENIGN_SAMPLE_NETWORK,
+    BENIGN_SAMPLE_WEBSERVER,
+    BENIGN_SAMPLE_WINDOWS,
+    get_benign_sample_for_rule,
+    replay_events,
+    replay_rule,
+)
 
 _FILE_RULE = """title: File the source says the malware writes
 logsource:
@@ -400,3 +411,53 @@ def test_a_path_the_source_shows_posted_replays_as_a_post() -> None:
         cti_text="The attacker deploys a new flow through `POST /flows` with no token.",
     )
     assert {"cs-method": "POST", "cs-uri-stem": "/flows"}.items() <= events["webserver"][0].items()
+
+
+def test_get_benign_sample_for_rule_partitions() -> None:
+    linux_rule = "title: Linux Process\nlogsource:\n  category: process_creation\n  product: linux"
+    windows_rule = "title: Windows Process\nlogsource:\n  category: process_creation\n  product: windows"
+    web_rule = "title: Web Request\nlogsource:\n  category: webserver"
+    cloud_rule = "title: Cloud Trail\nlogsource:\n  product: aws\n  service: cloudtrail"
+    k8s_rule = "title: K8s Container\nlogsource:\n  product: kubernetes"
+
+    assert get_benign_sample_for_rule(linux_rule) == BENIGN_SAMPLE_LINUX
+    assert get_benign_sample_for_rule(windows_rule) == BENIGN_SAMPLE_WINDOWS
+    assert get_benign_sample_for_rule(web_rule) == BENIGN_SAMPLE_WEBSERVER + BENIGN_SAMPLE_NETWORK
+    assert get_benign_sample_for_rule(cloud_rule) == BENIGN_SAMPLE_CLOUD
+    assert get_benign_sample_for_rule(k8s_rule) == BENIGN_SAMPLE_CONTAINER
+
+    # Fallback cases
+    assert get_benign_sample_for_rule("") == BENIGN_SAMPLE
+    assert get_benign_sample_for_rule("invalid: [yaml: {") == BENIGN_SAMPLE
+
+
+def test_replay_rule_defaults_to_partitioned_baseline() -> None:
+    web_rule = """title: Specific Web Exploit
+logsource:
+  category: webserver
+detection:
+  selection:
+    cs-uri-stem: /vulnerable/path.php
+  condition: selection
+"""
+    events = [{"cs-uri-stem": "/vulnerable/path.php", "cs-method": "GET"}]
+    # Calling without baseline argument defaults to get_benign_sample_for_rule
+    outcome = replay_rule(web_rule, events)
+    assert outcome.status == "self_consistent"
+    assert outcome.true_positives == 1
+    assert outcome.false_positives == 0
+
+
+def test_overly_broad_webserver_rule_triggers_baseline_match() -> None:
+    broad_web_rule = """title: Catch All GET Requests
+logsource:
+  category: webserver
+detection:
+  selection:
+    cs-method: GET
+  condition: selection
+"""
+    events = [{"cs-uri-stem": "/exploit.php", "cs-method": "GET"}]
+    outcome = replay_rule(broad_web_rule, events)
+    assert outcome.status == "baseline_match"
+    assert outcome.false_positives > 0

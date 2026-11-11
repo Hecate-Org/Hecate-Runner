@@ -510,11 +510,14 @@ def publish_reviewed_hunt(
     return {"ok": True, "pr_url": result.pr_url, "pr_number": result.pr_number}
 
 
-def replay_hunt_purple_team(workspace: Path, hunt_id: str) -> dict[str, Any]:
+def replay_hunt_purple_team(workspace: Path | str, hunt_id: str) -> dict[str, Any]:
     """Replay Sigma rules for a hunt against synthetic adversary telemetry."""
+    workspace = Path(workspace)
     query_dir = workspace / "queries" / hunt_id
     sigma_files = (
-        list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")) if query_dir.exists() else []
+        sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
+        if query_dir.exists()
+        else []
     )
 
     if not sigma_files:
@@ -524,21 +527,65 @@ def replay_hunt_purple_team(workspace: Path, hunt_id: str) -> dict[str, Any]:
             "error": f"No Sigma rules found in queries/{hunt_id}",
         }
 
-    from hecate_runner.purple_team import replay_rule
+    import yaml
 
-    sample_events = [
-        {
-            "EventID": 1,
-            "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-            "CommandLine": "powershell.exe -enc AAAA",
-        }
-    ]
+    from hecate_runner.lifecycle import find_hunt_path, parse_hunt_frontmatter
+    from hecate_runner.purple_team import (
+        get_benign_sample_for_rule,
+        replay_events,
+        replay_rule,
+    )
+
+    hunt_path = find_hunt_path(workspace, hunt_id)
+    cti_text = ""
+    techniques: list[str] = []
+    platforms: list[str] = []
+
+    if hunt_path and hunt_path.is_file():
+        try:
+            fm, body, _ = parse_hunt_frontmatter(hunt_path.read_text(encoding="utf-8"))
+            techniques = list(fm.get("techniques") or [])
+            platforms = list(fm.get("platform") or [])
+            cti_text = body or ""
+            spawned = str(fm.get("spawned_from") or "").strip()
+            if spawned:
+                res_file = workspace / "research" / f"{spawned}.md"
+                if res_file.is_file():
+                    cti_text += "\n" + res_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            log.warning("Could not parse hunt metadata for purple team replay %s: %s", hunt_id, exc)
+
+    events_by_cat = replay_events(
+        records=[],
+        artifacts=[],
+        cti_text=cti_text,
+        techniques=techniques,
+        enable_atomic=True,
+        platforms=platforms,
+    )
+
+    total_events = sum(len(v) for v in events_by_cat.values())
     replayed = 0
     passed = 0
+    holdout_scored = holdout_passed = holdout_failed = 0
+
     for s_file in sigma_files:
         rule_yaml = s_file.read_text(encoding="utf-8")
-        res = replay_rule(rule_yaml, sample_events, baseline=[])
+        cat = ""
+        try:
+            data = yaml.safe_load(rule_yaml)
+            if isinstance(data, dict):
+                cat = str(data.get("logsource", {}).get("category", "") or "")
+        except Exception:
+            pass
+
+        events = events_by_cat.get(cat, [])
+        res = replay_rule(rule_yaml, events, baseline=get_benign_sample_for_rule(rule_yaml))
         replayed += 1
+        if res.holdout.get("status") in {"passed", "failed", "error"}:
+            holdout_scored += 1
+            holdout_passed += res.holdout["status"] == "passed"
+            holdout_failed += res.holdout["status"] in {"failed", "error"}
         if res.matched:
             passed += 1
 
@@ -548,7 +595,12 @@ def replay_hunt_purple_team(workspace: Path, hunt_id: str) -> dict[str, Any]:
         "total_rules": replayed,
         "passed_rules": passed,
         "fidelity": f"{(passed / replayed * 100):.0f}%" if replayed else "0%",
-        "sample_events_count": len(sample_events),
+        "sample_events_count": total_events,
+        "evaluation_scope": "synthetic_replay",
+        "holdout_rules_scored": holdout_scored,
+        "holdout_rules_passed": holdout_passed,
+        "holdout_rules_failed": holdout_failed,
+        "holdout_rules_unavailable": replayed - holdout_scored,
     }
 
 

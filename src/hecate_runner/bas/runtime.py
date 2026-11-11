@@ -9,7 +9,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from hecate_runner.atomic_write import atomic_write_text
-from hecate_runner.bas.approved import APPROVED_PROCEDURES, ApprovedProcedure, catalog_digest
+from hecate_runner.bas.approved import (
+    APPROVED_PROCEDURES,
+    ApprovedProcedure,
+    catalog_digest,
+    confirms_technique,
+)
 from hecate_runner.bas.base import DetonationRequest, DetonationTarget, SafetyViolationError
 from hecate_runner.bas.lifecycle import LabLease, audit_container_tmpfs
 from hecate_runner.bas.sensor import LabProcessSensor
@@ -23,7 +28,9 @@ def save_bas_record(settings: Settings, record: dict[str, Any]) -> dict[str, Any
     record.setdefault("verified_at", datetime.now(UTC).isoformat())
     root = settings.hecate_workspace / ".hecate" / "bas"
     atomic_write_text(
-        root / "runs" / f"{record['run_id']}.json", json.dumps(record, indent=2), mode=0o600
+        root / "runs" / f"{record['run_id']}.json",
+        json.dumps(record, indent=2, default=str),
+        mode=0o600,
     )
     atomic_write_text(
         root / "state.json",
@@ -39,6 +46,7 @@ def save_bas_record(settings: Settings, record: dict[str, Any]) -> dict[str, Any
                 "updated_at": record["verified_at"],
             },
             indent=2,
+            default=str,
         ),
         mode=0o600,
     )
@@ -82,6 +90,7 @@ def run_approved_validation(
         "purpose": "sensor_control" if hunt_id == "LAB-CHECK" else "hunt_validation",
         "telemetry_arrived": False,
         "rule_triggered": False,
+        "fidelity_scope": getattr(procedure, "fidelity_scope", "behavioral"),
         "catalog_digest": catalog_digest(),
     }
     lab_lease = lease or LabLease(
@@ -154,13 +163,25 @@ def run_approved_validation(
                 rule_yaml=rule_yaml,
                 raw_events=events,
                 backend=settings.bas_telemetry,
+                fidelity_scope=procedure.fidelity_scope,
             )
             record.update(verification.to_dict())
+            record["validated_rules_count"] = int(confirms_technique(record))
+            record["evaluated_rules_count"] = 1
             record["duration_seconds"] = detonation.duration_seconds
             record["cleanup_success"] = detonation.cleanup_success
             record["sensor_events_count"] = len(events)
             record["telemetry_categories"] = sorted(
-                {str(e.get("category")) for e in events if e.get("category")}
+                {
+                    str(e.get("category"))
+                    for e in events
+                    if isinstance(e, dict) and e.get("category")
+                }
+            )
+            record["events"] = (
+                [e for e in events if isinstance(e, dict)]
+                if isinstance(events, (list, tuple))
+                else []
             )
 
             # Audit container tmpfs after execution and cleanup
@@ -186,4 +207,6 @@ def run_approved_validation(
         if "Another BAS operation holds" in msg or "Another BAS lab validation" in msg:
             return skipped_bas(settings, hunt_id, "Another BAS lab validation is running.")
         record.update(status="error", reason=msg, notes=[msg])
+    if not confirms_technique(record):
+        record["validated_rules_count"] = 0
     return save_bas_record(settings, record)

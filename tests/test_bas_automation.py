@@ -231,7 +231,8 @@ def test_missing_managed_procedures_can_be_installed_without_overwriting_stock(
                 "command": sh_exec["command"],
             }
             if "cleanup" in sh_exec:
-                executor_item["cleanup"] = sh_exec["cleanup"]
+                # CALDERA parses a YAML scalar, then exposes executor cleanup as a list.
+                executor_item["cleanup"] = [sh_exec["cleanup"].strip()]
             catalog[body["id"]] = {
                 "ability_id": body["id"],
                 "technique_id": body["technique"]["attack_id"],
@@ -255,6 +256,7 @@ def test_caldera_receipts_cannot_become_sensor_evidence():
     now = datetime.now(UTC).isoformat()
     detonation = DetonationResult(
         success=True,
+        cleanup_success=True,
         hunt_id="H-0001",
         technique_id="T1033",
         ability_id="a",

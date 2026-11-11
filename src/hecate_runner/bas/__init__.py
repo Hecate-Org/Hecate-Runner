@@ -76,7 +76,7 @@ def get_bas_provider(
     if name_lower != "mock" and settings is not None and not settings.bas_enabled:
         raise SafetyViolationError("Live BAS is disabled: set HECATE_BAS_ENABLED=true explicitly.")
 
-    if name_lower == "caldera":
+    if name_lower in ("caldera", "local_sandbox", "live_lab"):
         url = settings.caldera_url if settings else "http://localhost:8888"
         api_key = settings.caldera_api_key if settings else None
         group = settings.caldera_agent_group if settings else "staging"

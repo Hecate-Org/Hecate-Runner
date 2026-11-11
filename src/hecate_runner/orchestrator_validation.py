@@ -29,7 +29,7 @@ def run_purple_team_validation(
         log.warning("Purple-team replay unavailable: %s", exc)
         return
 
-    from hecate_runner.purple_team import BENIGN_SAMPLE, replay_events, replay_rule
+    from hecate_runner.purple_team import get_benign_sample_for_rule, replay_events, replay_rule
 
     started = orch.trail.elapsed
     tuner = SigmaSelfTuner(max_iterations=3)
@@ -98,6 +98,7 @@ def run_purple_team_validation(
     req.purple_team_atomic_tests = atomic_test_details
 
     replayed = matched = tuned = baseline_matches = 0
+    holdout_passed = holdout_failed = holdout_unavailable = 0
     for rule in rules:
         rule_yaml = str(rule.get("rule_yaml", "")).strip()
         if not rule_yaml:
@@ -105,12 +106,18 @@ def run_purple_team_validation(
         outcome = replay_rule(
             rule_yaml,
             events.get(str(rule.get("logsource_category", "")), []),
-            BENIGN_SAMPLE,
+            get_benign_sample_for_rule(rule_yaml),
             tuner,
             emulated_techniques=techniques if enable_atomic else None,
             atomic_tests=[t["test_id"] for t in atomic_test_details] if enable_atomic else None,
         )
         rule["purple_team"] = outcome.to_dict()
+        if outcome.holdout.get("status") == "passed":
+            holdout_passed += 1
+        elif outcome.holdout.get("status") in {"failed", "error"}:
+            holdout_failed += 1
+        else:
+            holdout_unavailable += 1
         if outcome.status == "no_replay_events":
             continue
         replayed += 1
@@ -120,15 +127,31 @@ def run_purple_team_validation(
             tuned += 1
             rule["rule_yaml"] = outcome.final_rule
         path = Path(str(rule.get("path") or ""))
-        if path.is_file() and (outcome.tuned or outcome.matched):
-            text = outcome.final_rule.rstrip() + "\n"
+        if path.is_file():
+            text = (
+                re.sub(
+                    r"^x_hecate_(?:replay_matched|tuned|synthetic_holdout_status):[^\n]*\n?",
+                    "",
+                    outcome.final_rule,
+                    flags=re.MULTILINE,
+                ).rstrip()
+                + "\n"
+            )
             if outcome.matched:
                 # Synthesised from the report, so it shows the rule can match what the
                 # report describes; only BAS or real telemetry may mark a rule validated.
                 text += "x_hecate_replay_matched: true\n"
             if outcome.tuned:
                 text += "x_hecate_tuned: true\n"
+            text += (
+                "x_hecate_synthetic_holdout_status: "
+                + str(outcome.holdout.get("status", "unavailable"))
+                + "\n"
+            )
             path.write_text(text, encoding="utf-8")
+            rule["rule_yaml"] = text
+            if not (outcome.tuned or outcome.matched):
+                continue
             try:
                 from hecate_agent.api import transpile_sigma_rule
 
@@ -165,6 +188,14 @@ def run_purple_team_validation(
         len(rules) - replayed,
     )
 
+    orch.trail.step(
+        "purple_team",
+        "withheld synthetic scoring: %d passed, %d failed, %d unavailable",
+        holdout_passed,
+        holdout_failed,
+        holdout_unavailable,
+    )
+
     try:
         from hecate_runner.notifications import notify_purple_team
 
@@ -179,7 +210,8 @@ def run_purple_team_validation(
             f"({baseline_matches} baseline matches, {tuned} tuned) "
             f"{req.purple_team_telemetry_count} events synthesised from the report"
             f"{' and Atomic Red Team test definitions' if enable_atomic and techniques else ''}. "
-            "Nothing was executed, so no rule is validated by this replay."
+            f"Withheld synthetic samples: {holdout_passed} passed, {holdout_failed} failed, "
+            f"{holdout_unavailable} unavailable. Nothing was executed, so no rule is validated by this replay."
         )
         notify_purple_team(
             orch.settings,
@@ -256,10 +288,58 @@ def run_bas_validation(
                 orch.settings, req.hunt_id, procedure, rule_yaml
             )
             result = req.bas_verification
-            if result.get("rule_triggered") and result.get("status") == "verified_true_positive":
-                req.purple_team_rules_evaluated = len(rules)
-                req.purple_team_rules_validated = 1
-                req.purple_team_rules_replay_matched = 1
+            if (
+                procedure.fidelity_scope != "behavioral"
+                or result.get("fidelity_scope", "behavioral") != "behavioral"
+            ):
+                if procedure.fidelity_scope != "behavioral":
+                    result["fidelity_scope"] = procedure.fidelity_scope
+                result["verification_scope"] = "smoke_check"
+                req.bas_rules_evaluated = result.get("evaluated_rules_count", 1)
+                req.bas_rules_validated = 0
+                req.bas_matched_events = 0
+                result["validated_rules_count"] = 0
+                result["verified_rules"] = []
+                if result.get("status") == "verified_true_positive":
+                    result["status"] = "smoke_check_match"
+            if (
+                procedure.fidelity_scope == "behavioral"
+                and result.get("fidelity_scope", "behavioral") == "behavioral"
+                and result.get("rule_triggered")
+                and result.get("status") == "verified_true_positive"
+            ):
+                sensor_events = result.get("events") or []
+                validated_count = 1
+                verified_titles: list[str] = [result.get("rule_title") or "Selected Rule"]
+
+                if sensor_events:
+                    from hecate_agent.core.sigma_evaluator import SigmaEvaluator
+
+                    for other_rule in rules:
+                        other_yaml = other_rule.get("rule_yaml", "")
+                        if other_yaml and other_yaml != rule_yaml:
+                            try:
+                                eval_res = SigmaEvaluator.evaluate_rule(
+                                    other_yaml, sensor_events, []
+                                )
+                                if eval_res.true_positives > 0:
+                                    validated_count += 1
+                                    verified_titles.append(
+                                        other_rule.get("title") or "Unnamed Rule"
+                                    )
+                            except Exception:
+                                pass
+
+                evaluated_count = len(rules) if sensor_events else 1
+                if not getattr(req, "purple_team_rules_evaluated", 0):
+                    req.purple_team_rules_evaluated = evaluated_count
+                req.purple_team_rules_validated = validated_count
+                req.bas_rules_evaluated = evaluated_count
+                req.bas_rules_validated = validated_count
+                req.bas_matched_events = result.get("matched_events_count", 1)
+                result["verified_rules"] = verified_titles
+                result["validated_rules_count"] = validated_count
+                result["evaluated_rules_count"] = evaluated_count
             orch.trail.step(
                 "bas",
                 "%s for %s: %s; telemetry=%s, rule match=%s",
@@ -343,10 +423,12 @@ def run_bas_validation(
         verifier = DetectionVerifier()
 
         validated_count = 0
+        simulated_count = 0
         total_matched = 0
         primary_ver_result = None
 
         for r_entry in rules:
+            r_entry["bas_validated"] = False
             r_yaml = r_entry.get("rule_yaml", "")
             if not r_yaml:
                 continue
@@ -356,10 +438,13 @@ def run_bas_validation(
             )
             if primary_ver_result is None:
                 primary_ver_result = v_res
+            r_entry["bas_validated"] = v_res.status.value == "verified_true_positive"
             if v_res.rule_triggered:
-                validated_count += 1
                 total_matched += v_res.matched_events_count
-                r_entry["bas_validated"] = True
+                if r_entry["bas_validated"]:
+                    validated_count += 1
+                else:
+                    simulated_count += 1
 
         ver_result = primary_ver_result or verifier.verify_detonation(
             detonation=det_result,
@@ -368,15 +453,27 @@ def run_bas_validation(
         ver_dict = ver_result.to_dict()
         ver_dict["duration_seconds"] = det_result.duration_seconds
         ver_dict["validated_rules_count"] = validated_count
+        ver_dict["simulation_rules_matched"] = simulated_count
+        req.bas_rules_evaluated = len(rules)
+        req.bas_rules_validated = validated_count
+        req.bas_matched_events = total_matched if validated_count else 0
+        if simulated_count:
+            ver_dict["status"] = "simulation_match"
+            ver_dict["verification_scope"] = "synthetic_sigma_logic"
+            ver_dict["rule_triggered"] = True
+            ver_dict["matched_events_count"] = total_matched
         ver_dict["total_rules_evaluated"] = len(rules)
         if validated_count > 0:
             ver_dict["status"] = "verified_true_positive"
             ver_dict["rule_triggered"] = True
             ver_dict["telemetry_arrived"] = True
             ver_dict["matched_events_count"] = total_matched
-            req.purple_team_rules_evaluated = len(rules)
+            if not getattr(req, "purple_team_rules_evaluated", 0):
+                req.purple_team_rules_evaluated = len(rules)
             req.purple_team_rules_validated = validated_count
-            req.purple_team_rules_replay_matched = validated_count
+            req.bas_rules_evaluated = len(rules)
+            req.bas_rules_validated = validated_count
+            req.bas_matched_events = total_matched
 
         req.bas_verification = ver_dict
 

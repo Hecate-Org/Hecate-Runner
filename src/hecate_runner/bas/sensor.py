@@ -401,17 +401,30 @@ class LabSensorFusion:
     def correlate_lineage(
         events: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Enrich file and network events with process lineage when ProcessId matches."""
-        proc_by_pid: dict[int, dict[str, Any]] = {}
+        """Enrich file and network events with process lineage when ProcessId matches.
+
+        Accounts for PID reuse by maintaining time-ordered process histories and
+        matching non-process events to the process created at or prior to the event time.
+        """
+        from collections import defaultdict
+
+        proc_by_pid: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for ev in events:
             if ev.get("category") == "process_creation" and "ProcessId" in ev:
-                proc_by_pid[ev["ProcessId"]] = ev
+                proc_by_pid[ev["ProcessId"]].append(ev)
+
+        for procs in proc_by_pid.values():
+            procs.sort(key=lambda p: str(p.get("UtcTime", "")))
 
         for ev in events:
             if ev.get("category") != "process_creation":
                 pid = ev.get("ProcessId")
                 if pid in proc_by_pid:
-                    parent = proc_by_pid[pid]
+                    procs = proc_by_pid[pid]
+                    ev_time = str(ev.get("UtcTime", ""))
+                    # Select the process creation that occurred at or before this event
+                    candidates = [p for p in procs if str(p.get("UtcTime", "")) <= ev_time]
+                    parent = candidates[-1] if candidates else procs[0]
                     if "Image" not in ev and "Image" in parent:
                         ev["Image"] = parent["Image"]
                     if "CommandLine" not in ev and "CommandLine" in parent:
@@ -425,18 +438,34 @@ class LabSensorFusion:
         hunt_id: str = "",
         technique_id: str = "",
     ) -> list[dict[str, Any]]:
-        """Deduplicate, correlate, and sort events chronologically."""
-        seen: set[tuple[str, str, str, str]] = set()
+        """Deduplicate, correlate, and sort events chronologically.
+
+        Deduplication distinguishes destination IP/host and process identity
+        to prevent collapsing concurrent connections or distinct file operations.
+        """
+        seen: set[tuple[Any, ...]] = set()
         deduped: list[dict[str, Any]] = []
 
         for ev in events:
             cat = str(ev.get("category", ""))
-            target = str(
-                ev.get("TargetFilename") or ev.get("CommandLine") or ev.get("DestinationPort", "")
-            )
             action = str(ev.get("event_type", ""))
             time_str = str(ev.get("UtcTime", ""))
-            key = (cat, target, action, time_str)
+            pid = str(ev.get("ProcessId", ""))
+            image = str(ev.get("Image", ""))
+
+            if cat == "network_connection":
+                dst_ip = str(ev.get("DestinationIp", ""))
+                dst_port = str(ev.get("DestinationPort", ""))
+                dst_host = str(ev.get("DestinationHostname", ""))
+                proto = str(ev.get("Protocol", ""))
+                key = (cat, dst_ip, dst_port, dst_host, proto, pid, action, time_str)
+            elif cat in ("file_event", "file_change"):
+                target = str(ev.get("TargetFilename", ""))
+                key = (cat, target, pid, action, time_str)
+            else:
+                target = str(ev.get("CommandLine", "") or image or ev.get("TargetFilename", ""))
+                key = (cat, target, pid, action, time_str)
+
             if key in seen:
                 continue
             seen.add(key)

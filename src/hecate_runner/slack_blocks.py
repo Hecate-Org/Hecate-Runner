@@ -207,6 +207,48 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
         else "`planning` (Awaiting review)"
     )
 
+    purple_text = "⚪ Replay pending"
+    bas_text = "⚪ Detonation pending"
+    path_str = getattr(result, "draft_path", None)
+    if path_str and Path(path_str).is_file():
+        try:
+            from hecate_runner.lifecycle import parse_hunt_frontmatter
+
+            fm, _, _ = parse_hunt_frontmatter(Path(path_str).read_text(encoding="utf-8"))
+            pt_eval = fm.get("purple_team_rules_evaluated", 0)
+            pt_matched = fm.get("purple_team_rules_replay_matched", 0)
+            pt_val = fm.get("purple_team_validated", False)
+            if pt_eval > 0:
+                icon = "✅" if pt_matched > 0 else "⚠️"
+                purple_text = f"{icon} *{pt_matched}/{pt_eval}* rules matched replay"
+            elif pt_val:
+                purple_text = "✅ Replay validated"
+            else:
+                purple_text = "⚪ No rules replayed"
+
+            bas_ver = fm.get("bas_verified", False)
+            bas_prov = str(fm.get("bas_provider") or "")
+            if bas_prov:
+                if bas_prov.lower() == "mock":
+                    bas_text = (
+                        "🧪 *MOCK* (synthesized AST logic probe)"
+                        if bas_ver
+                        else "⚠️ MOCK probe unverified"
+                    )
+                else:
+                    icon = "✅" if bas_ver else "⚠️"
+                    bas_text = (
+                        f"{icon} *{bas_prov.upper()}* live detonation verified"
+                        if bas_ver
+                        else f"⚠️ {bas_prov.upper()} unverified"
+                    )
+            elif bas_ver:
+                bas_text = "✅ Detonation verified"
+            else:
+                bas_text = "⚪ Simulation skipped"
+        except Exception:
+            pass
+
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
@@ -237,6 +279,14 @@ def build_draft_card(result: RunResult, *, interactive: bool = False) -> list[di
                 {
                     "type": "mrkdwn",
                     "text": f"*Intake Triage:*\n{parked_text}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Purple Team:*\n{purple_text}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*BAS Verification:*\n{bas_text}",
                 },
             ],
         },

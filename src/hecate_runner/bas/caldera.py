@@ -28,6 +28,19 @@ from hecate_runner.bas.base import (
 log = logging.getLogger(__name__)
 
 
+def _completed_link(link: dict[str, Any], paw: str) -> bool:
+    if type(link.get("status")) is not int or link["status"] != 0 or link.get("paw") != paw:
+        return False
+    finish = link.get("finish")
+    if not isinstance(finish, str):
+        return False
+    try:
+        datetime.fromisoformat(finish.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
 class CalderaConnector(BASProvider):
     """Connector for MITRE CALDERA adversary emulation platform."""
 
@@ -158,6 +171,23 @@ class CalderaConnector(BASProvider):
         if not request.cleanup_on_finish:
             raise SafetyViolationError("Live CALDERA execution requires cleanup_on_finish.")
 
+        # CALDERA schedules by group, so require a dedicated group containing
+        # exactly the explicitly selected endpoint. Never silently fan out.
+        if request.platform != request.target.platform:
+            raise SafetyViolationError("Request and target platforms disagree.")
+
+        # Fail closed on unreviewed procedures before performing agent/ability network queries
+        is_lab = request.target.environment == "lab"
+        procedure = None
+        if is_lab or request.params.get("approved_only"):
+            from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+            procedure = APPROVED_PROCEDURES.get(request.technique_id)
+            if not procedure or request.platform != "linux":
+                raise SafetyViolationError(
+                    f"CALDERA lab execution requires a pinned, reviewed Linux procedure (unreviewed: {request.technique_id})."
+                )
+
         # 2. Check if an active agent exists for target platform (fallback to mock if enabled)
         if self.fallback_to_mock:
             try:
@@ -211,23 +241,6 @@ class CalderaConnector(BASProvider):
                     f"[Mock Fallback: CALDERA server unreachable ({exc})]\n{mock_res.stdout}"
                 )
                 return mock_res
-
-        # CALDERA schedules by group, so require a dedicated group containing
-        # exactly the explicitly selected endpoint. Never silently fan out.
-        if request.platform != request.target.platform:
-            raise SafetyViolationError("Request and target platforms disagree.")
-
-        # Fail closed on unreviewed procedures before performing agent/ability network queries
-        is_lab = request.target.environment == "lab"
-        procedure = None
-        if is_lab or request.params.get("approved_only"):
-            from hecate_runner.bas.approved import APPROVED_PROCEDURES
-
-            procedure = APPROVED_PROCEDURES.get(request.technique_id)
-            if not procedure or request.platform != "linux":
-                raise SafetyViolationError(
-                    f"CALDERA lab execution requires a pinned, reviewed Linux procedure (unreviewed: {request.technique_id})."
-                )
 
         client = self._get_client()
         agents_resp = client.get("/api/v2/agents")
@@ -440,11 +453,12 @@ class CalderaConnector(BASProvider):
             chain = completed_op.get("chain", [])
             link_outputs: list[str] = []
             link_errors: list[str] = []
-            all_succeeded = True
             telemetry: list[dict[str, Any]] = []
+            execution_commands: list[str] = []
+            cleanup_commands: list[str] = []
 
             for link in chain:
-                status = link.get("status", 0)
+                status = link.get("status")
                 cmd = link.get("command", "")
                 link_id = link.get("id")
                 paw = link.get("paw", "unknown")
@@ -488,32 +502,23 @@ class CalderaConnector(BASProvider):
                             output = decoded_out.strip()
 
                 if status != 0:
-                    all_succeeded = False
                     link_errors.append(f"Link {link_id} on {paw} failed with status {status}")
                 else:
                     link_outputs.append(f"Link {link_id} on {paw} executed: {output}")
 
-                telemetry.append(
-                    {
-                        "data_source": "caldera_link",
-                        "technique_id": request.technique_id,
-                        "ability_id": ability_id,
-                        "paw": paw,
-                        "command": cmd,
-                        "timestamp_utc": link.get("collect") or start_time.isoformat(),
-                    }
-                )
-
-            if not is_v2 and adv_id:
-                with contextlib.suppress(Exception):
-                    if request.cleanup_on_finish and op_id:
-                        client.request(
-                            "DELETE", "/api/rest", json={"index": "operations", "id": op_id}
-                        )
-                    client.request(
-                        "DELETE",
-                        "/api/rest",
-                        json={"index": "adversaries", "adversary_id": adv_id},
+                if link.get("cleanup") in (1, True, "1"):
+                    cleanup_commands.append(cmd)
+                else:
+                    execution_commands.append(cmd)
+                    telemetry.append(
+                        {
+                            "data_source": "caldera_link",
+                            "technique_id": request.technique_id,
+                            "ability_id": ability_id,
+                            "paw": paw,
+                            "command": cmd,
+                            "timestamp_utc": link.get("collect") or start_time.isoformat(),
+                        }
                     )
 
             if len(chain) == 0:
@@ -526,9 +531,68 @@ class CalderaConnector(BASProvider):
                 stdout_msg = "\n".join(link_outputs) or "Operation completed with no output."
                 err_msg = "\n".join(link_errors) if link_errors else ""
 
-            is_op_successful = (
-                len(chain) > 0 and all_succeeded and completed_op.get("state") == "finished"
+            cleanup_links = [lnk for lnk in chain if lnk.get("cleanup") in (1, True, "1")]
+            execution_links = [lnk for lnk in chain if lnk not in cleanup_links]
+            execution_succeeded = (
+                bool(execution_links)
+                and all(_completed_link(lnk, agent["paw"]) for lnk in execution_links)
+                and completed_op.get("state") == "finished"
             )
+            cleanup_success = False
+            cleanup_status = "unconfirmed"
+            cleanup_error: str | None = (
+                "Remote cleanup is unconfirmed: no completed cleanup receipts were returned."
+            )
+            if cleanup_links and completed_op.get("state") == "finished":
+                if (
+                    all(cmd.strip() for cmd in cleanup_commands)
+                    and (
+                        not procedure
+                        or not procedure.cleanup_command
+                        or all(cmd == procedure.cleanup_command for cmd in cleanup_commands)
+                    )
+                ) and all(_completed_link(lnk, agent["paw"]) for lnk in cleanup_links):
+                    cleanup_success = True
+                    cleanup_status = "confirmed"
+                    cleanup_error = None
+                elif any(
+                    isinstance(lnk.get("status"), int) and lnk["status"] > 0
+                    for lnk in cleanup_links
+                ):
+                    cleanup_status = "failed"
+                    cleanup_error = (
+                        "Remote cleanup failed: cleanup link(s) returned a nonzero status."
+                    )
+                else:
+                    cleanup_error = "Remote cleanup is unconfirmed: cleanup receipts are incomplete or target another agent."
+            elif procedure and execution_succeeded:
+                from hecate_runner.bas.approved import ARTIFACT_FREE_TECHNIQUES
+
+                if (
+                    procedure.technique_id in ARTIFACT_FREE_TECHNIQUES
+                    and not procedure.cleanup_command
+                    and not procedure.expected_files
+                    and all(cmd == procedure.command for cmd in execution_commands)
+                ):
+                    cleanup_success = True
+                    cleanup_status = "not_required"
+                    cleanup_error = None
+            is_op_successful = execution_succeeded and cleanup_success
+            if cleanup_error:
+                err_msg = "\n".join(filter(None, [err_msg, cleanup_error]))
+
+            if is_op_successful and not is_v2 and adv_id:
+                with contextlib.suppress(Exception):
+                    if request.cleanup_on_finish and op_id:
+                        client.request(
+                            "DELETE", "/api/rest", json={"index": "operations", "id": op_id}
+                        )
+                    client.request(
+                        "DELETE",
+                        "/api/rest",
+                        json={"index": "adversaries", "adversary_id": adv_id},
+                    )
+
             return DetonationResult(
                 success=is_op_successful,
                 hunt_id=request.hunt_id,
@@ -542,9 +606,17 @@ class CalderaConnector(BASProvider):
                 stdout=stdout_msg,
                 stderr=err_msg,
                 stage=DetonationStage.COMPLETED if is_op_successful else DetonationStage.FAILED,
-                cleanup_success=completed_op.get("state") == "finished",
+                cleanup_success=cleanup_success,
+                cleanup_error=cleanup_error,
                 telemetry_signatures=telemetry,
-                raw_details={"operation_id": op_id, "chain_length": len(chain)},
+                raw_details={
+                    "operation_id": op_id,
+                    "chain_length": len(chain),
+                    "execution_success": execution_succeeded,
+                    "cleanup_status": cleanup_status,
+                    "cleanup_link_ids": [lnk.get("id") for lnk in cleanup_links],
+                    **({"fidelity_scope": procedure.fidelity_scope} if procedure else {}),
+                },
                 error_message=err_msg if not is_op_successful else None,
             )
 

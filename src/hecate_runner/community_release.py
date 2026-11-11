@@ -202,6 +202,8 @@ def verify_catalog(root: Path, settings: Settings, output: Path) -> dict[str, An
         result = run_approved_validation(settings, "LAB-CHECK", procedure, files[case["rule"]])
         success = (
             result.get("status") == "verified_true_positive"
+            and procedure.fidelity_scope == "behavioral"
+            and result.get("fidelity_scope", "behavioral") == "behavioral"
             and result.get("cleanup_success") is True
             and result.get("telemetry_arrived") is True
             and result.get("rule_triggered") is True

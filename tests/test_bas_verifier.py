@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from hecate_runner.bas.base import DetonationResult, DetonationStage
 from hecate_runner.bas.verifier import (
     DetectionVerifier,
@@ -59,6 +61,7 @@ def make_sample_detonation(
         technique_id=technique_id,
         ability_id=ability_id,
         provider="caldera",
+        cleanup_success=True,
         start_time_utc=now.isoformat(),
         end_time_utc=now.isoformat(),
         duration_seconds=5.0,
@@ -122,7 +125,7 @@ def test_verifier_time_window_calculation():
 def test_verifier_true_positive_sigma_ast():
     detonation = make_sample_detonation()
     verifier = DetectionVerifier()
-    res = verifier.verify_detonation(detonation, rule_yaml=SAMPLE_SIGMA_RULE)
+    res = verifier.verify_detonation(detonation, rule_yaml=SAMPLE_SIGMA_RULE, backend="lab_process")
 
     assert res.status == VerificationStatus.VERIFIED_TRUE_POSITIVE
     assert res.telemetry_arrived is True
@@ -171,7 +174,10 @@ def test_verifier_live_siem_polling_with_delay():
         backend="splunk",
     )
 
-    assert res.status == VerificationStatus.VERIFIED_TRUE_POSITIVE
+    assert res.status == VerificationStatus.QUERY_MATCH
+    assert res.detection_latency_sec is None
+    assert res.query_match_latency_sec is not None
+    assert not res.siem_alert_fired
     assert res.rule_triggered is True
     assert res.matched_events_count == 2
     assert provider.call_count == 2
@@ -202,3 +208,85 @@ def test_verifier_serialization_round_trip():
     assert restored.hunt_id == "H-0885"
     assert restored.status == VerificationStatus.VERIFIED_TRUE_POSITIVE
     assert restored.matched_events_count == 3
+
+
+def test_synthetic_provider_cannot_gain_live_verification():
+    from unittest.mock import patch
+
+    detonation = make_sample_detonation()
+    detonation.provider = "mock"
+    provider = DynamicMockQueryProvider()
+    with patch("hecate_runner.bas.forwarder.forward_events_to_splunk") as forward:
+        result = DetectionVerifier(query_provider=provider).verify_detonation(
+            detonation,
+            rule_yaml=SAMPLE_SIGMA_RULE,
+            candidate_query="index=alerts",
+            backend="splunk",
+            baseline_query="index=*",
+        )
+    assert result.status == VerificationStatus.SIMULATION_MATCH
+    assert result.rule_triggered
+    assert result.backend == "mock"
+    assert result.detection_latency_sec is None
+    assert not result.siem_alert_fired
+    assert provider.call_count == 0
+    forward.assert_not_called()
+
+
+def test_cloud_execution_receipts_are_not_sensor_evidence():
+    detonation = make_sample_detonation(
+        telemetry=[{"data_source": "cloud_control_plane", "Image": "anything"}]
+    )
+    result = DetectionVerifier().verify_detonation(detonation, rule_yaml=SAMPLE_SIGMA_RULE)
+    assert result.status == VerificationStatus.TELEMETRY_MISSING
+    assert not result.telemetry_arrived
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "index=alerts",
+        'index=main Message="alerts"',
+        "index=notable",
+        "index=_audit",
+        "index=fired_alerts",
+    ],
+)
+def test_query_words_never_prove_alert_firing(query):
+    provider = DynamicMockQueryProvider()
+    result = DetectionVerifier(query_provider=provider).verify_detonation(
+        make_sample_detonation(telemetry=[]), candidate_query=query, backend="splunk"
+    )
+    assert result.status == VerificationStatus.QUERY_MATCH
+    assert result.rule_triggered
+    assert not result.siem_alert_fired
+    assert result.detection_latency_sec is None
+    assert result.query_match_latency_sec is not None
+
+
+def test_unconfirmed_cleanup_prevents_validation_and_siem_access():
+    provider = DynamicMockQueryProvider()
+    det = make_sample_detonation()
+    det.cleanup_success = False
+    det.cleanup_error = "Remote cleanup is unconfirmed."
+    result = DetectionVerifier(query_provider=provider).verify_detonation(
+        det, rule_yaml=SAMPLE_SIGMA_RULE, candidate_query="index=alerts"
+    )
+    assert result.status == VerificationStatus.ERROR
+    assert not result.rule_triggered
+    assert provider.call_count == 0
+
+
+def test_sigma_pass_cannot_override_native_query_miss():
+    result = DetectionVerifier(
+        query_provider=DynamicMockQueryProvider([0]), max_wait_sec=0.01, poll_interval_sec=0.001
+    ).verify_detonation(
+        make_sample_detonation(),
+        rule_yaml=SAMPLE_SIGMA_RULE,
+        candidate_query="index=main | where 1=0",
+        backend="splunk",
+    )
+    assert result.status == VerificationStatus.DETECTION_MISS
+    assert not result.rule_triggered
+    assert result.telemetry_arrived
+    assert not result.siem_alert_fired

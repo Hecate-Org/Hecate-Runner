@@ -54,6 +54,11 @@ def test_cli_bas_verify_success_with_writeback(
         "status": "planning",
         "techniques": ["T1059.001"],
         "platform": ["windows"],
+        "bas_verified": True,
+        "bas_verified_rules": ["old-live-rule.yml"],
+        "bas_rules_validated": 1,
+        "bas_detection_latency_sec": 1.25,
+        "bas_search_job_id": "old-live-job",
     }
     hunt_file.write_text(
         f"---\n{yaml.safe_dump(initial_frontmatter)}---\n\n# H-0042: Test Hunt Draft\n",
@@ -77,6 +82,7 @@ detection:
 
     # Point Settings to our temporary workspace
     mock_settings = Settings(
+        _env_file=None,
         hecate_workspace=workspace,
         hunts_root=workspace / "hunts",
         bas_allowed_hosts=["lab-host"],
@@ -86,17 +92,22 @@ detection:
     result = runner.invoke(app, ["bas-verify", "H-0042", "--provider", "mock", "--write-back"])
     assert result.exit_code == 0
     assert "BAS Verification Results: H-0042" in result.output
-    assert "VERIFIED_TRUE_POSITIVE" in result.output
+    assert "SIMULATION_MATCH" in result.output
     assert "Updated hunt draft frontmatter in H-0042.md" in result.output
 
     # Check updated frontmatter
     updated_content = hunt_file.read_text(encoding="utf-8")
     parts = updated_content.split("---", 2)
     fm = yaml.safe_load(parts[1])
-    assert fm["bas_verified"] is True
+    assert fm["bas_verified"] is False
     assert fm["bas_provider"] == "mock"
-    assert fm["bas_status"] == "verified_true_positive"
+    assert fm["bas_status"] == "simulation_match"
     assert fm["bas_detection_triggered"] is True
+    assert "bas_verified_rules" not in fm
+    assert fm["bas_siem_alert_fired"] is False
+    assert fm["bas_rules_validated"] == 0
+    assert "bas_detection_latency_sec" not in fm
+    assert "bas_search_job_id" not in fm
 
 
 def test_cli_bas_reset_clears_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,3 +200,184 @@ def test_cli_bas_reset_reports_purged_tmpfs_files(monkeypatch: pytest.MonkeyPatc
     assert result.exit_code == 0
     assert "Lingering tmpfs files purged:" in result.output
     assert "/tmp/hecate-canary.tmp" in result.output
+
+
+@pytest.mark.parametrize(
+    "rule", [None, "title: No detection\ntags: [attack.t1033]\n", "[invalid YAML"]
+)
+def test_cli_missing_or_invalid_hunt_rule_refuses_before_detonation(tmp_path, monkeypatch, rule):
+    from unittest.mock import Mock
+
+    hunt_dir = tmp_path / "hunts"
+    hunt_dir.mkdir()
+    (hunt_dir / "H-TEST.md").write_text(
+        "---\nhunt_id: H-TEST\ntechniques: [T1033]\nplatform: [linux]\n---\n"
+    )
+    if rule is not None:
+        query_dir = tmp_path / "queries" / "H-TEST"
+        query_dir.mkdir(parents=True)
+        (query_dir / "actual.yml").write_text(rule)
+    provider = Mock()
+    settings = Settings(
+        _env_file=None, hecate_workspace=tmp_path, hunts_root=hunt_dir, bas_mode="mock"
+    )
+    monkeypatch.setattr("hecate_runner.cli.Settings", lambda: settings)
+    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
+    result = runner.invoke(app, ["bas-verify", "H-TEST", "--provider", "mock", "--no-siem"])
+    assert result.exit_code == 1
+    assert "no matching Sigma detection" in result.output
+    provider.detonate.assert_not_called()
+
+
+def test_cli_independent_lab_observations_remain_locally_verified(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+    from unittest.mock import Mock
+
+    from hecate_runner.bas.base import DetonationResult
+
+    hunt_dir = tmp_path / "hunts"
+    hunt_dir.mkdir()
+    hunt = hunt_dir / "H-TEST.md"
+    hunt.write_text("---\nhunt_id: H-TEST\ntechniques: [T1033]\nplatform: [linux]\n---\n")
+    query_dir = tmp_path / "queries" / "H-TEST"
+    query_dir.mkdir(parents=True)
+    (query_dir / "actual.yml").write_text(
+        "title: Actual Whoami Hunt\ntags: [attack.t1033]\nlogsource:\n  category: process_creation\n  product: linux\ndetection:\n  selection:\n    Image|endswith: /whoami\n  condition: selection\n"
+    )
+    now = datetime.now(UTC).isoformat()
+    provider = Mock()
+    provider.detonate.return_value = DetonationResult(
+        success=True,
+        hunt_id="H-TEST",
+        technique_id="T1033",
+        ability_id="whoami",
+        provider="caldera",
+        start_time_utc=now,
+        end_time_utc=now,
+        duration_seconds=1,
+        exit_code=0,
+        stdout="lab",
+        stderr="",
+        cleanup_success=True,
+    )
+    sensor = Mock()
+    sensor.collect_fused.return_value = [
+        {"Image": "/usr/bin/whoami", "data_source": "process_creation"}
+    ]
+    settings = Settings(
+        _env_file=None,
+        hecate_workspace=tmp_path,
+        hunts_root=hunt_dir,
+        bas_allowed_hosts=["lab-host"],
+    )
+    monkeypatch.setattr("hecate_runner.cli.Settings", lambda: settings)
+    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
+    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args: sensor)
+    result = runner.invoke(
+        app, ["bas-verify", "H-TEST", "--provider", "caldera", "--host", "lab-host", "--no-siem"]
+    )
+    assert result.exit_code == 0, result.output
+    fm = yaml.safe_load(hunt.read_text().split("---", 2)[1])
+    assert fm["bas_verified"] is True
+    assert fm["bas_status"] == "verified_true_positive"
+    assert fm["bas_backend"] == "lab_fusion"
+    assert fm["bas_siem_alert_fired"] is False
+    assert fm["bas_verified_rules"] == ["actual.yml"]
+    sensor.collect_fused.assert_called_once()
+
+
+@pytest.mark.parametrize("proved,cleanup", [(False, True), (True, True), (False, False)])
+def test_cli_writes_only_authoritative_alert_proof(tmp_path, monkeypatch, proved, cleanup):
+    from datetime import UTC, datetime
+    from unittest.mock import Mock
+
+    from hecate_runner.bas.base import DetonationResult
+    from hecate_runner.bas.siem_verifier import SiemAlertVerificationResult
+
+    hunt_dir = tmp_path / "hunts"
+    hunt_dir.mkdir()
+    hunt = hunt_dir / "H-TEST.md"
+    hunt.write_text(
+        "---\nhunt_id: H-TEST\ntechniques: [T1033]\nplatform: [linux]\nbas_siem_alert_fired: true\nbas_alert_search_id: old-job\nbas_alert_name: old-alert\nbas_alert_time_utc: yesterday\nbas_detection_latency_sec: 99\n---\n"
+    )
+    query_dir = tmp_path / "queries" / "H-TEST"
+    query_dir.mkdir(parents=True)
+    (query_dir / "actual.yml").write_text(
+        "title: Actual Hunt\ntags: [attack.t1033]\ndetection:\n  selection:\n    Image: /usr/bin/whoami\n  condition: selection\n"
+    )
+    (query_dir / "actual.spl").write_text('Image="/usr/bin/whoami"')
+    now = datetime.now(UTC).isoformat()
+    provider = Mock()
+    provider.detonate.return_value = DetonationResult(
+        success=True,
+        cleanup_success=cleanup,
+        hunt_id="H-TEST",
+        technique_id="T1033",
+        ability_id="whoami",
+        provider="caldera",
+        start_time_utc=now,
+        end_time_utc=now,
+        duration_seconds=1,
+        exit_code=0,
+        stdout="lab",
+        stderr="",
+    )
+    sensor = Mock()
+    observed = [{"Image": "/usr/bin/whoami", "data_source": "process_creation"}]
+    sensor.collect_fused.return_value = observed
+    settings = Settings(
+        _env_file=None,
+        hecate_workspace=tmp_path,
+        hunts_root=hunt_dir,
+        bas_allowed_hosts=["lab-host"],
+    )
+    monkeypatch.setattr("hecate_runner.cli.Settings", lambda: settings)
+    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
+    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args: sensor)
+    monkeypatch.setenv("SPLUNK_HOST", "https://siem.invalid")
+    verification = Mock(
+        return_value=SiemAlertVerificationResult(
+            hunt_id="H-TEST",
+            technique_id="T1033",
+            ability_id="whoami",
+            bas_provider="caldera",
+            siem_backend="splunk",
+            status="verified_true_positive" if proved else "query_match",
+            rule_triggered=True,
+            telemetry_arrived=True,
+            detection_latency_sec=2.0 if proved else None,
+            query_match_latency_sec=1.0,
+            detonation_time_utc=now,
+            alert_time_utc=now if proved else "",
+            matched_events_count=1,
+            query_used='Image="/usr/bin/whoami"',
+            search_job_id="ad-hoc-job",
+            siem_alert_fired=proved,
+            alert_search_id="scheduled-job" if proved else "",
+            alert_name="actual-alert" if proved else "",
+            verification_scope="siem_alert" if proved else "siem_query",
+        )
+    )
+    monkeypatch.setattr(
+        "hecate_runner.bas.siem_verifier.SiemAlertVerifier.verify_detonation_alert", verification
+    )
+    result = runner.invoke(
+        app, ["bas-verify", "H-TEST", "--provider", "caldera", "--host", "lab-host", "--siem"]
+    )
+    assert result.exit_code == (0 if cleanup else 1), result.output
+    fm = yaml.safe_load(hunt.read_text().split("---", 2)[1])
+    assert fm["bas_cleanup_success"] is cleanup
+    assert fm["bas_siem_alert_fired"] is proved
+    assert fm["bas_verified"] is proved
+    if proved:
+        assert fm["bas_alert_search_id"] == "scheduled-job"
+        assert fm["bas_detection_latency_sec"] == 2.0
+        assert fm["bas_verification_scope"] == "siem_alert"
+    else:
+        assert "bas_alert_search_id" not in fm
+        assert "bas_alert_time_utc" not in fm
+        assert "bas_detection_latency_sec" not in fm
+    if cleanup:
+        assert verification.call_args.kwargs["raw_events"] == observed
+    else:
+        verification.assert_not_called()
