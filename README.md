@@ -147,10 +147,9 @@ python -m pytest tests/ -q --no-cov
 ruff check src tests
 ```
 
-The default suite blocks live network requests and operator dotenv files. Test
-`.env` fixtures must be temporary. External checks require an explicit `-m network`
-selection and their documented test configuration. Do not weaken the guard to
-make an unmocked call pass; fixture IDs such as `H-9999` must never reach Slack.
+Unit test suites run offline with isolated operator environments. External checks
+require an explicit `-m network` selection and their documented test configuration.
+Test fixture IDs such as `H-9999` must never reach Slack or external webhooks.
 
 ## Documentation
 
