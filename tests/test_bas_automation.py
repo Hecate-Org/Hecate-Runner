@@ -415,27 +415,23 @@ def test_fallback_to_mock_does_not_deny_live_approved_automation(tmp_path, monke
         telemetry_signatures=[],
     )
     provider.detonate.return_value = detonation
-    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
+    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args, **kwargs: provider)
 
-    def ok_preflight(self):
-        self.container_id = "c1"
-        self.agent_image = "img"
-        self.controller_image = "ctrl"
-
-    monkeypatch.setattr(LabProcessSensor, "preflight", ok_preflight)
+    sensor = MagicMock()
+    sensor.agent_image = "img"
+    sensor.controller_image = "ctrl"
+    sensor.collect_fused.return_value = [
+        {
+            "data_source": "process_creation",
+            "category": "process_creation",
+            "product": "linux",
+            "Image": "/usr/bin/whoami",
+            "CommandLine": "whoami",
+            "User": "root",
+        }
+    ]
     monkeypatch.setattr(
-        LabProcessSensor,
-        "collect",
-        lambda self, det, argv: [
-            {
-                "data_source": "process_creation",
-                "category": "process_creation",
-                "product": "linux",
-                "Image": "/usr/bin/whoami",
-                "CommandLine": "whoami",
-                "User": "root",
-            }
-        ],
+        "hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: sensor
     )
     monkeypatch.setattr("hecate_runner.bas.runtime.audit_container_tmpfs", lambda *a, **k: [])
     settings = Settings(
@@ -451,6 +447,7 @@ def test_fallback_to_mock_does_not_deny_live_approved_automation(tmp_path, monke
         bas_fallback_to_mock=True,
     )
     result = run_approved_validation(settings, "H-0001", APPROVED_PROCEDURES["T1033"], RULE)
+    sensor.preflight.assert_called_once()
     provider.detonate.assert_called_once()
     assert result["status"] == "verified_true_positive"
     assert result.get("provider") == "caldera"
@@ -492,28 +489,12 @@ def test_fallback_to_mock_when_live_unsupported_even_with_auto_execute(tmp_path,
     """fallback_to_mock soft-falls back for unsupported platforms; never claims live."""
     runner = MagicMock()
     monkeypatch.setattr("hecate_runner.bas.runtime.run_approved_validation", runner)
-    mock_provider = MagicMock()
-    mock_provider.name = "mock"
-    from hecate_runner.bas.base import DetonationResult, DetonationStage
+    from hecate_runner.bas.mock import MockBASProvider
 
-    mock_provider.detonate.return_value = DetonationResult(
-        success=True,
-        hunt_id="H-0001",
-        technique_id="T1033",
-        ability_id="mock",
-        provider="mock",
-        start_time_utc="2026-01-01T00:00:00+00:00",
-        end_time_utc="2026-01-01T00:00:01+00:00",
-        duration_seconds=1.0,
-        exit_code=0,
-        stdout="ok",
-        stderr="",
-        stage=DetonationStage.COMPLETED,
-        cleanup_success=True,
-        telemetry_signatures=[],
-        raw_details={"mock_execution": True},
+    mock_provider = MockBASProvider(allowed_hosts=["lab"])
+    monkeypatch.setattr(
+        "hecate_runner.bas.get_bas_provider", lambda *a, **k: mock_provider
     )
-    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *a, **k: mock_provider)
     settings = Settings(
         _env_file=None,
         hecate_workspace=tmp_path,
