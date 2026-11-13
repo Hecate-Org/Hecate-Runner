@@ -243,6 +243,7 @@ def run_bas_validation(
 
     started = orch.trail.elapsed
     provider_name = getattr(orch.settings, "bas_mode", "mock")
+    mock_fallback_reason = ""
     if provider_name != "mock":
         from hecate_runner.bas.approved import select_approved_rule
         from hecate_runner.bas.runtime import run_approved_validation, skipped_bas
@@ -282,6 +283,8 @@ def run_bas_validation(
                     reason,
                 )
                 provider_name = "mock"
+                # Carried into the mock verification record below.
+                mock_fallback_reason = reason
             else:
                 req.bas_verification = skipped_bas(orch.settings, req.hunt_id, reason)
                 result = req.bas_verification
@@ -344,9 +347,7 @@ def run_bas_validation(
                                 pass
 
                 evaluated_count = len(rules) if sensor_events else 1
-                if not getattr(req, "purple_team_rules_evaluated", 0):
-                    req.purple_team_rules_evaluated = evaluated_count
-                req.purple_team_rules_validated = validated_count
+                # Keep BAS scorecards on bas_*; never inflate purple_team_* from live lab hits.
                 req.bas_rules_evaluated = evaluated_count
                 req.bas_rules_validated = validated_count
                 req.bas_matched_events = result.get("matched_events_count", 1)
@@ -395,21 +396,28 @@ def run_bas_validation(
     )
     norm_platform = normalize_platform(target_platform)
 
-    allowed_hosts = getattr(orch.settings, "bas_allowed_hosts", [])
-    allowed_accounts = getattr(orch.settings, "bas_allowed_accounts", [])
+    allowed_hosts = list(getattr(orch.settings, "bas_allowed_hosts", []) or [])
+    allowed_accounts = list(getattr(orch.settings, "bas_allowed_accounts", []) or [])
+
+    def _preferred_host(*candidates: str) -> str:
+        for candidate in candidates:
+            host = str(candidate or "").strip()
+            if host and (not allowed_hosts or host in allowed_hosts):
+                return host
+        return allowed_hosts[0] if allowed_hosts else "lab-agent-01"
 
     if norm_platform == "windows":
-        target_host = getattr(orch.settings, "bas_windows_host", "") or (
-            next((h for h in allowed_hosts if "win" in h.lower()), None)
-            or (allowed_hosts[0] if allowed_hosts else "lab-agent-01")
+        target_host = _preferred_host(
+            getattr(orch.settings, "bas_windows_host", ""),
+            next((h for h in allowed_hosts if "win" in h.lower()), ""),
         )
     elif norm_platform == "linux":
-        target_host = getattr(orch.settings, "bas_linux_host", "") or (
-            next((h for h in allowed_hosts if "win" not in h.lower()), None)
-            or (allowed_hosts[0] if allowed_hosts else "lab-agent-01")
+        target_host = _preferred_host(
+            getattr(orch.settings, "bas_linux_host", ""),
+            next((h for h in allowed_hosts if "win" not in h.lower()), ""),
         )
     else:
-        target_host = allowed_hosts[0] if allowed_hosts else "lab-agent-01"
+        target_host = _preferred_host()
 
     target_account = allowed_accounts[0] if (allowed_accounts and is_cloud) else None
 
@@ -479,13 +487,23 @@ def run_bas_validation(
         if is_simulation:
             ver_dict["provider"] = "mock"
             ver_dict["backend"] = "mock"
-            ver_dict["mock_fallback"] = bool((det_result.raw_details or {}).get("mock_fallback"))
+            ver_dict["mock_fallback"] = bool(
+                (det_result.raw_details or {}).get("mock_fallback")
+            ) or bool(mock_fallback_reason)
+            if mock_fallback_reason:
+                ver_dict["reason"] = mock_fallback_reason
+                ver_dict["skip_reason"] = mock_fallback_reason
             # Never credit synthetic probes as live true positives.
             if validated_count or simulated_count or ver_dict.get("rule_triggered"):
                 ver_dict["status"] = "simulation_match"
                 ver_dict["verification_scope"] = "synthetic_sigma_logic"
                 ver_dict["rule_triggered"] = True
                 ver_dict["matched_events_count"] = total_matched
+            elif det_result.success and (det_result.telemetry_signatures or []):
+                # Telemetry synthesized but did not match — still a simulation probe,
+                # not a live miss/telemetry gap.
+                ver_dict["status"] = "simulation_no_match"
+                ver_dict["verification_scope"] = "synthetic_sigma_logic"
             req.bas_rules_validated = 0
             ver_dict["validated_rules_count"] = 0
         else:
@@ -499,9 +517,6 @@ def run_bas_validation(
                 ver_dict["rule_triggered"] = True
                 ver_dict["telemetry_arrived"] = True
                 ver_dict["matched_events_count"] = total_matched
-                if not getattr(req, "purple_team_rules_evaluated", 0):
-                    req.purple_team_rules_evaluated = len(rules)
-                req.purple_team_rules_validated = validated_count
                 req.bas_rules_evaluated = len(rules)
                 req.bas_rules_validated = validated_count
                 req.bas_matched_events = total_matched

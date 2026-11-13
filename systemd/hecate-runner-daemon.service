@@ -1,6 +1,6 @@
 [Unit]
 Description=hecate-runner - Hecate resident autonomous daemon
-Documentation=https://github.com/BrizoSec/Hecate-Runner
+Documentation=https://github.com/Hecate-Org/Hecate-Runner
 After=network-online.target ollama.service
 Wants=network-online.target hecate-runner-maintenance.service
 Requires=ollama.service

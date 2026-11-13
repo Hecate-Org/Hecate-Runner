@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 from pathlib import Path
 from typing import IO
 
@@ -10,9 +13,11 @@ from typing import IO
 def acquire_work_lock(path: Path) -> IO[str] | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     stream = path.open("a")
+    if _fcntl is None:
+        return stream
     try:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        _fcntl.flock(stream.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
         stream.close()
         return None
     except BaseException:

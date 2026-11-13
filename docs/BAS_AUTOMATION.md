@@ -1,42 +1,69 @@
 # Approved Linux lab automation
 
-Unattended BAS is restricted to ten reviewed non-destructive procedures. It never
-executes commands from CTI, generated rules, or an arbitrary technique lookup.
+Unattended BAS uses the reviewed, pinned catalog in
+[`bas/approved.py`](../src/hecate_runner/bas/approved.py). It does not execute
+commands from CTI, generated rules, or arbitrary technique lookup. The current
+catalog contains 30 procedures; the table records their actual fidelity.
+Some commands exercise only an inert local behavior, and smoke checks never
+establish technique coverage. Procedure names/ATT&CK tags are not a claim of
+realistic enterprise attack emulation.
 
-| Technique | Pinned CALDERA ability | Exact Linux command |
+| Technique | Fidelity | Pinned Linux command |
 | --- | --- | --- |
-| T1033 | bd527b63-9f9e-46e0-9816-b8434d2b8989 | `whoami` |
-| T1057 | 335cea7b-bec0-48c6-adfb-6066070f5f68 | `ps` |
-| T1083 | 52177cc1-b9ab-4411-ac21-2eadc4b5d3b8 | `ls` |
-| T1082 | Hecate-managed, pinned in code | `uname -a` |
-| T1016 | Hecate-managed, pinned in code | `ip address show` |
-| T1087.001 | Hecate-managed, pinned in code | `cut -d: -f1 /etc/passwd` (container accounts only) |
-| T1069.001 | 5c4dd985-89e3-4590-9b57-71fed66ff4e2 | `groups` |
-| T1124 | Hecate-managed, pinned in code | `date -u +"%Y-%m-%dT%H:%M:%SZ"` |
-| T1059.004 | Hecate-managed, pinned in code | `sh -c 'printf hecate-bas-shell-probe'` |
-| T1140 | Hecate-managed, pinned in code | `printf 'aGVjYXRlLWJhcy1wcm9iZQ==' \| base64 -d` (inert text only) |
+| T1033 | `behavioral` | `whoami` |
+| T1057 | `behavioral` | `ps` |
+| T1083 | `behavioral` | `ls` |
+| T1082 | `behavioral` | `uname -a` |
+| T1016 | `behavioral` | `ip address show` |
+| T1087.001 | `behavioral` | `cut -d: -f1 /etc/passwd` |
+| T1069.001 | `behavioral` | `groups` |
+| T1124 | `behavioral` | `date -u +"%Y-%m-%dT%H:%M:%SZ"` |
+| T1059.004 | `behavioral` | `sh -c 'printf hecate-bas-shell-probe'` |
+| T1140 | `behavioral` | `printf 'aGVjYXRlLWJhcy1wcm9iZQ==' \| base64 -d` |
+| T1070.004 | `behavioral` | `sh -c 'touch /tmp/hecate-t1070-canary.tmp && rm -f /tmp/hecate-t1070-canary.tmp'` |
+| T1027 | `behavioral` | `sh -c 'printf aGVjYXRlLWJhcw== \| base64 -d > /tmp/hecate-t1027.tmp'` |
+| T1005 | `behavioral` | `sh -c 'uname -a > /tmp/hecate-t1005.tmp'` |
+| T1053.003 | `behavioral` | `sh -c 'printf "* * * * * true # hecate-t1053\n" > /tmp/hecate-t1053.tmp && crontab /tmp/hecate-t1053.tmp'` |
+| T1105 | `behavioral` | `sh -c 'curl -f -sS -m 2 http://127.0.0.1:8888/ -o /tmp/hecate-t1105.tmp && test -s /tmp/hecate-t1105.tmp'` |
+| T1049 | `behavioral` | `ss -tan` |
+| T1007 | `behavioral` | `systemctl list-units --type=service --state=running` |
+| T1518.001 | `behavioral` | `systemctl status ufw` |
+| T1018 | `behavioral` | `arp -a` |
+| T1222.002 | `behavioral` | `sh -c 'touch /tmp/hecate-t1222.tmp && chmod 644 /tmp/hecate-t1222.tmp && rm -f /tmp/hecate-t1222.tmp'` |
+| T1036.005 | `behavioral` | `sh -c 'touch /tmp/hecate-t1036-crond.tmp && rm -f /tmp/hecate-t1036-crond.tmp'` |
+| T1543.002 | `smoke_check` | `systemctl is-active cron` |
+| T1552.001 | `behavioral` | `grep -s 'BEGIN PRIVATE KEY' /etc/ssl/certs/` |
+| T1003.008 | `behavioral` | `head -n 1 /etc/passwd` |
+| T1046 | `behavioral` | `nc -z -v -w 1 127.0.0.1 22` |
+| T1526 | `behavioral` | `curl -s -m 1 http://127.0.0.1:80/latest/meta-data/` |
+| T1613 | `behavioral` | `cat /proc/1/cgroup` |
+| T1071.001 | `smoke_check` | `curl -sI https://localhost/` |
+| T1190 | `smoke_check` | `curl -s http://127.0.0.1:80/` |
+| T1041 | `smoke_check` | `sh -c 'printf hecate-exfil-test \| wc -c'` |
 
-Run `hecate-runner bas-install-procedures` once to install missing Hecate-managed
-definitions. This command validates existing definitions before writing and
-refuses to overwrite changed commands or executable metadata. Managed IDs are
-deterministically pinned to the technique, exact command, and catalog version.
+Run `hecate-runner bas-install-procedures` to install missing managed definitions.
+This writes definitions to CALDERA; it does not detonate them. Existing content
+is validated first, and altered executable metadata is refused. Commands, cleanup
+and version determine managed IDs; exact IDs and exemptions remain in source.
 
-The ability's current contents are checked before scheduling. Changed commands,
-payloads, cleanup commands, uploads, variations, requirements, or unexpected
-executors cause refusal. New procedures require a code change and review.
+A hunt must have Linux scope and a compatible Sigma rule in the supported
+`process_creation`, `file_event`, `file_change` or `network_connection` category,
+with the exact approved technique. Predicate compatibility is an eligibility
+check, not validation evidence. Behavioral procedures are preferred; a compatible
+smoke check can be selected only when no behavioral match exists, and keeps its
+limited fidelity. The actual independent observations must match the hunt rule.
 
-A hunt must have Linux scope and a Linux `process_creation` Sigma rule tagged
-with the exact approved technique. A compatibility check must also show that the
-fixed procedure can exercise the rule predicates; an ATT&CK tag alone is
-insufficient. This eligibility check never counts as validation. The first
-eligible rule is evaluated using actual observed events. Other
-hunts record a skip reason; skipping does not claim a failed or successful
-detonation. Windows and cloud automation remain unsupported.
+With `HECATE_BAS_FALLBACK_TO_MOCK=false`, unsupported hunts record a skip and
+unavailable live execution fails. Explicitly enabled fallback is a synthetic
+probe with mock provenance; it cannot become live technique/alert proof. Windows
+and cloud unattended automation remain unsupported.
 
 ## Real process observation
 
-The agent image runs Sandcat under `strace`, tracing successful `execve` calls
-from its descendants. The tracer works as UID/GID 65534 without added
+The agent image runs Sandcat under `strace`. `lab_process` evaluates successful
+`execve` observations; `lab_fusion` additionally derives supported file/network
+events from traced syscalls. Expected filenames and CALDERA receipts are not
+substitutes for independent time-scoped observations. The tracer works as UID/GID 65534 without added
 capabilities, privileged mode, host mounts, host PID access, or a relaxed
 seccomp profile. The existing internal network and resource limits remain.
 The temporary filesystem is `noexec`, core dumps are disabled, open descriptors
@@ -51,8 +78,7 @@ recovery are documented in [host protections](HOST_HARDENING.md).
 Before scheduling, Hecate checks the exact container identity, hostname, agent
 arguments, tracer entrypoint, read-only root, nonroot user, dropped capabilities,
 security options, lack of mounts and published ports, resource limits, and
-internal network. Missing sensor readiness prevents execution. A lock prevents
-overlapping approved validation runs in the workspace.
+internal network. Missing sensor readiness prevents execution. Workspace locking and the shared lab lease prevent overlapping lab operations.
 
 Only successful observed executions of the exact approved command inside the
 detonation's time window are evaluated. CALDERA link receipts are excluded from
@@ -72,24 +98,34 @@ Keep configuration and credentials in the workspace's ignored `.env`:
 HECATE_BAS_ENABLED=true
 HECATE_BAS_MODE=caldera
 HECATE_BAS_AUTO_EXECUTE_LIVE=true
-HECATE_BAS_AUTO_TECHNIQUES=T1033,T1057,T1083,T1082,T1016,T1087.001,T1069.001,T1124,T1059.004,T1140
+HECATE_BAS_AUTO_TECHNIQUES=T1033,T1057,T1083 # Begin with a reviewed subset
 HECATE_BAS_TELEMETRY=lab_process
 HECATE_BAS_SENSOR_CONTAINER=hecate-bas-agent
+HECATE_BAS_LAB_NETWORK=hecate-bas-lab
+HECATE_BAS_LAB_PAW=hecate-local-sandbox
+HECATE_BAS_AGENT_SERVER_URL=http://caldera:8888
+HECATE_BAS_CALDERA_CONTAINER=caldera
 HECATE_BAS_ALLOWED_HOSTS=hecate-bas-lab
 HECATE_BAS_LINUX_HOST=hecate-bas-lab
 HECATE_BAS_FALLBACK_TO_MOCK=false
 CALDERA_URL=http://127.0.0.1:8888
+CALDERA_API_KEY=replace-with-your-private-caldera-api-key
 CALDERA_AGENT_GROUP=hecate-local-lab
 ```
 
 The CALDERA group must contain exactly one trusted agent matching the lab host.
-Automation accepts only a loopback CALDERA endpoint and this dedicated group.
+Automation accepts only a loopback CALDERA endpoint. The configured group, paw,
+network, host, agent server URL and controller container must match the lab
+profile. The defaults above describe the reviewed local stack; adopters may
+configure identities without removing isolation/image checks.
 Build the sensor-equipped image using `scripts/setup-bas-lab.sh` for a new lab;
 that installer refuses to replace an existing container. Existing deployments
 must retain their previous stopped container while replacing the agent with the
 same isolation settings and agent arguments.
 
-Run `scripts/check-bas-isolation.sh`, then:
+Use `scripts/check-bas-isolation.sh` and authenticated catalog/agent reads for
+read-only readiness checks. After reviewing the configured procedures, an
+execution test can be requested with:
 
 ```bash
 .venv/bin/hecate-runner bas-check
@@ -129,7 +165,8 @@ as creation/deletion evidence.
 Mock BAS produces a `simulation_match` when synthetic events match the hunt's
 Sigma rule. This is a logic probe: it does not set `bas_verified`, populate
 `bas_verified_rules`, increment BAS or purple-team validated-rule counters, or
-record a live detection latency. Synthetic events are never forwarded to a live
+record a live detection latency. A successful synthetic replay without a match
+can report `simulation_no_match`; it is not a live detection miss. Synthetic events are never forwarded to a live
 SIEM by the verification path. Arbitrary native queries cannot be evaluated by
 the offline Sigma evaluator and return `simulation_unsupported`.
 
@@ -231,11 +268,11 @@ new definitions. Existing definitions are not silently overwritten or used as
 fallbacks for the new commands.
 
 A `smoke_check_match` reports a locally observed rule match without claiming the
-associated attack technique was exercised. Smoke checks are excluded from
-unattended hunt-rule selection, verified-rule lists, BAS and purple-team validated
-rule counts, hunt `bas_verified` metadata, and community technique-validation
-credit. They remain available to `bas-check` for sensor diagnostics and explicit
-manual verification. An actual SIEM alert on a smoke check remains visible as
+associated attack technique was exercised. Selection prefers a compatible
+behavioral procedure and can fall back to a compatible pinned smoke check. Smoke
+checks are excluded from verified-rule lists, BAS and purple-team validated rule
+counts, hunt `bas_verified` metadata, and community technique-validation credit.
+They are also available to `bas-check` and explicit manual verification. An actual SIEM alert on a smoke check remains visible as
 alert evidence and does not upgrade it to technique-validation credit.
 
 The following controls are classified as smoke checks:
@@ -296,3 +333,19 @@ These are reserved **synthetic replay samples**, not a representative production
 corpus. A passing score does not validate a technique, establish live SIEM alerting,
 or estimate a production false-positive rate. Production acceptance still requires
 independently collected, labeled telemetry from the adopter's environment.
+
+
+## Deployment and notification status
+
+Mock query execution, deployment dry-run, synthetic replay and BAS mode are
+independent settings. `HECATE_RUNNER_QUERY_PROVIDER=mock` never queries an
+enterprise SIEM. Deployment dry-run writes no saved search; an explicitly live
+operation with missing credentials returns an error. Live Splunk operations
+require an explicit endpoint as well as authentication.
+
+Slack synthetic replay cards describe synthetic samples rather than captured
+logs or verified detections. Monitor readers separate simulation/query/smoke
+matches, local behavioral checks and correlated fired alerts. Legacy mock
+`verified_true_positive` labels are displayed as simulations; a backend string
+or latency snapshot alone cannot establish a fired alert. Local BAS counts stay
+separate from the synthetic replay scorecard.

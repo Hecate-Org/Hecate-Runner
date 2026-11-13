@@ -1,6 +1,6 @@
 [Unit]
 Description=Hecate SecOps Slack Bot (Socket Mode, user service)
-Documentation=https://github.com/BrizoSec/Hecate-Runner
+Documentation=https://github.com/Hecate-Org/Hecate-Runner
 After=network-online.target
 Wants=network-online.target
 

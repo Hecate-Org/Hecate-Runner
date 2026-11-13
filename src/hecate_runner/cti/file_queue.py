@@ -9,7 +9,11 @@ after successful acknowledgment.
 from __future__ import annotations
 
 import contextlib
-import fcntl
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 import json
 import logging
 import re
@@ -29,12 +33,14 @@ log = logging.getLogger(__name__)
 def _queue_lock(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        if _fcntl is not None:
+            _fcntl.flock(f.fileno(), _fcntl.LOCK_EX)
         try:
             yield
         finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            if _fcntl is not None:
+                with contextlib.suppress(OSError):
+                    _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
 
 
 def route_item_to_queue(queue_dir: Path, item: CTIItem) -> Path:

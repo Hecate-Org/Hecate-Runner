@@ -54,6 +54,12 @@ class CTIProvider(ABC):
         """Release provider resources when a polling cycle ends."""
         return None
 
+    def __enter__(self) -> CTIProvider:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
     @abstractmethod
     def next_item(self) -> CTIItem | None:
         """Return the next CTI item, or None if none is available."""

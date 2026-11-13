@@ -8,7 +8,10 @@ an audited quarantine state whenever cleanup cannot be confirmed.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 import json
 import logging
 import os
@@ -93,16 +96,18 @@ class LabLease:
         """Serialize both execution and reset; reset may inspect quarantine."""
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+") as lock_file:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise SafetyViolationError(
-                    "Another BAS operation holds the active lab lease."
-                ) from exc
+            if _fcntl is not None:
+                try:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                except OSError as exc:
+                    raise SafetyViolationError(
+                        "Another BAS operation holds the active lab lease."
+                    ) from exc
             try:
                 yield
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if _fcntl is not None:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
 
     @contextmanager
     def acquire(

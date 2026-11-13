@@ -39,13 +39,19 @@ def build_count_query(query_text: str, dialect_or_provider: str) -> str:
     text = query_text.strip().rstrip(";")
 
     if target in ("splunk", "spl"):
+        if re.search(r"\|\s*stats\s+count\s*$", text, re.IGNORECASE):
+            return text
+        if re.search(r"\|\s*stats\s+count\s+by\s+", text, re.IGNORECASE):
+            return f"{text} | stats sum(count) as count"
         if "stats count" in text.lower():
             return text
         return f"{text} | stats count"
 
     if target in ("sentinel", "sentinel_kql", "kql"):
-        if "summarize count()" in text.lower():
+        if re.search(r"\|\s*summarize\s+count\s*\(\s*\)\s*$", text, re.IGNORECASE):
             return text
+        if re.search(r"^\s*let\s+", text, re.MULTILINE):
+            return f"{text}\n| summarize count()"
         return (
             f"let __hecate_bounded_query = () {{\n{text}\n}};\n"
             f"__hecate_bounded_query()\n| summarize count()"
@@ -73,16 +79,22 @@ def extract_count_from_result(result: QueryResult) -> int:
     if not result.ok:
         return 0
 
-    # 1. Check if the result contains a single aggregate count event
-    if result.events and len(result.events) == 1:
-        first = result.events[0]
-        if isinstance(first, dict):
-            for key in ("count", "count_", "total", "events"):
-                if key in first:
-                    try:
-                        return int(first[key])
-                    except (ValueError, TypeError):
-                        pass
+    # 1. Check if the result contains aggregate count event(s)
+    if result.events:
+        total = 0
+        has_count_key = False
+        for ev in result.events:
+            if isinstance(ev, dict):
+                for key in ("count", "count_", "total", "events"):
+                    if key in ev:
+                        try:
+                            total += int(ev[key])
+                            has_count_key = True
+                            break
+                        except (ValueError, TypeError):
+                            pass
+        if has_count_key:
+            return total
 
     # 2. Inspect detail JSON string (e.g. Sentinel tabular rows [[55]] or Splunk stats count)
     if result.detail:

@@ -5,12 +5,23 @@ listed original rules and synthetic fixtures. It never exports the workspace
 hunt/research archive, operator sessions, raw BAS traces, credentials, or local
 runtime state. LICENSES.md defines the content-license scope.
 
+## Prerequisites
+
+The builder expects an explicitly reviewed repository containing
+`catalog/catalog.yaml`, its referenced rules/fixtures, `LICENSE` and `LICENSES.md`.
+The current Hecate-Public checkout does not ship that catalog or a community-release
+workflow. Do not run the example against its normal hunt archive expecting a
+release: first prepare the original catalog and separately reviewed workflow.
+The four-case catalog mentioned below describes the fixture/schema example,
+not four installed Public release cases. A workflow/environment must exist before
+its approval steps can be used.
+
 ## Local preparation
 
 From Hecate-Runner, with its environment installed:
 
 ```bash
-hecate-runner release build --catalog ../Hecate-Public --output /tmp/hecate-catalog-fixture-build
+hecate-runner release build --catalog /path/to/reviewed-catalog-repo --output /tmp/hecate-catalog-fixture-build
 ```
 
 The new private directory contains index.json, a checksummed manifest, four
@@ -25,8 +36,8 @@ bounded time windows, and testing on the target platform before use.
 With the existing isolated Linux BAS lab configured:
 
 ```bash
-hecate-runner release verify --catalog ../Hecate-Public --output ../Hecate-Public/.hecate/releases/evidence.json
-hecate-runner release build --catalog ../Hecate-Public --output /tmp/hecate-catalog-observed-build --evidence ../Hecate-Public/.hecate/releases/evidence.json
+hecate-runner release verify --catalog /path/to/reviewed-catalog-repo --output ../Hecate-Public/.hecate/releases/evidence.json
+hecate-runner release build --catalog /path/to/reviewed-catalog-repo --output /tmp/hecate-catalog-observed-build --evidence ../Hecate-Public/.hecate/releases/evidence.json
 ```
 
 Validation selects existing pinned procedures; it cannot accept an executable
@@ -49,7 +60,7 @@ experimental hunting building blocks.
 3. Merge the reviewed catalog and builder changes. The Core and Runner refs used
    by the workflow must contain this implementation. Repository variables
    HECATE_CORE_REF and HECATE_RUNNER_REF can pin reviewed toolchain commits.
-4. Run the Community catalog workflow without publication first and inspect its
+4. Run your reviewed Community catalog workflow without publication first and inspect its
    artifact, source digest, checksums, template limitations, and toolchain record.
 5. Dispatch it from main with publish=true and the exact expected_source_digest.
 6. Inspect that run's artifact and approve the community-release environment.

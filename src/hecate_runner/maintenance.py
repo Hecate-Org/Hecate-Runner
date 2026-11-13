@@ -188,14 +188,18 @@ class MaintenanceScheduler:
                     backup_count=self.settings.log_backup_count,
                 )
                 with (self.settings.log_dir / "maintenance.log").open("a") as output:
+                    popen_kwargs: dict[str, Any] = {
+                        "cwd": self.settings.hecate_workspace,
+                        "env": self.env,
+                        "stdout": output,
+                        "stderr": subprocess.STDOUT,
+                    }
+                    if os.name == "posix":
+                        popen_kwargs["start_new_session"] = True
+                        popen_kwargs["pass_fds"] = (lock.fileno(),)
                     process = subprocess.Popen(
                         [sys.executable, "-m", "hecate_runner.maintenance_worker", job],
-                        cwd=self.settings.hecate_workspace,
-                        env=self.env,
-                        stdout=output,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                        pass_fds=(lock.fileno(),),
+                        **popen_kwargs,
                     )
                 self.active[job] = _ActiveJob(
                     process, lock, time.monotonic(), state.get("failures", 0)

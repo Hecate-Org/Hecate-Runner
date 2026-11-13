@@ -948,6 +948,7 @@ def _render_bas_verification(req: DraftHuntRequest) -> str:
     status_badge = {
         "smoke_check_match": "🧪 **SMOKE CHECK MATCH (Technique behavior not validated)**",
         "simulation_match": "🧪 **SIMULATION MATCH (Synthetic Sigma logic probe)**",
+        "simulation_no_match": "🧪 **NO SIMULATION MATCH (Synthetic Sigma logic probe)**",
         "verified_true_positive": "✅ **VERIFIED TRUE POSITIVE**",
         "detection_miss": "⚠️ **DETECTION MISS (Telemetry arrived, rule missed)**",
         "telemetry_missing": "❌ **TELEMETRY MISSING (Sensor blind spot - no events observed)**",

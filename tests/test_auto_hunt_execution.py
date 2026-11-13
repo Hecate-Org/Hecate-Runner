@@ -83,11 +83,17 @@ def test_build_count_query_dialects() -> None:
     spl = 'Image="*/sh" CommandLine="* -c *"'
     assert build_count_query(spl, "splunk") == f"{spl} | stats count"
     assert build_count_query(f"{spl} | stats count", "splunk") == f"{spl} | stats count"
+    assert build_count_query(f"{spl} | stats count by user", "splunk") == f"{spl} | stats count by user | stats sum(count) as count"
 
     kql = "DeviceProcessEvents | where ProcessCommandLine contains 'test'"
     kql_count = build_count_query(kql, "sentinel")
     assert "| summarize count()" in kql_count
     assert "__hecate_bounded_query" in kql_count
+
+    kql_let = "let timeframe = 1d;\nDeviceProcessEvents | where TimeGenerated > ago(timeframe)"
+    kql_let_count = build_count_query(kql_let, "sentinel")
+    assert "__hecate_bounded_query" not in kql_let_count
+    assert kql_let_count.endswith("| summarize count()")
 
     cql = "CommandLine = /.*test.*/"
     assert build_count_query(cql, "crowdstrike") == f"{cql} | count()"
@@ -106,6 +112,15 @@ def test_extract_count_from_result() -> None:
         events=[{"count_": 17}],
     )
     assert extract_count_from_result(res2) == 17
+
+    # From multiple grouped events dict with count
+    res_multi = QueryResult(
+        outcome="executed",
+        provider="splunk",
+        row_count=2,
+        events=[{"user": "alice", "count": 10}, {"user": "bob", "count": 25}],
+    )
+    assert extract_count_from_result(res_multi) == 35
 
     # From detail JSON
     res3 = QueryResult(

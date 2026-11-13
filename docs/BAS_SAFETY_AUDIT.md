@@ -1,5 +1,10 @@
 # BAS capability and host safety audit — 2026-10-27
 
+> Historical audit snapshot, not the current deployment checklist. Host state,
+> procedure coverage and live execution flags may have changed since 2026-10-27.
+> Use [current BAS automation](BAS_AUTOMATION.md) and [host protections](HOST_HARDENING.md)
+> for the operating contract. This sweep did not rerun historical host/attack tests.
+
 **2026-10-31 update:** The workspace owner authorized automatic execution limited
 to reviewed read-only procedures in the isolated Linux lab, with independent
 process observation. See [approved lab automation](BAS_AUTOMATION.md). The

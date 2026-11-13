@@ -7,13 +7,20 @@ diagnostics rather than causing infinite retry loops in the intake daemon.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti import CTIItem
@@ -22,6 +29,22 @@ log = logging.getLogger(__name__)
 
 _DIR_NAME = "dead_letter"
 _RETRIES_FILE = ".retries.json"
+_RETRIES_LOCK_FILE = ".retries.lock"
+
+
+@contextlib.contextmanager
+def _retries_lock(queue_dir: Path) -> Iterator[None]:
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = queue_dir / _RETRIES_LOCK_FILE
+    with open(lock_path, "a", encoding="utf-8") as f:
+        if _fcntl is not None:
+            _fcntl.flock(f.fileno(), _fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if _fcntl is not None:
+                with contextlib.suppress(OSError):
+                    _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
 
 
 @dataclass
@@ -55,61 +78,64 @@ def _item_key(item: CTIItem) -> str:
 
 def get_retry_count(queue_dir: Path, item: CTIItem) -> int:
     """Return how many times this item has failed previously."""
-    tracker_path = queue_dir / _RETRIES_FILE
-    if not tracker_path.exists():
-        return 0
-    try:
-        data = json.loads(tracker_path.read_text(encoding="utf-8"))
-        key = _item_key(item)
-        entry = data.get(key, {})
-        return int(entry.get("attempts", 0))
-    except Exception as exc:
-        log.warning("Could not read retry tracker %s: %s", tracker_path, exc)
-        return 0
+    with _retries_lock(queue_dir):
+        tracker_path = queue_dir / _RETRIES_FILE
+        if not tracker_path.exists():
+            return 0
+        try:
+            data = json.loads(tracker_path.read_text(encoding="utf-8"))
+            key = _item_key(item)
+            entry = data.get(key, {})
+            return int(entry.get("attempts", 0))
+        except Exception as exc:
+            log.warning("Could not read retry tracker %s: %s", tracker_path, exc)
+            return 0
 
 
 def record_failure(queue_dir: Path, item: CTIItem, error: str) -> int:
     """Record a failure for the item and return the new attempt count."""
-    tracker_path = queue_dir / _RETRIES_FILE
-    queue_dir.mkdir(parents=True, exist_ok=True)
-    data: dict[str, Any] = {}
-    if tracker_path.exists():
-        try:
-            data = json.loads(tracker_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            log.warning("Corrupted retry tracker %s; resetting: %s", tracker_path, exc)
-            data = {}
+    with _retries_lock(queue_dir):
+        tracker_path = queue_dir / _RETRIES_FILE
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {}
+        if tracker_path.exists():
+            try:
+                data = json.loads(tracker_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                log.warning("Corrupted retry tracker %s; resetting: %s", tracker_path, exc)
+                data = {}
 
-    key = _item_key(item)
-    entry = data.get(key, {})
-    attempts = int(entry.get("attempts", 0)) + 1
-    data[key] = {
-        "attempts": attempts,
-        "last_error": error,
-        "last_attempt": datetime.now(UTC).isoformat(),
-        "identifier": item.identifier,
-        "title": item.title,
-    }
-    try:
-        atomic_write_text(tracker_path, json.dumps(data, indent=2) + "\n")
-    except Exception as exc:
-        log.warning("Could not update retry tracker %s: %s", tracker_path, exc)
-    return attempts
+        key = _item_key(item)
+        entry = data.get(key, {})
+        attempts = int(entry.get("attempts", 0)) + 1
+        data[key] = {
+            "attempts": attempts,
+            "last_error": error,
+            "last_attempt": datetime.now(UTC).isoformat(),
+            "identifier": item.identifier,
+            "title": item.title,
+        }
+        try:
+            atomic_write_text(tracker_path, json.dumps(data, indent=2) + "\n")
+        except Exception as exc:
+            log.warning("Could not update retry tracker %s: %s", tracker_path, exc)
+        return attempts
 
 
 def clear_retry(queue_dir: Path, item: CTIItem) -> None:
     """Clear any recorded failures for this item (called on success or quarantine)."""
-    tracker_path = queue_dir / _RETRIES_FILE
-    if not tracker_path.exists():
-        return
-    try:
-        data = json.loads(tracker_path.read_text(encoding="utf-8"))
-        key = _item_key(item)
-        if key in data:
-            del data[key]
-            atomic_write_text(tracker_path, json.dumps(data, indent=2) + "\n")
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Failed clearing retry entry from %s: %s", tracker_path, exc)
+    with _retries_lock(queue_dir):
+        tracker_path = queue_dir / _RETRIES_FILE
+        if not tracker_path.exists():
+            return
+        try:
+            data = json.loads(tracker_path.read_text(encoding="utf-8"))
+            key = _item_key(item)
+            if key in data:
+                del data[key]
+                atomic_write_text(tracker_path, json.dumps(data, indent=2) + "\n")
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed clearing retry entry from %s: %s", tracker_path, exc)
 
 
 def quarantine(

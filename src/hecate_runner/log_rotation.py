@@ -25,7 +25,10 @@ rotation that happens once per several thousand hourly runs.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 import logging
 import os
 import shutil
@@ -48,11 +51,13 @@ def _rotation_lock(path: Path) -> Iterator[None]:
     """
     lock_path = path.with_name(path.name + _LOCK_SUFFIX)
     with open(lock_path, "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        if _fcntl is not None:
+            _fcntl.flock(handle, _fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            if _fcntl is not None:
+                _fcntl.flock(handle, _fcntl.LOCK_UN)
 
 
 def rotate_log_if_needed(path: Path, *, max_bytes: int, backup_count: int) -> bool:

@@ -1,9 +1,13 @@
 # Host protections for the Linux BAS lab
 
 Keep lab procedures fixed, non-destructive, and independent of CTI command
-strings. The current catalog covers discovery, inert shell execution, and
-decoding an inert marker. It does not authorize payload downloads, credential
-access, persistence, lateral movement, or kernel exploits.
+strings. The pinned catalog includes discovery and controlled lab-only file, cron and
+local HTTP probes, with explicit cleanup and smoke-check classifications. It
+does not authorize arbitrary CTI commands, hostile payloads, production credential
+access or kernel exploits. See [the actual catalog and limits](BAS_AUTOMATION.md).
+
+The installed-host observations below are deployment history, not a guarantee
+for a fresh adopter host. Verify the effective controls on your own installation.
 
 ## Applied lab controls
 

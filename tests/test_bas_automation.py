@@ -14,6 +14,7 @@ import pytest
 from hecate_runner.bas.approved import (
     APPROVED_PROCEDURES,
     catalog_digest,
+    explain_approved_selection,
     select_approved_rule,
     validate_approved_ability,
 )
@@ -75,6 +76,9 @@ def test_changed_executable_content_is_rejected(change):
 def test_unapproved_and_wrong_platform_rules_are_not_executed():
     assert select_approved_rule([{"rule_yaml": RULE}], ["T1033"], ["T1033"])
     assert select_approved_rule([{"rule_yaml": RULE}], ["T1033"], []) is None
+    assert "HECATE_BAS_AUTO_TECHNIQUES is empty" in explain_approved_selection(
+        [{"rule_yaml": RULE}], ["T1033"], []
+    )
     assert select_approved_rule([{"rule_yaml": RULE}], ["T1033.001"], ["T1033"]) is None
     assert (
         select_approved_rule(
@@ -492,9 +496,7 @@ def test_fallback_to_mock_when_live_unsupported_even_with_auto_execute(tmp_path,
     from hecate_runner.bas.mock import MockBASProvider
 
     mock_provider = MockBASProvider(allowed_hosts=["lab"])
-    monkeypatch.setattr(
-        "hecate_runner.bas.get_bas_provider", lambda *a, **k: mock_provider
-    )
+    monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *a, **k: mock_provider)
     settings = Settings(
         _env_file=None,
         hecate_workspace=tmp_path,
@@ -505,6 +507,9 @@ def test_fallback_to_mock_when_live_unsupported_even_with_auto_execute(tmp_path,
         bas_auto_techniques=["T1033"],
         bas_allowed_hosts=["lab"],
         bas_linux_host="lab",
+        # Preferred Windows host may come from the ambient env; keep it off the
+        # allowlist so fallback must choose an allowlisted mock target.
+        bas_windows_host="lab-win10",
     )
     orchestrator = Orchestrator(settings, MagicMock(), MagicMock())
     req = DraftHuntRequest(
@@ -516,9 +521,13 @@ def test_fallback_to_mock_when_live_unsupported_even_with_auto_execute(tmp_path,
     )
     orchestrator._run_bas_validation(req, [{"rule_yaml": RULE}], tmp_path, MagicMock())
     runner.assert_not_called()
-    mock_provider.detonate.assert_called_once()
+    assert len(mock_provider.history) == 1
+    assert mock_provider.history[0].target.host == "lab"
+    assert req.bas_verification is not None
     assert req.bas_verification["status"] == "simulation_match"
     assert req.bas_verification.get("provider") == "mock"
+    assert req.bas_verification.get("mock_fallback") is True
+    assert "Linux lab only" in (req.bas_verification.get("skip_reason") or "")
     text = render_draft(req)
     assert 'bas_status: "simulation_match"' in text
     assert "bas_live: false" in text
@@ -600,7 +609,9 @@ def test_pre_detonation_dirty_tmpfs_triggers_quarantine(
     fake_sensor = MagicMock()
     fake_sensor.agent_image = "agent-img"
     fake_sensor.controller_image = "controller-img"
-    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: fake_sensor)
+    monkeypatch.setattr(
+        "hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: fake_sensor
+    )
 
     settings = Settings(
         _env_file=None,
@@ -650,7 +661,9 @@ def test_post_detonation_uncleaned_tmpfs_triggers_quarantine(
     fake_sensor.agent_image = "agent-img"
     fake_sensor.controller_image = "controller-img"
     fake_sensor.collect.return_value = []
-    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: fake_sensor)
+    monkeypatch.setattr(
+        "hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: fake_sensor
+    )
 
     provider = MagicMock()
     provider.detonate.return_value = DetonationResult(
