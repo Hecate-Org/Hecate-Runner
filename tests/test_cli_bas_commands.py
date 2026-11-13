@@ -272,7 +272,7 @@ def test_cli_independent_lab_observations_remain_locally_verified(tmp_path, monk
     )
     monkeypatch.setattr("hecate_runner.cli.Settings", lambda: settings)
     monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
-    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args: sensor)
+    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args, **kwargs: sensor)
     result = runner.invoke(
         app, ["bas-verify", "H-TEST", "--provider", "caldera", "--host", "lab-host", "--no-siem"]
     )
@@ -333,7 +333,7 @@ def test_cli_writes_only_authoritative_alert_proof(tmp_path, monkeypatch, proved
     )
     monkeypatch.setattr("hecate_runner.cli.Settings", lambda: settings)
     monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
-    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args: sensor)
+    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args, **kwargs: sensor)
     monkeypatch.setenv("SPLUNK_HOST", "https://siem.invalid")
     verification = Mock(
         return_value=SiemAlertVerificationResult(

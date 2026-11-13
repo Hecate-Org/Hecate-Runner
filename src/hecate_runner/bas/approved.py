@@ -368,7 +368,25 @@ def validate_approved_ability(ability: dict[str, Any], procedure: ApprovedProced
 def select_approved_rule(
     rules: list[dict[str, Any]], techniques: list[str], allowed: list[str]
 ) -> tuple[ApprovedProcedure, str] | None:
-    """Select a matching Linux process rule, without broadening to parent techniques."""
+    """Select a matching Linux process rule, without broadening to parent techniques.
+
+    Prefers ``behavioral`` procedures. A ``smoke_check`` procedure is only chosen
+    when no behavioral match exists; orchestrator/runtime still demote those to
+    ``smoke_check_match`` and never set ``bas_verified``.
+    """
+    behavioral = _select_approved_rule(rules, techniques, allowed, fidelity="behavioral")
+    if behavioral is not None:
+        return behavioral
+    return _select_approved_rule(rules, techniques, allowed, fidelity="smoke_check")
+
+
+def _select_approved_rule(
+    rules: list[dict[str, Any]],
+    techniques: list[str],
+    allowed: list[str],
+    *,
+    fidelity: str,
+) -> tuple[ApprovedProcedure, str] | None:
     import yaml
 
     common_parents = (
@@ -418,55 +436,146 @@ def select_approved_rule(
                 and technique in APPROVED_PROCEDURES
             ):
                 procedure = APPROVED_PROCEDURES[technique]
-                if procedure.fidelity_scope != "behavioral":
+                if procedure.fidelity_scope != fidelity:
                     continue
-                # Eligibility only: a shared ATT&CK tag does not mean this
-                # fixed procedure exercises the rule's actual predicates.
-                # Validation still requires independently observed live events.
-                from hecate_agent.core.sigma_evaluator import SigmaEvaluator
-
-                candidates = [
-                    {
-                        "data_source": "process_creation",
-                        "category": "process_creation",
-                        "product": "linux",
-                        "Image": f"{directory}/{procedure.argv[0]}",
-                        "CommandLine": shlex.join(procedure.argv),
-                        "User": "root",
-                    }
-                    for directory in ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
-                ]
-                for directory in ("/bin", "/usr/bin"):
-                    for parent in common_parents:
-                        candidates.append(
-                            {
-                                "data_source": "process_creation",
-                                "category": "process_creation",
-                                "product": "linux",
-                                "Image": f"{directory}/{procedure.argv[0]}",
-                                "CommandLine": shlex.join(procedure.argv),
-                                "ParentImage": parent,
-                                "User": (
-                                    "www-data"
-                                    if any(w in parent for w in ("php", "apache", "httpd", "nginx"))
-                                    else "root"
-                                ),
-                            }
-                        )
-                for fpath in procedure.expected_files:
-                    candidates.append(
-                        {
-                            "data_source": "file_event",
-                            "category": "file_event",
-                            "product": "linux",
-                            "TargetFilename": fpath,
-                            "Image": f"/usr/bin/{procedure.argv[0]}",
-                            "CommandLine": shlex.join(procedure.argv),
-                        }
-                    )
-                try:
-                    if SigmaEvaluator.evaluate_rule(text, candidates, []).true_positives > 0:
-                        return procedure, text
-                except Exception:
-                    continue
+                if _procedure_matches_rule(procedure, text, common_parents):
+                    return procedure, text
     return None
+
+
+def _procedure_matches_rule(
+    procedure: ApprovedProcedure, rule_yaml: str, common_parents: tuple[str, ...]
+) -> bool:
+    """True when synthetic observations of the pinned command can hit the rule."""
+    from hecate_agent.core.sigma_evaluator import SigmaEvaluator
+
+    candidates = [
+        {
+            "data_source": "process_creation",
+            "category": "process_creation",
+            "product": "linux",
+            "Image": f"{directory}/{procedure.argv[0]}",
+            "CommandLine": shlex.join(procedure.argv),
+            "User": "root",
+        }
+        for directory in ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+    ]
+    for directory in ("/bin", "/usr/bin"):
+        for parent in common_parents:
+            candidates.append(
+                {
+                    "data_source": "process_creation",
+                    "category": "process_creation",
+                    "product": "linux",
+                    "Image": f"{directory}/{procedure.argv[0]}",
+                    "CommandLine": shlex.join(procedure.argv),
+                    "ParentImage": parent,
+                    "User": (
+                        "www-data"
+                        if any(w in parent for w in ("php", "apache", "httpd", "nginx"))
+                        else "root"
+                    ),
+                }
+            )
+    for fpath in procedure.expected_files:
+        candidates.append(
+            {
+                "data_source": "file_event",
+                "category": "file_event",
+                "product": "linux",
+                "TargetFilename": fpath,
+                "Image": f"/usr/bin/{procedure.argv[0]}",
+                "CommandLine": shlex.join(procedure.argv),
+            }
+        )
+    try:
+        return SigmaEvaluator.evaluate_rule(rule_yaml, candidates, []).true_positives > 0
+    except Exception:
+        return False
+
+
+def explain_approved_selection(
+    rules: list[dict[str, Any]], techniques: list[str], allowed: list[str]
+) -> str:
+    """Human-readable reason when ``select_approved_rule`` returns None."""
+    import yaml
+
+    if not rules:
+        return "No Sigma rules available for approved BAS selection."
+    if not techniques:
+        return "Hunt has no ATT&CK techniques to map to approved procedures."
+    if not allowed:
+        return "HECATE_BAS_AUTO_TECHNIQUES is empty; no approved procedures are eligible."
+
+    allowed_set = set(allowed)
+    approved_hits = [t for t in techniques if t in APPROVED_PROCEDURES and t in allowed_set]
+    if not approved_hits:
+        return (
+            "No hunt techniques are both allowlisted and in the approved procedure catalog "
+            f"(techniques={techniques!r}, allowlist={sorted(allowed_set)!r})."
+        )
+
+    linux_rules = 0
+    predicate_misses = 0
+    for rule in rules:
+        text = rule.get("rule_yaml", "")
+        try:
+            parsed = yaml.safe_load(text)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        source = parsed.get("logsource") or {}
+        if not isinstance(source, dict):
+            continue
+        category = source.get("category", "")
+        product = str(source.get("product") or "").lower()
+        if (
+            product and product not in ("linux", "container", "containers", "unix")
+        ) or category not in (
+            "process_creation",
+            "file_event",
+            "file_change",
+            "network_connection",
+        ):
+            continue
+        linux_rules += 1
+        tags = {str(t).lower() for t in parsed.get("tags") or []}
+        rule_techniques = {str(t).upper() for t in rule.get("techniques") or []}
+        rule_techniques.update(
+            t.removeprefix("attack.").upper() for t in tags if t.startswith("attack.t")
+        )
+        for technique in approved_hits:
+            if technique not in rule_techniques:
+                continue
+            procedure = APPROVED_PROCEDURES[technique]
+            if not _procedure_matches_rule(
+                procedure,
+                text,
+                (
+                    "/usr/sbin/php-fpm",
+                    "/usr/sbin/php-cgi",
+                    "/usr/sbin/apache2",
+                    "/usr/sbin/httpd",
+                    "/usr/sbin/nginx",
+                    "/usr/bin/python3",
+                    "/bin/bash",
+                    "/bin/sh",
+                    "/usr/sbin/cron",
+                    "/lib/systemd/systemd",
+                ),
+            ):
+                predicate_misses += 1
+
+    if linux_rules == 0:
+        return (
+            "No Linux process/file/network Sigma rules available for approved BAS "
+            f"(catalog techniques present: {approved_hits})."
+        )
+    if predicate_misses:
+        return (
+            "Approved procedures exist for this hunt, but none exercise the drafted "
+            f"Linux rule predicates (checked {predicate_misses} technique/rule pair(s); "
+            f"techniques={approved_hits})."
+        )
+    return "No approved procedure exercises this hunt's Linux rule predicates."

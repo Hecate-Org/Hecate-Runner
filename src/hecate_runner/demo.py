@@ -12,7 +12,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 from rich.panel import Panel
@@ -78,8 +78,9 @@ def run_demo(*, keep: bool = False, console: Console | None = None) -> tuple[int
         fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         fake_bin.chmod(0o755)
 
-        settings = Settings.model_validate(
-            {
+        settings = Settings(
+            _env_file=None,
+            **{
                 "hecate_workspace": ws,
                 "hecate_bin": fake_bin,
                 "cti_provider": "file",
@@ -90,11 +91,17 @@ def run_demo(*, keep: bool = False, console: Console | None = None) -> tuple[int
                 "sigma_review_enabled": False,
                 "purple_team_validation_enabled": False,
                 "github_publishing_enabled": False,
+                "misp_publishing_enabled": False,
                 "slack_webhook_url": None,
+                "slack_bot_token": None,
+                "bas_enabled": False,
+                "siem_deploy_enabled": False,
+                "auto_hunt_execution_enabled": False,
+                "query_provider": "mock",
                 "max_drafts_per_day": 10,
                 "max_research_runs_per_day": 10,
                 "min_hours_between_drafts": 0.0,
-            }
+            },
         )
 
         out.print(
@@ -204,7 +211,8 @@ def run_demo(*, keep: bool = False, console: Console | None = None) -> tuple[int
 
         provider = SingleItemProvider(item)
         orch = Orchestrator(settings=settings, hecate=mock_hecate, cti_provider=provider)
-        res = orch.run_once(dry_run=False)
+        with patch("hecate_agent.api.generate_enrichment_summary", return_value=""):
+            res = orch.run_once(dry_run=False)
 
         if not res.ok or not res.draft_path:
             out.print(f"[red]Demo failed:[/red] {res.detail}")

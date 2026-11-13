@@ -160,32 +160,6 @@ class SlackNotificationRouter:
                 data = resp.json()
                 if not data.get("ok"):
                     error_msg = str(data.get("error") or "Unknown Slack API error")
-                    if error_msg == "channel_not_found" and channel != "#all-hecate-hunt":
-                        log.info(
-                            "Channel %s not found in workspace; attempting fallback to #all-hecate-hunt",
-                            channel,
-                        )
-                        fallback_payload = dict(payload)
-                        fallback_payload["channel"] = "#all-hecate-hunt"
-                        try:
-                            fb_resp = (
-                                self._client.post(url, headers=headers, json=fallback_payload)
-                                if self._client is not None
-                                else httpx.post(
-                                    url, headers=headers, json=fallback_payload, timeout=10.0
-                                )
-                            )
-                            if fb_resp.is_success and fb_resp.json().get("ok"):
-                                log.info(
-                                    "Successfully delivered fallback notification to #all-hecate-hunt"
-                                )
-                                return (
-                                    True,
-                                    f"Channel {channel} not found; fallback delivered to #all-hecate-hunt.",
-                                )
-                        except Exception as fb_exc:
-                            log.debug("Fallback delivery to #all-hecate-hunt failed: %s", fb_exc)
-
                     log.warning(
                         "Slack API postMessage to %s failed: %s; payload text: %s",
                         channel,
@@ -264,20 +238,20 @@ def notify_hunt_completed(
     pr_url: str = "",
     misp_event_id: str = "",
 ) -> None:
-    """Post an executive summary of a fully validated and completed hunt."""
+    """Post hunt completion without implying deployment or detection validation."""
     router = SlackNotificationRouter(settings)
     if not router.is_configured:
         return
 
     tech_str = ", ".join(f"`{t}`" for t in techniques[:6]) or "Unspecified"
     pr_part = f"\n*Content PR:* <{pr_url}|View Pull Request>" if pr_url else ""
-    misp_part = f"\n*MISP Sync:* Event #{misp_event_id} published" if misp_event_id else ""
+    misp_part = f"\n*MISP Event:* Event #{misp_event_id}" if misp_event_id else ""
 
     text = (
-        f":shield: *Hunt Validated & Published: {hunt_id}*\n"
+        f":shield: *Hunt Completed: {hunt_id}*\n"
         f"*Topic:* {topic}\n"
         f"*Techniques Covered:* {tech_str}\n"
-        f"*Sigma Detection Rules:* {sigma_count} rules validated"
+        f"*Sigma Detection Rules:* {sigma_count} rules included"
         f"{pr_part}{misp_part}"
     )
 
@@ -288,6 +262,12 @@ def notify_hunt_completed(
         sigma_count=sigma_count,
         pr_url=pr_url,
         misp_event_id=misp_event_id,
+        misp_url=settings.misp_base_url or "",
+        content_repo_url=(
+            f"https://github.com/{settings.github_publishing_repository}"
+            if settings.github_publishing_repository
+            else ""
+        ),
         interactive=settings.slack_interactive_enabled,
     )
     router.post_message(settings.slack_channel_hunts_exec, text, attachments=attachments)
@@ -302,19 +282,20 @@ def notify_purple_team(
     telemetry_count: int,
     summary: str,
 ) -> None:
-    """Post purple-team adversary emulation validation outcomes."""
+    """Report synthetic rule replay; a match is not live detection validation."""
     router = SlackNotificationRouter(settings)
     if not router.is_configured:
         return
 
     status_icon = ":white_check_mark:" if success else ":warning:"
-    status_label = "Detection Validated" if success else "Telemetry / Coverage Gap"
+    status_label = "Synthetic Rule Match" if success else "No Synthetic Rule Match"
 
     text = (
-        f"{status_icon} *Purple Team Emulation Outcome: {hunt_id}*\n"
+        f"{status_icon} *Purple Team Synthetic Replay: {hunt_id}*\n"
         f"*Technique:* `{technique}`\n"
-        f"*Validation Status:* `{status_label}`\n"
-        f"*Observed Telemetry Logs:* {telemetry_count} events\n"
+        f"*Replay Status:* `{status_label}`\n"
+        f"*Synthetic Samples:* {telemetry_count} events\n"
+        "No commands executed; live detection remains unverified.\n"
         f"*Outcome:* {summary}"
     )
 

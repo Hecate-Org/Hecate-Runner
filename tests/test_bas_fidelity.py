@@ -163,8 +163,8 @@ def smoke_lab(tmp_path, monkeypatch):
     provider = Mock()
     provider.detonate.return_value = detonation
     monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
-    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args: sensor)
-    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args: sensor)
+    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: sensor)
+    monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args, **kwargs: sensor)
     monkeypatch.setattr("hecate_runner.bas.runtime.audit_container_tmpfs", lambda *args: [])
     settings = Settings(
         _env_file=None,
@@ -198,14 +198,18 @@ def test_pinned_smoke_procedure_cannot_be_upgraded_by_caller(smoke_lab):
     assert not confirms_technique(result.to_dict())
 
 
-def test_smoke_procedures_are_not_selected_to_validate_hunts(smoke_lab):
+def test_smoke_procedures_are_selected_only_when_no_behavioral_match(smoke_lab):
     _settings, procedure, _detonation = smoke_lab
     selection = select_approved_rule(
         [{"rule_yaml": SMOKE_RULE, "techniques": [procedure.technique_id]}],
         [procedure.technique_id],
         [procedure.technique_id],
     )
-    assert selection is None
+    # Smoke-only catalogs may be selected for lab exercise, but never validate.
+    assert selection is not None
+    selected, _ = selection
+    assert selected.fidelity_scope == "smoke_check"
+    assert selected.technique_id == procedure.technique_id
 
 
 def test_smoke_runtime_keeps_observation_but_awards_no_validation(smoke_lab):

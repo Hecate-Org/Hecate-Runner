@@ -285,12 +285,12 @@ def replay_events(
     http_requests: list[dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """``{logsource category: [event, ...]}`` from typed indicators, behaviour artifacts,
-    and dynamic Atomic Red Team adversary emulation.
+    and synthetic Atomic Red Team definitions.
 
     ``records`` are IndicatorRecord-shaped (value, type, role, status, ports);
     ``artifacts`` are SourceArtifact-shaped (value, kind, status).
     ``cti_text`` optionally provides raw source text for contextual cloud and identity telemetry.
-    ``techniques`` optionally provides ATT&CK technique IDs for dynamic Atomic Red Team emulation.
+    ``techniques`` optionally provides ATT&CK technique IDs for synthetic Atomic Red Team samples.
     """
     from hecate_agent.core.provenance import split_host_port, url_parts
 
@@ -339,7 +339,6 @@ def replay_events(
                     **({"cs-uri-query": query} if query else {}),
                     "c-uri": value,
                     **({"cs-host": host} if host else {}),
-                    "sc-status": "200",
                 },
             )
         elif rtype in _HASH_LABELS and getattr(record, "role", "") not in _NOT_A_FILE_HASH:
@@ -373,7 +372,6 @@ def replay_events(
                         "cs-uri-stem": path if path.startswith("/") else f"/{path}",
                         **({"cs-uri-query": query} if query else {}),
                         "c-uri": value,
-                        "sc-status": "200",
                     },
                 )
         elif kind in ("url", "uri_path", "url_path", "endpoint", "web_path"):
@@ -389,7 +387,6 @@ def replay_events(
                     "cs-uri-stem": path if path.startswith("/") else f"/{path}",
                     **({"cs-uri-query": query} if query else {}),
                     "c-uri": value,
-                    "sc-status": "200",
                 },
             )
             add("proxy", {"c-uri": value})
@@ -426,12 +423,6 @@ def replay_events(
             {
                 "eventSource": "sts.amazonaws.com",
                 "eventName": "AssumeRole",
-                "awsRegion": "us-east-1",
-                "requestParameters": "roleArn: arn:aws:iam::123456789012:role/FederatedDevOpsAdmin",
-                "userIdentity": {
-                    "type": "AssumedRole",
-                    "arn": "arn:aws:iam::123456789012:role/FederatedDevOpsAdmin",
-                },
             },
         )
         add(
@@ -439,7 +430,6 @@ def replay_events(
             {
                 "eventSource": "sts.amazonaws.com",
                 "eventName": "AssumeRoleWithWebIdentity",
-                "awsRegion": "us-east-1",
             },
         )
 
@@ -449,7 +439,6 @@ def replay_events(
             {
                 "eventSource": "s3.amazonaws.com",
                 "eventName": "ListObjects",
-                "requestParameters": "bucketName: corp-finance-archive",
             },
         )
 
@@ -465,97 +454,38 @@ def replay_events(
             "consent",
         )
     ):
-        add(
-            "cloud_audit",
-            {
-                "eventSource": "cloudformation.amazonaws.com",
-                "eventName": "CreateApplication",
-                "requestParameters": "Directory.ReadWrite.All",
-            },
+        scopes = " ".join(
+            scope
+            for scope in (
+                "Directory.ReadWrite.All",
+                "RoleManagement.ReadWrite.Directory",
+                "Mail.ReadWrite",
+            )
+            if scope.lower() in lowered_intel
         )
-        add(
-            "cloud_audit",
-            {
-                "eventSource": "cloudformation.amazonaws.com",
-                "eventName": "UpdateApplication",
-                "requestParameters": "RoleManagement.ReadWrite.Directory",
-            },
-        )
-        add(
-            "identity_audit",
-            {
-                "operationName": "Consent to application",
-                "result": "success",
-                "targetResources.displayName": "Core-CloudHealth-Monitor",
-                "targetResources.modifiedProperties.newValue": "Directory.ReadWrite.All RoleManagement.ReadWrite.Directory Mail.ReadWrite",
-            },
-        )
-        add(
-            "identity_audit",
-            {
-                "operationName": "Add service principal",
-                "result": "success",
-                "targetResources.displayName": "Core-CloudHealth-Monitor",
-                "targetResources.modifiedProperties.newValue": "Directory.ReadWrite.All",
-            },
-        )
-        add(
-            "identity_audit",
-            {
-                "operationName": "Add service principal credentials",
-                "result": "success",
-                "targetResources.displayName": "Core-CloudHealth-Monitor",
-            },
-        )
-        add(
-            "identity_audit",
-            {
-                "operationName": "Add app role assignment to service principal",
-                "result": "success",
-            },
-        )
+        if "consent" in lowered_intel:
+            add(
+                "identity_audit",
+                {
+                    "operationName": "Consent to application",
+                    **({"targetResources.modifiedProperties.newValue": scopes} if scopes else {}),
+                },
+            )
 
-    if any(
-        k in lowered_intel
-        for k in (
-            "docker",
-            "container",
-            "nsenter",
-            "k8s",
-            "kubernetes",
-            "pod",
-            "cluster-admin",
-            "hostpath",
-        )
+    # Only include container properties actually described by the source.
+    if any(k in lowered_intel for k in ("kubernetes", "k8s")) and any(
+        k in lowered_intel for k in ("deployed", "create pod", "created pod")
     ):
-        add(
-            "container_runtime",
-            {
-                "Image": "docker.io/library/ubuntu:latest",
-                "ContainerName": "scada-edge-worker",
-                "CommandLine": "nsenter /bin/bash",
-                "VolumeMount": "/dev:/dev",
-                "Privileged": "true",
-            },
-        )
         add(
             "kubernetes_audit",
             {
                 "verb": "create",
                 "resource": "pods",
-                "namespace": "kube-system",
-                "requestObject.spec.containers.securityContext.privileged": "true",
-                "requestObject.spec.volumes.hostPath.path": "/",
-                "userAgent": "kubectl/v1.28.0",
-            },
-        )
-        add(
-            "container_activity",
-            {
-                "Image": "docker.io/library/ubuntu:latest",
-                "ContainerName": "scada-edge-worker",
-                "CommandLine": "nsenter /bin/bash",
-                "Privileged": "true",
+                **(
+                    {"requestObject.spec.containers.securityContext.privileged": "true"}
+                    if "privileged" in lowered_intel
+                    else {}
+                ),
             },
         )
 
@@ -602,87 +532,16 @@ def replay_events(
         add(
             "webserver",
             {
-                "cs-method": "POST"
-                if any(
-                    w in ep.lower()
-                    for w in (
-                        "api",
-                        "upload",
-                        "audit",
-                        "login",
-                        "auth",
-                        "sqli",
-                        "create",
-                        "update",
-                        "ping",
-                        "cmd",
-                        "shell",
-                    )
-                )
-                or _posted(path, cti_text)
-                else "GET",
+                **({"cs-method": "POST"} if _posted(path, cti_text) else {}),
                 "cs-uri-stem": path,
                 **({"cs-uri-query": query} if query else {}),
                 "c-uri": ep,
-                "sc-status": "200",
             },
         )
         add("proxy", {"c-uri": ep})
 
-    # Synthesize web application server and execution telemetry
-    if any(
-        k in lowered_intel
-        for k in (
-            "php-fpm",
-            "php-cgi",
-            "apache",
-            "httpd",
-            "nginx",
-            "webshell",
-            "cve-2026",
-            "php2shell",
-            "remote code execution",
-            "rce",
-        )
-    ):
-        add(
-            "process_creation",
-            {
-                "ParentImage": "/usr/sbin/php-fpm",
-                "Image": "/bin/sh",
-                "CommandLine": "/bin/sh -c id",
-                "User": "www-data",
-            },
-        )
-        add(
-            "process_creation",
-            {
-                "ParentImage": "/usr/sbin/php-cgi",
-                "Image": "/bin/bash",
-                "CommandLine": "/bin/bash -c whoami",
-                "User": "www-data",
-            },
-        )
-        add(
-            "process_creation",
-            {
-                "ParentImage": "/usr/sbin/apache2",
-                "Image": "/bin/sh",
-                "CommandLine": "/bin/sh -i",
-                "User": "apache",
-            },
-        )
-
-    if any(k in lowered_intel for k in ("checker.py", "tooling/checker", "poc tooling")):
-        add(
-            "process_creation",
-            {
-                "Image": "/usr/bin/python3",
-                "CommandLine": "python3 tooling/checker/checker.py --authorized",
-                "ParentImage": "/bin/bash",
-                "User": "app",
-            },
-        )
+    # Process events must come from extracted artifacts or explicitly synthetic
+    # Atomic definitions. RCE alone does not establish a command or account.
 
     # Dynamic Adversary Emulation via Atomic Red Team
     if enable_atomic and techniques:

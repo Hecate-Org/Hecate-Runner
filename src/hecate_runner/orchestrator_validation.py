@@ -256,15 +256,29 @@ def run_bas_validation(
         elif not {p.strip().lower() for p in req.platforms} & {"linux"}:
             reason = "No approved lab platform for this hunt (Linux lab only)."
         else:
+            from hecate_runner.bas.approved import explain_approved_selection
+
             selection = select_approved_rule(
                 rules, req.hypothesis.techniques, orch.settings.bas_auto_techniques
             )
             if selection is None:
-                reason = "No approved procedure exercises this hunt's Linux rule predicates."
+                reason = explain_approved_selection(
+                    rules, req.hypothesis.techniques, orch.settings.bas_auto_techniques
+                )
         if reason:
-            if getattr(orch.settings, "bas_fallback_to_mock", False):
+            # Soft fallback whenever mock synthesis is enabled and there are rules
+            # to probe — independent of auto-execute. Live lab health fallback is
+            # handled separately inside CalderaConnector.
+            can_mock = bool(getattr(orch.settings, "bas_fallback_to_mock", False)) and bool(rules)
+            if can_mock:
                 log.info(
                     "Live BAS unavailable (%s); falling back to AST telemetry synthesis mock verification.",
+                    reason,
+                )
+                orch.trail.step(
+                    "bas",
+                    "fallback to mock for %s: %s",
+                    req.hunt_id,
                     reason,
                 )
                 provider_name = "mock"
@@ -281,8 +295,7 @@ def run_bas_validation(
                     result.get("rule_triggered", False),
                 )
                 return
-        else:
-            assert selection is not None
+        if selection is not None and provider_name != "mock":
             procedure, rule_yaml = selection
             req.bas_verification = run_approved_validation(
                 orch.settings, req.hunt_id, procedure, rule_yaml
@@ -457,23 +470,42 @@ def run_bas_validation(
         req.bas_rules_evaluated = len(rules)
         req.bas_rules_validated = validated_count
         req.bas_matched_events = total_matched if validated_count else 0
-        if simulated_count:
-            ver_dict["status"] = "simulation_match"
-            ver_dict["verification_scope"] = "synthetic_sigma_logic"
-            ver_dict["rule_triggered"] = True
-            ver_dict["matched_events_count"] = total_matched
+        is_simulation = (
+            provider_name == "mock"
+            or det_result.provider == "mock"
+            or bool((det_result.raw_details or {}).get("mock_fallback"))
+            or bool((det_result.raw_details or {}).get("mock_execution"))
+        )
+        if is_simulation:
+            ver_dict["provider"] = "mock"
+            ver_dict["backend"] = "mock"
+            ver_dict["mock_fallback"] = bool((det_result.raw_details or {}).get("mock_fallback"))
+            # Never credit synthetic probes as live true positives.
+            if validated_count or simulated_count or ver_dict.get("rule_triggered"):
+                ver_dict["status"] = "simulation_match"
+                ver_dict["verification_scope"] = "synthetic_sigma_logic"
+                ver_dict["rule_triggered"] = True
+                ver_dict["matched_events_count"] = total_matched
+            req.bas_rules_validated = 0
+            ver_dict["validated_rules_count"] = 0
+        else:
+            if simulated_count:
+                ver_dict["status"] = "simulation_match"
+                ver_dict["verification_scope"] = "synthetic_sigma_logic"
+                ver_dict["rule_triggered"] = True
+                ver_dict["matched_events_count"] = total_matched
+            if validated_count > 0:
+                ver_dict["status"] = "verified_true_positive"
+                ver_dict["rule_triggered"] = True
+                ver_dict["telemetry_arrived"] = True
+                ver_dict["matched_events_count"] = total_matched
+                if not getattr(req, "purple_team_rules_evaluated", 0):
+                    req.purple_team_rules_evaluated = len(rules)
+                req.purple_team_rules_validated = validated_count
+                req.bas_rules_evaluated = len(rules)
+                req.bas_rules_validated = validated_count
+                req.bas_matched_events = total_matched
         ver_dict["total_rules_evaluated"] = len(rules)
-        if validated_count > 0:
-            ver_dict["status"] = "verified_true_positive"
-            ver_dict["rule_triggered"] = True
-            ver_dict["telemetry_arrived"] = True
-            ver_dict["matched_events_count"] = total_matched
-            if not getattr(req, "purple_team_rules_evaluated", 0):
-                req.purple_team_rules_evaluated = len(rules)
-            req.purple_team_rules_validated = validated_count
-            req.bas_rules_evaluated = len(rules)
-            req.bas_rules_validated = validated_count
-            req.bas_matched_events = total_matched
 
         req.bas_verification = ver_dict
 

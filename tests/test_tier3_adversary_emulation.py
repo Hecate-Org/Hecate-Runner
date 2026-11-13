@@ -115,7 +115,9 @@ def test_orchestrator_purple_team_atomic_flow(tmp_path: Path) -> None:
     )
 
     orch = Orchestrator(
-        settings=Settings(hecate_workspace=tmp_path, purple_team_atomic_emulation=True),
+        settings=Settings(
+            _env_file=None, hecate_workspace=tmp_path, purple_team_atomic_emulation=True
+        ),
         hecate=MagicMock(),
         cti_provider=MagicMock(),
     )

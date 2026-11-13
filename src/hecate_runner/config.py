@@ -354,6 +354,26 @@ class Settings(BaseSettings):
         alias="HECATE_BAS_SENSOR_CONTAINER",
         description="Isolated Docker lab agent running the execve process sensor.",
     )
+    bas_lab_network: str = Field(
+        default="hecate-bas-lab",
+        alias="HECATE_BAS_LAB_NETWORK",
+        description="Docker network name the BAS agent and Caldera controller must share.",
+    )
+    bas_lab_paw: str = Field(
+        default="hecate-local-sandbox",
+        alias="HECATE_BAS_LAB_PAW",
+        description="CALDERA agent paw (identity) expected on the lab sensor container.",
+    )
+    bas_agent_server_url: str = Field(
+        default="http://caldera:8888",
+        alias="HECATE_BAS_AGENT_SERVER_URL",
+        description="CALDERA URL the sandcat agent is started with inside the lab network.",
+    )
+    bas_caldera_container: str = Field(
+        default="caldera",
+        alias="HECATE_BAS_CALDERA_CONTAINER",
+        description="Docker container name of the local CALDERA controller.",
+    )
     bas_mode: Literal["mock", "caldera", "stratus", "local_sandbox", "live_lab"] = Field(
         default="mock",
         alias="HECATE_BAS_MODE",
@@ -392,7 +412,11 @@ class Settings(BaseSettings):
     bas_fallback_to_mock: bool = Field(
         default=False,
         alias="HECATE_BAS_FALLBACK_TO_MOCK",
-        description="Fall back to mock provider if no active agent exists for target platform.",
+        description=(
+            "Soft-fall back to mock synthesis when live BAS cannot run (no approved "
+            "procedure/platform, Caldera unreachable, or no agent). Never blocks live "
+            "approved automation when the lab is healthy."
+        ),
     )
     bas_linux_host: str = Field(
         default="",
@@ -879,7 +903,7 @@ class Settings(BaseSettings):
     github_publishing_enabled: bool = Field(
         default=False,
         alias="HECATE_RUNNER_GITHUB_PUBLISHING_ENABLED",
-        description="Publish completed planning hunts as isolated pull requests to Hecate-Content.",
+        description="Publish completed planning hunts as isolated pull requests to the configured repository.",
     )
     github_app_id: str | None = Field(
         default=None,
@@ -902,9 +926,9 @@ class Settings(BaseSettings):
         description="Mounted PEM file for the publishing GitHub App; never store the key in .env.",
     )
     github_publishing_repository: str = Field(
-        default="BrizoSec/Hecate-Content",
+        default="",
         alias="HECATE_RUNNER_GITHUB_PUBLISHING_REPOSITORY",
-        description="Owner/repository for generated hunt pull requests.",
+        description="Required explicit owner/repository for generated hunt pull requests.",
     )
     github_publishing_base_branch: str = Field(
         default="main",

@@ -79,7 +79,11 @@ detection:
         "logsource:\n  category: process_creation\n"
         "detection:\n  selection:\n    Image|endswith: test.exe\n  condition: selection\n"
     )
-    return Settings(_env_file=None, hecate_workspace=workspace)  # type: ignore[call-arg]
+    return Settings(
+        _env_file=None,
+        hecate_workspace=workspace,
+        github_publishing_repository="example/Hecate-Public",
+    )  # type: ignore[call-arg]
 
 
 def test_review_classified_hunt_is_never_snapshotted_for_auto_merge(tmp_path: Path) -> None:

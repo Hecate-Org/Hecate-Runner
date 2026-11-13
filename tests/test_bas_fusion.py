@@ -321,7 +321,9 @@ def test_run_approved_validation_with_lab_fusion(tmp_path: Path, monkeypatch: py
             "UtcTime": "2026-10-31T04:00:02Z",
         },
     ]
-    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args: fake_sensor)
+    monkeypatch.setattr(
+        "hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: fake_sensor
+    )
 
     provider = MagicMock()
     provider.detonate.return_value = DetonationResult(
@@ -441,4 +443,3 @@ def test_fuse_distinct_network_connections_not_collapsed():
     assert len(fused) == 2
     ips = {e["DestinationIp"] for e in fused}
     assert ips == {"1.1.1.1", "8.8.8.8"}
-

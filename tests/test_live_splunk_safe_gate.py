@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import ssl
-import urllib.request
+import os
 from pathlib import Path
 
 import pytest
@@ -12,26 +11,24 @@ from hecate_runner.config import Settings
 from hecate_runner.execution.safe_gate import SafeExecutionGate
 from hecate_runner.query_execution import ProposedQuery, get_provider
 
-
-def _is_live_splunk_running() -> bool:
-    try:
-        ctx = ssl._create_unverified_context()
-        req = urllib.request.Request("https://localhost:8089/services/server/info")
-        with urllib.request.urlopen(req, context=ctx, timeout=2.0) as resp:
-            return resp.status in (200, 401)
-    except urllib.error.HTTPError as exc:
-        return exc.code in (200, 401)
-    except Exception:
-        return False
+pytestmark = pytest.mark.network
 
 
-@pytest.mark.skipif(
-    not _is_live_splunk_running(),
-    reason="Live Splunk instance not running on localhost:8089",
-)
+@pytest.fixture(autouse=True)
+def _explicit_live_splunk_configuration(monkeypatch):
+    # Deliberately separate test credentials from the operator's selected workspace.
+    required = ("HECATE_TEST_LIVE_WORKSPACE", "HECATE_TEST_SPLUNK_URL", "HECATE_TEST_SPLUNK_TOKEN")
+    if not all(os.getenv(name) for name in required):
+        pytest.skip(
+            "Set HECATE_TEST_LIVE_WORKSPACE, HECATE_TEST_SPLUNK_URL and HECATE_TEST_SPLUNK_TOKEN"
+        )
+    monkeypatch.setenv("SPLUNK_HOST", os.environ["HECATE_TEST_SPLUNK_URL"])
+    monkeypatch.setenv("SPLUNK_TOKEN", os.environ["HECATE_TEST_SPLUNK_TOKEN"])
+
+
 def test_live_splunk_clean_query() -> None:
-    live_ws = Path("/home/chemch/betas/Hecate-Public")
-    settings = Settings(hecate_workspace=live_ws)
+    live_ws = Path(os.environ["HECATE_TEST_LIVE_WORKSPACE"])
+    settings = Settings(_env_file=None, hecate_workspace=live_ws)
     provider = get_provider(
         "splunk",
         hecate_bin=settings.hecate_bin_resolved,
@@ -51,13 +48,9 @@ def test_live_splunk_clean_query() -> None:
     assert result.matched_count == 0
 
 
-@pytest.mark.skipif(
-    not _is_live_splunk_running(),
-    reason="Live Splunk instance not running on localhost:8089",
-)
 def test_live_splunk_hits_detected_query() -> None:
-    live_ws = Path("/home/chemch/betas/Hecate-Public")
-    settings = Settings(hecate_workspace=live_ws)
+    live_ws = Path(os.environ["HECATE_TEST_LIVE_WORKSPACE"])
+    settings = Settings(_env_file=None, hecate_workspace=live_ws)
     provider = get_provider(
         "splunk",
         hecate_bin=settings.hecate_bin_resolved,
@@ -78,13 +71,9 @@ def test_live_splunk_hits_detected_query() -> None:
     assert len(result.events) == 3
 
 
-@pytest.mark.skipif(
-    not _is_live_splunk_running(),
-    reason="Live Splunk instance not running on localhost:8089",
-)
 def test_live_splunk_overmatch_protection() -> None:
-    live_ws = Path("/home/chemch/betas/Hecate-Public")
-    settings = Settings(hecate_workspace=live_ws)
+    live_ws = Path(os.environ["HECATE_TEST_LIVE_WORKSPACE"])
+    settings = Settings(_env_file=None, hecate_workspace=live_ws)
     provider = get_provider(
         "splunk",
         hecate_bin=settings.hecate_bin_resolved,

@@ -40,6 +40,7 @@ class SiemAlertVerificationResult:
     query_used: str
     search_job_id: str = ""
     siem_alert_fired: bool = False
+    cleanup_success: bool = False
     query_match_latency_sec: float | None = None
     fidelity_scope: str = "behavioral"
     verification_scope: str = "siem_query"
@@ -502,6 +503,7 @@ class SiemAlertVerifier:
             status=status,
             rule_triggered=status in {"verified_true_positive", "query_match", "smoke_check_match"},
             siem_alert_fired=proof is not None,
+            cleanup_success=detonation.cleanup_success,
             query_match_latency_sec=query_latency_sec,
             verification_scope="smoke_check"
             if fidelity_scope != "behavioral"

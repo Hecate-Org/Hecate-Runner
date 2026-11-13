@@ -489,12 +489,16 @@ class LabProcessSensor:
         container: str,
         host: str,
         approved_images: set[str] | None = None,
+        profile: Any | None = None,
     ):
+        from hecate_runner.bas.lab_profile import BasLabProfile
+
         self.container = container
         self.host = host
         self.container_id = ""
         self.agent_image = ""
         self.controller_image = ""
+        self.profile = profile if isinstance(profile, BasLabProfile) else BasLabProfile()
         self.approved_images = (
             approved_images if approved_images is not None else APPROVED_AGENT_IMAGES
         )
@@ -533,15 +537,7 @@ class LabProcessSensor:
             or config.get("Hostname") != self.host
             or config.get("User") != "65534:65534"
             or tuple(config.get("Entrypoint") or []) not in APPROVED_SENSOR_ENTRYPOINTS
-            or config.get("Cmd")
-            != [
-                "-server",
-                "http://caldera:8888",
-                "-group",
-                "hecate-local-lab",
-                "-paw",
-                "hecate-local-sandbox",
-            ]
+            or config.get("Cmd") != self.profile.sandcat_cmd()
             or not host.get("ReadonlyRootfs")
             or host.get("Privileged")
             or "ALL" not in (host.get("CapDrop") or [])
@@ -552,7 +548,7 @@ class LabProcessSensor:
             or host.get("PidMode") == "host"
             or host.get("IpcMode") == "host"
             or host.get("PortBindings")
-            or set(networks) != {"hecate-bas-lab"}
+            or set(networks) != {self.profile.network}
             or host.get("PidsLimit", 0) not in range(1, 129)
             or host.get("Memory", 0) not in range(1, 268435457)
             or host.get("NanoCpus", 0) not in range(1, 500000001)
@@ -560,13 +556,13 @@ class LabProcessSensor:
             or not limits_ok
         ):
             raise SafetyViolationError("BAS lab isolation or process sensor preflight failed.")
-        network = json.loads(self._docker("network", "inspect", "hecate-bas-lab"))[0]
+        network = json.loads(self._docker("network", "inspect", self.profile.network))[0]
         if not network.get("Internal"):
             raise SafetyViolationError("BAS lab network must be internal.")
         from hecate_runner.bas.controller import validate_controller
 
-        caldera_data = json.loads(self._docker("inspect", "caldera"))[0]
-        validate_controller(caldera_data)
+        caldera_data = json.loads(self._docker("inspect", self.profile.controller_container))[0]
+        validate_controller(caldera_data, lab_network=self.profile.network)
         self.controller_image = caldera_data.get("Image", "")
         self.container_id = container["Id"]
         # Readiness: the tracer must have observed the agent's initial exec.

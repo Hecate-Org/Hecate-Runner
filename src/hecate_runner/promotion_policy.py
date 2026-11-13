@@ -188,6 +188,16 @@ def evaluate_promotion(
             f"live adversary emulation verification failed ({status_note})",
         )
 
+    from hecate_runner.publish_check import evaluate_saved_hunt
+
+    pub_report = evaluate_saved_hunt(workspace, hunt_id, text)
+    if pub_report.blocking():
+        for b in pub_report.blocking():
+            apply(
+                str(risk.get("publish_check_failed", "review")),
+                f"publish check blocking finding: {b.target or b.check} ({b.message})",
+            )
+
     tlp_text = "\n".join(
         (text if policy["target_visibility"] == "public" else facts.cti_text, research)
     )

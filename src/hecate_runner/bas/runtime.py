@@ -101,21 +101,29 @@ def run_approved_validation(
     try:
         with lab_lease.acquire(hunt_id=hunt_id, timeout_sec=180) as lease_info:
             record["lease_id"] = lease_info["lease_id"]
+            # bas_fallback_to_mock is intentionally NOT a live deny: it only
+            # soft-falls back when Caldera/agents are unreachable (see CalderaConnector).
             if (
                 settings.bas_mode != "caldera"
                 or settings.bas_telemetry not in {"lab_process", "lab_fusion"}
-                or settings.bas_fallback_to_mock
                 or not settings.bas_linux_host
                 or settings.bas_linux_host not in settings.bas_allowed_hosts
                 or procedure.technique_id not in settings.bas_auto_techniques
                 or APPROVED_PROCEDURES.get(procedure.technique_id) != procedure
                 or urlparse(settings.caldera_url).hostname not in {"localhost", "127.0.0.1", "::1"}
-                or settings.caldera_agent_group != "hecate-local-lab"
+                or not str(settings.caldera_agent_group or "").strip()
             ):
                 raise SafetyViolationError(
                     "Approved automation requires CALDERA, an allowlisted Linux lab, and its process sensor."
                 )
-            sensor = LabProcessSensor(settings.bas_sensor_container, settings.bas_linux_host)
+            from hecate_runner.bas.lab_profile import lab_profile_from_settings
+
+            profile = lab_profile_from_settings(settings)
+            sensor = LabProcessSensor(
+                settings.bas_sensor_container,
+                settings.bas_linux_host,
+                profile=profile,
+            )
             sensor.preflight()
             record["agent_image"] = getattr(sensor, "agent_image", "")
             record["controller_image"] = getattr(sensor, "controller_image", "")

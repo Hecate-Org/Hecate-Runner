@@ -129,7 +129,11 @@ publisher_login: hecate-publisher[bot]
         'any where process.name == "test.exe"', encoding="utf-8"
     )
 
-    settings = Settings(hecate_workspace=workspace)
+    settings = Settings(
+        _env_file=None,
+        hecate_workspace=workspace,
+        github_publishing_repository="example/Hecate-Public",
+    )
     bundle_files, _ = _snapshot_bundle(settings, "H-9999")
 
     assert "hunts/2026/Q4/H-9999.md" in bundle_files

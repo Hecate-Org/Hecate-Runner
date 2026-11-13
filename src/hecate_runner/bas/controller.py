@@ -22,7 +22,12 @@ CONTROLLER_STATE_PATHS = {
 }
 
 
-def validate_controller(container: dict[str, Any], approved_images: set[str] | None = None) -> None:
+def validate_controller(
+    container: dict[str, Any],
+    approved_images: set[str] | None = None,
+    *,
+    lab_network: str = "hecate-bas-lab",
+) -> None:
     """Fail closed if the local controller loses its reviewed runtime profile."""
     valid_images = approved_images if approved_images is not None else APPROVED_CONTROLLER_IMAGES
     image_id = container.get("Image", "")
@@ -34,6 +39,7 @@ def validate_controller(container: dict[str, Any], approved_images: set[str] | N
     host = container.get("HostConfig") or {}
     mounts = container.get("Mounts") or []
     bindings = host.get("PortBindings") or {}
+    expected_networks = {"bridge", lab_network}
     if (
         not container.get("State", {}).get("Running")
         or config.get("User") != CONTROLLER_USER
@@ -51,8 +57,7 @@ def validate_controller(container: dict[str, Any], approved_images: set[str] | N
         or host.get("PidsLimit", 0) not in range(1, 129)
         or set(bindings) != {"8888/tcp"}
         or bindings.get("8888/tcp") != [{"HostIp": "127.0.0.1", "HostPort": "8888"}]
-        or set(container.get("NetworkSettings", {}).get("Networks", {}))
-        != {"bridge", "hecate-bas-lab"}
+        or set(container.get("NetworkSettings", {}).get("Networks", {})) != expected_networks
         or any(m.get("Type") != "volume" for m in mounts)
         or {m.get("Destination") for m in mounts} != set(CONTROLLER_STATE_PATHS.values())
     ):

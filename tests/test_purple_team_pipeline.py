@@ -139,7 +139,9 @@ def test_tuning_never_fits_a_rule_to_events_it_missed() -> None:
 
 def _orchestrator(tmp_path: Path) -> Orchestrator:
     orch = Orchestrator(
-        settings=Settings(hecate_workspace=tmp_path), hecate=MagicMock(), cti_provider=MagicMock()
+        settings=Settings(_env_file=None, hecate_workspace=tmp_path),
+        hecate=MagicMock(),
+        cti_provider=MagicMock(),
     )
     orch.trail = MagicMock()
     orch.trail.elapsed = 1.0
@@ -303,6 +305,30 @@ detection:
     assert entra_outcome.false_positives == 0
 
 
+def test_replay_does_not_invent_enterprise_identity_or_execution_details():
+    events = replay_events(
+        [],
+        [],
+        cti_text="AssumeRole, aws s3 sync, OAuth consent and RCE in Kubernetes",
+        enable_atomic=False,
+    )
+    rendered = str(events)
+    for invented in (
+        "123456789012",
+        "FederatedDevOpsAdmin",
+        "corp-finance-archive",
+        "Core-CloudHealth-Monitor",
+        "scada-edge-worker",
+        "kubectl/v1.28.0",
+        "www-data",
+        "us-east-1",
+        "Directory.ReadWrite.All",
+    ):
+        assert invented not in rendered
+    assert "process_creation" not in events
+    assert "cloudformation.amazonaws.com" not in rendered
+
+
 def test_replay_events_synthesises_tls_fingerprints() -> None:
     records = [
         IndicatorRecord(
@@ -348,7 +374,7 @@ def test_replay_events_synthesises_kubernetes_audit() -> None:
     assert "kubernetes_audit" in events
     k8s_events = events["kubernetes_audit"]
     assert any(e.get("resource") == "pods" for e in k8s_events)
-    assert any(e.get("userAgent") == "kubectl/v1.28.0" for e in k8s_events)
+    assert all("userAgent" not in e and "namespace" not in e for e in k8s_events)
 
     k8s_rule = """title: Privileged Pod Creation in Kubernetes
 logsource:
@@ -415,7 +441,9 @@ def test_a_path_the_source_shows_posted_replays_as_a_post() -> None:
 
 def test_get_benign_sample_for_rule_partitions() -> None:
     linux_rule = "title: Linux Process\nlogsource:\n  category: process_creation\n  product: linux"
-    windows_rule = "title: Windows Process\nlogsource:\n  category: process_creation\n  product: windows"
+    windows_rule = (
+        "title: Windows Process\nlogsource:\n  category: process_creation\n  product: windows"
+    )
     web_rule = "title: Web Request\nlogsource:\n  category: webserver"
     cloud_rule = "title: Cloud Trail\nlogsource:\n  product: aws\n  service: cloudtrail"
     k8s_rule = "title: K8s Container\nlogsource:\n  product: kubernetes"

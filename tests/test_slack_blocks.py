@@ -58,6 +58,7 @@ def test_build_hunt_completed_card() -> None:
         sigma_count=11,
         pr_url="https://github.com/BrizoSec/Hecate-Content/pull/31",
         misp_event_id="140",
+        misp_url="https://misp.example.test",
     )
     assert len(cards) == 1
     assert cards[0]["color"] == COLOR_SUCCESS
@@ -71,7 +72,7 @@ def test_build_hunt_completed_card() -> None:
     assert action_block is not None
     button_urls = [btn["url"] for btn in action_block["elements"]]
     assert "https://github.com/BrizoSec/Hecate-Content/pull/31" in button_urls
-    assert "https://localhost:8443/events/view/140" in button_urls
+    assert "https://misp.example.test/events/view/140" in button_urls
 
 
 def test_build_hunt_completed_card_clips_long_text() -> None:
@@ -90,6 +91,31 @@ def test_build_hunt_completed_card_clips_long_text() -> None:
     assert "[clipped]" in topic_block["text"]["text"]
 
 
+def test_completion_and_replay_do_not_invent_destinations_or_live_validation():
+    completed = build_hunt_completed_card(
+        hunt_id="H-0001",
+        topic="Example",
+        techniques=[],
+        sigma_count=1,
+        misp_event_id="1",
+    )
+    assert not any(b["type"] == "actions" for b in completed[0]["blocks"])
+    assert "Published" not in str(completed)
+    replay = str(
+        build_purple_team_card(
+            hunt_id="H-0001",
+            technique="T1033",
+            success=True,
+            telemetry_count=2,
+            summary="Example",
+        )
+    )
+    assert "Synthetic Rule Match" in replay
+    assert "live detection remains unverified" in replay
+    assert "Windows Event Log" not in replay
+    assert "events captured" not in replay
+
+
 def test_build_purple_team_card() -> None:
     # Success card
     cards_success = build_purple_team_card(
@@ -101,7 +127,7 @@ def test_build_purple_team_card() -> None:
         log_source="Zeek / Bro HTTP",
     )
     assert cards_success[0]["color"] == COLOR_SUCCESS
-    assert "Detection Rule Verified" in cards_success[0]["blocks"][1]["fields"][1]["text"]
+    assert "Synthetic Rule Match" in cards_success[0]["blocks"][1]["fields"][1]["text"]
 
     # Telemetry gap card
     cards_gap = build_purple_team_card(
@@ -112,7 +138,7 @@ def test_build_purple_team_card() -> None:
         summary="No PowerShell ScriptBlock logs found",
     )
     assert cards_gap[0]["color"] == COLOR_WARNING
-    assert "Telemetry / Coverage Gap" in cards_gap[0]["blocks"][1]["fields"][1]["text"]
+    assert "No Synthetic Rule Match" in cards_gap[0]["blocks"][1]["fields"][1]["text"]
 
 
 def test_build_threat_intake_card() -> None:

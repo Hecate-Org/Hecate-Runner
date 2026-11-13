@@ -316,7 +316,7 @@ def test_notify_hunt_completed_and_purple_team(
     assert "Event #139" in captured_posts[0][1]
 
     assert captured_posts[1][0] == settings.slack_channel_purple_team
-    assert "Detection Validated" in captured_posts[1][1]
+    assert "Synthetic Rule Match" in captured_posts[1][1]
     assert "42 events" in captured_posts[1][1]
 
 

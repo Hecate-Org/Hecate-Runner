@@ -369,28 +369,28 @@ def build_hunt_completed_card(
     sigma_count: int,
     pr_url: str = "",
     misp_event_id: str = "",
-    misp_url: str = "https://localhost:8443",
-    content_repo_url: str = "https://github.com/BrizoSec/Hecate-Content",
+    misp_url: str = "",
+    content_repo_url: str = "",
     interactive: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build an executive completion card for a validated hunt."""
+    """Build a completion card using only explicitly supplied destinations."""
     tech_formatted = ", ".join(f"`{t}`" for t in techniques[:6]) or "Unspecified"
     if len(techniques) > 6:
         tech_formatted += f" _(+{len(techniques) - 6} more)_"
 
     misp_text = (
         f"<{misp_url}/events/view/{misp_event_id}|Event #{misp_event_id}>"
-        if misp_event_id
-        else "Local sync pending"
+        if misp_event_id and misp_url
+        else (f"Event #{misp_event_id}" if misp_event_id else "No event reported")
     )
-    pr_text = f"<{pr_url}|PR Active>" if pr_url else "Direct commit to workspace"
+    pr_text = f"<{pr_url}|View PR>" if pr_url else "No PR reported"
 
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"🛡️ Hunt Validated & Published: {hunt_id}",
+                "text": f"🛡️ Hunt Completed: {hunt_id}",
                 "emoji": True,
             },
         },
@@ -410,7 +410,7 @@ def build_hunt_completed_card(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Sigma Detection Rules:*\n`{sigma_count} rules validated`",
+                    "text": f"*Sigma Detection Rules:*\n`{sigma_count} rules included`",
                 },
                 {
                     "type": "mrkdwn",
@@ -435,7 +435,7 @@ def build_hunt_completed_card(
                 "style": "primary",
             }
         )
-    if misp_event_id:
+    if misp_event_id and misp_url:
         action_elements.append(
             {
                 "type": "button",
@@ -521,20 +521,20 @@ def build_purple_team_card(
     success: bool,
     telemetry_count: int,
     summary: str,
-    log_source: str = "Windows Event Log / Zeek",
-    emulation_mode: str = "Atomic Red Team (Dynamic)",
+    log_source: str = "Synthetic event samples",
+    emulation_mode: str = "Synthetic replay (no execution)",
 ) -> list[dict[str, Any]]:
-    """Build a purple-team emulation validation card."""
+    """Build a synthetic replay card without claiming live validation."""
     color = COLOR_SUCCESS if success else COLOR_WARNING
     status_icon = "✅" if success else "⚠️"
-    status_title = "Detection Rule Verified" if success else "Telemetry / Coverage Gap"
+    status_title = "Synthetic Rule Match" if success else "No Synthetic Rule Match"
 
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"{status_icon} Purple Team Outcome: {technique} ({hunt_id})",
+                "text": f"{status_icon} Purple Team Synthetic Replay: {technique} ({hunt_id})",
                 "emoji": True,
             },
         },
@@ -547,11 +547,11 @@ def build_purple_team_card(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Validation Outcome:*\n*{status_title}*",
+                    "text": f"*Replay Outcome:*\n*{status_title}*",
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Observed Telemetry Logs:*\n`{telemetry_count} events captured`",
+                    "text": f"*Synthetic Samples:*\n`{telemetry_count} events`",
                 },
                 {
                     "type": "mrkdwn",
@@ -559,7 +559,7 @@ def build_purple_team_card(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Adversary Emulation:*\n`{emulation_mode}`",
+                    "text": f"*Replay Mode:*\n`{emulation_mode}`",
                 },
             ],
         },
@@ -575,7 +575,7 @@ def build_purple_team_card(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "⚔️ *Purple Team Validation Pipeline* | Correlated with generated Sigma rules",
+                    "text": "Synthetic Sigma replay only. No commands executed; live detection remains unverified.",
                 }
             ],
         },
