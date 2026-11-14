@@ -129,10 +129,15 @@ tags:
     updated = hunt_file.read_text(encoding="utf-8")
 
     # Frontmatter cleaned
-    assert 'title: Adversaries use public PoC exploit' in updated or 'title: "Adversaries use public PoC exploit"' in updated
+    assert (
+        "title: Adversaries use public PoC exploit" in updated
+        or 'title: "Adversaries use public PoC exploit"' in updated
+    )
     assert "status: active" in updated
     assert "hunter: hecate-runner orchestrator" in updated
     assert "reviewer: lead_analyst" in updated
+    assert "review_decision: approved" in updated
+    assert "reviewed_by: lead_analyst" in updated
     assert "requires-human-review" not in updated
 
     # Body cleaned
@@ -143,4 +148,3 @@ tags:
     assert "[Human to populate]" not in updated
     assert "**Reviewed:**" in updated
     assert "lead_analyst (approved for active hunting)" in updated
-

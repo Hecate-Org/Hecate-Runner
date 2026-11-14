@@ -222,15 +222,20 @@ def set_hunt_lifecycle(
 
         tags = fm.get("tags")
         if isinstance(tags, list):
-            new_tags = [
-                t for t in tags if str(t).lower() not in ("draft", "requires-human-review")
-            ]
+            new_tags = [t for t in tags if str(t).lower() not in ("draft", "requires-human-review")]
             if "active" not in [str(t).lower() for t in new_tags]:
                 new_tags.append("active")
             fm["tags"] = new_tags
 
         if not fm.get("reviewer"):
             fm["reviewer"] = actor
+        fm["review_decision"] = "approved"
+        if not fm.get("reviewed_by"):
+            fm["reviewed_by"] = actor
+        if not fm.get("reviewed_at"):
+            fm["reviewed_at"] = now_iso
+        if reason and not fm.get("review_reason"):
+            fm["review_reason"] = reason
 
         # Clean up draft indicators and boilerplate from markdown body
         # 1. Remove draft warning callout block
