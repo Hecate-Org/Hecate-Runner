@@ -11,6 +11,25 @@ permissions:
   contents: read
 
 jobs:
+  required:
+    name: CI required
+    if: ${{ always() }}
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          results = json.loads(os.environ["RESULTS"])
+          failed = [name for name, job in results.items() if job["result"] != "success"]
+          if failed:
+              raise SystemExit("Required CI jobs did not pass: " + ", ".join(failed))
+          PY
+
   test:
     runs-on: ubuntu-latest
     strategy:
