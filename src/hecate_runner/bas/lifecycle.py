@@ -262,26 +262,50 @@ def reset_lab(
             "status": "failed",
         }
         try:
-            proc = subprocess.run(
-                ["docker", "top", container_name, "-eo", "args"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-            )
+            try:
+                proc = subprocess.run(
+                    ["docker", "top", container_name, "-eo", "args"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                proc = subprocess.run(
+                    ["docker", "top", container_name, "-eo", "pid,args"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                )
             if proc.returncode != 0:
                 raise SafetyViolationError("Container process inspection failed.")
             lines = proc.stdout.strip().splitlines()
-            if len(lines) < 2 or lines[0].strip() not in {"COMMAND", "CMD"}:
+            if len(lines) < 2:
+                raise SafetyViolationError(
+                    "Container process inspection returned no usable process list."
+                )
+            header_tokens = lines[0].strip().split()
+            if lines[0].strip() in {"COMMAND", "CMD"}:
+                cmds = [line.strip() for line in lines[1:] if line.strip()]
+            elif header_tokens and header_tokens[0] == "PID" and any(
+                h in {"COMMAND", "CMD", "ARGS"} for h in header_tokens[1:]
+            ):
+                cmds = [
+                    line.split(None, 1)[1].strip()
+                    for line in lines[1:]
+                    if line.strip() and len(line.split(None, 1)) > 1
+                ]
+            else:
                 raise SafetyViolationError(
                     "Container process inspection returned no usable process list."
                 )
             record["docker_available"] = True
             allowed = {"/usr/bin/strace", "/usr/local/bin/sandcat"}
             lingering = [
-                line.strip()
-                for line in lines[1:]
-                if not line.strip() or line.split()[0] not in allowed
+                cmd
+                for cmd in cmds
+                if not cmd or cmd.split()[0] not in allowed
             ]
             record["lingering_processes_found"] = lingering
             if lingering:

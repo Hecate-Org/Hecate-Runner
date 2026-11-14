@@ -21,6 +21,7 @@ from hecate_runner.bas.base import DetonationResult, SafetyViolationError
 TRACE_PATH = "/tmp/hecate-exec.trace"
 APPROVED_AGENT_IMAGES = {
     "sha256:63dbe5e24c5b8b852ddf0680032488291363c23b5b4fa975445ea0f41a909fbd",
+    "sha256:c3a83f3cbe4037f00f338cf97d3a4bcc6477e8ef08b4ff24ec000a50d15c3d95",
 }
 SENSOR_ENTRYPOINT = [
     "/usr/bin/strace",
