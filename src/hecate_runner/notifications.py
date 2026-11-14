@@ -155,7 +155,11 @@ class SlackNotificationRouter:
                 if self._client is not None:
                     resp = self._client.post(url, headers=headers, json=payload)
                 else:
-                    resp = httpx.post(url, headers=headers, json=payload, timeout=10.0)
+                    from hecate_runner.http_pool import get_shared_client
+
+                    resp = get_shared_client(pool_name="slack", timeout=10.0).post(
+                        url, headers=headers, json=payload, timeout=10.0
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 if not data.get("ok"):
@@ -184,7 +188,11 @@ class SlackNotificationRouter:
                 if self._client is not None:
                     resp = self._client.post(self.settings.slack_webhook_url, json=payload)
                 else:
-                    resp = httpx.post(self.settings.slack_webhook_url, json=payload, timeout=10.0)
+                    from hecate_runner.http_pool import get_shared_client
+
+                    resp = get_shared_client(pool_name="slack", timeout=10.0).post(
+                        self.settings.slack_webhook_url, json=payload, timeout=10.0
+                    )
                 resp.raise_for_status()
                 return True, "Notification sent successfully."
             except Exception as exc:

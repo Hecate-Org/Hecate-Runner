@@ -344,12 +344,19 @@ class _HTTPQueryProvider(QueryProvider):
                 raise _QueryError("; ".join(errors))
             env = self._environment()
             endpoint, body, headers, params = self._request(query, env)
-            with httpx.Client(timeout=self.timeout_sec) as client:
-                response = client.post(endpoint, json=body, headers=headers, params=params)
-                response.raise_for_status()
-                data = response.json()
-                self._cleanup_pending(client, env, data)
-                rows, kind = self._parse(data)
+            from hecate_runner.http_pool import get_shared_client
+
+            client = get_shared_client(
+                pool_name=f"query:{self.name}",
+                timeout=float(self.timeout_sec),
+            )
+            response = client.post(
+                endpoint, json=body, headers=headers, params=params, timeout=self.timeout_sec
+            )
+            response.raise_for_status()
+            data = response.json()
+            self._cleanup_pending(client, env, data)
+            rows, kind = self._parse(data)
             if len(rows) > query.limit:
                 raise _QueryError("Backend returned more matches than the approved result limit")
             preview = {

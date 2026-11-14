@@ -667,11 +667,8 @@ def replay_rule(
     if not split.available:
         notes.append("Independent holdout unavailable; automatic tuning disabled. " + split.reason)
     elif result.false_positives and result.true_positives and tuner is not None:
-        matched = [
-            e
-            for e in split.positive
-            if SigmaEvaluator.evaluate_rule(rule_yaml, [e], []).true_positives
-        ]
+        # Reuse the batch eval's TP events instead of re-evaluating each event.
+        matched = list(result.triggering_events or [])
         try:
             tuning = tuner.tune(rule_yaml, copy.deepcopy(matched), copy.deepcopy(split.benign))
             candidate = SigmaEvaluator.evaluate_rule(

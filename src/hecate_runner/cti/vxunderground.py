@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -104,39 +103,43 @@ class VxUndergroundProvider(CTIProvider):
         if not self.github_token:
             return []
 
+        from hecate_runner.http_pool import pooled_get
+
         url = repo_info["api_commits_url"]
         headers = {
             "Authorization": f"Bearer {self.github_token}",
             "User-Agent": "Hecate-Agent/1.0",
             "Accept": "application/vnd.github.v3+json",
         }
-        req = urllib.request.Request(url, headers=headers)
 
         try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout_sec) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                commits: list[dict[str, Any]] = []
-                for c in data:
-                    sha = c.get("sha", "")
-                    commit_obj = c.get("commit", {})
-                    msg = commit_obj.get("message", "").split("\n")[0].strip()
-                    date_str = (
-                        commit_obj.get("author", {}).get("date") or datetime.now(UTC).isoformat()
-                    )
-                    html_url = (
-                        c.get("html_url") or f"https://github.com/{repo_info['repo']}/commit/{sha}"
-                    )
-                    commits.append(
-                        {
-                            "sha": sha,
-                            "title": msg,
-                            "date": date_str,
-                            "html_url": html_url,
-                            "repo": repo_info["repo"],
-                            "repo_name": repo_info["name"],
-                        }
-                    )
-                return commits
+            resp = pooled_get(
+                url,
+                pool_name="cti:vxunderground",
+                timeout=float(self.request_timeout_sec),
+                headers=headers,
+            )
+            data = resp.json()
+            commits: list[dict[str, Any]] = []
+            for c in data:
+                sha = c.get("sha", "")
+                commit_obj = c.get("commit", {})
+                msg = commit_obj.get("message", "").split("\n")[0].strip()
+                date_str = commit_obj.get("author", {}).get("date") or datetime.now(UTC).isoformat()
+                html_url = (
+                    c.get("html_url") or f"https://github.com/{repo_info['repo']}/commit/{sha}"
+                )
+                commits.append(
+                    {
+                        "sha": sha,
+                        "title": msg,
+                        "date": date_str,
+                        "html_url": html_url,
+                        "repo": repo_info["repo"],
+                        "repo_name": repo_info["name"],
+                    }
+                )
+            return commits
         except Exception as e:
             log.warning(
                 "GitHub API fetch failed for %s: %s; falling back to Atom feed",
@@ -147,63 +150,68 @@ class VxUndergroundProvider(CTIProvider):
 
     def _fetch_from_atom(self, repo_info: dict[str, str]) -> list[dict[str, Any]]:
         """Fetch latest commits from GitHub public Atom feed with zero rate limits."""
+        from hecate_runner.http_pool import pooled_get
+
         url = repo_info["atom_url"]
         headers = {"User-Agent": "Hecate-Agent/1.0"}
-        req = urllib.request.Request(url, headers=headers)
 
         try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout_sec) as resp:
-                xml_data = resp.read()
-                tree = ET.fromstring(xml_data)
-                ns = {"atom": "http://www.w3.org/2005/Atom"}
-                commits: list[dict[str, Any]] = []
+            resp = pooled_get(
+                url,
+                pool_name="cti:vxunderground",
+                timeout=float(self.request_timeout_sec),
+                headers=headers,
+            )
+            xml_data = resp.content
+            tree = ET.fromstring(xml_data)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            commits: list[dict[str, Any]] = []
 
-                for entry in tree.findall("atom:entry", ns):
-                    title_elem = entry.find("atom:title", ns)
-                    title = (
-                        title_elem.text.strip()
-                        if title_elem is not None and title_elem.text
-                        else ""
+            for entry in tree.findall("atom:entry", ns):
+                title_elem = entry.find("atom:title", ns)
+                title = (
+                    title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+                )
+                updated_elem = entry.find("atom:updated", ns)
+                updated = (
+                    updated_elem.text.strip()
+                    if updated_elem is not None and updated_elem.text
+                    else ""
+                )
+                link_elem = entry.find("atom:link", ns)
+                link = link_elem.attrib.get("href", "") if link_elem is not None else ""
+
+                # Extract commit SHA from URL or entry ID
+                sha = ""
+                if "/commit/" in link:
+                    sha = link.split("/commit/")[-1].strip()
+                elif (id_elem := entry.find("atom:id", ns)) is not None:
+                    id_text = id_elem.text or ""
+                    if "/" in id_text:
+                        sha = id_text.split("/")[-1].strip()
+
+                if sha:
+                    commits.append(
+                        {
+                            "sha": sha,
+                            "title": title,
+                            "date": updated,
+                            "html_url": link,
+                            "repo": repo_info["repo"],
+                            "repo_name": repo_info["name"],
+                        }
                     )
-                    updated_elem = entry.find("atom:updated", ns)
-                    updated = (
-                        updated_elem.text.strip()
-                        if updated_elem is not None and updated_elem.text
-                        else ""
-                    )
-                    link_elem = entry.find("atom:link", ns)
-                    link = link_elem.attrib.get("href", "") if link_elem is not None else ""
-
-                    # Extract commit SHA from URL or entry ID
-                    sha = ""
-                    if "/commit/" in link:
-                        sha = link.split("/commit/")[-1].strip()
-                    elif (id_elem := entry.find("atom:id", ns)) is not None:
-                        id_text = id_elem.text or ""
-                        if "/" in id_text:
-                            sha = id_text.split("/")[-1].strip()
-
-                    if sha:
-                        commits.append(
-                            {
-                                "sha": sha,
-                                "title": title,
-                                "date": updated,
-                                "html_url": link,
-                                "repo": repo_info["repo"],
-                                "repo_name": repo_info["name"],
-                            }
-                        )
-                return commits
+            return commits
         except Exception as e:
             log.warning("Atom feed fetch failed for %s: %s", repo_info["repo"], e)
             return []
 
     def _fetch_commit_details(self, commit_url: str) -> dict[str, Any]:
         """Fetch the commit patch to extract modified files, platform, and hash."""
+        from hecate_runner.http_pool import pooled_get
+
         patch_url = f"{commit_url}.patch"
         headers = {"User-Agent": "Hecate-Agent/1.0"}
-        req = urllib.request.Request(patch_url, headers=headers)
 
         details: dict[str, Any] = {
             "files": [],
@@ -213,30 +221,33 @@ class VxUndergroundProvider(CTIProvider):
         }
 
         try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout_sec) as resp:
-                patch_text = resp.read().decode("utf-8", errors="replace")
+            resp = pooled_get(
+                patch_url,
+                pool_name="cti:vxunderground",
+                timeout=float(self.request_timeout_sec),
+                headers=headers,
+            )
+            patch_text = resp.text
 
-                # Match diff --git a/path b/path
-                file_matches = re.findall(r"diff --git a/(.+?) b/", patch_text)
-                for f in file_matches:
-                    details["files"].append(f)
-                    parts = f.split("/")
-                    if len(parts) > 1:
-                        details["platforms"].append(parts[0])
-                        filename = parts[-1]
-                        # Remove extensions like .7z, .zip, .tar.gz, .cpp, .py
-                        base_name = re.sub(
-                            r"\.(7z|zip|tar\.gz|cpp|c|py|bin|exe|dll)$", "", filename
-                        )
-                        details["malware_names"].append(base_name)
-                    else:
-                        details["malware_names"].append(f)
+            # Match diff --git a/path b/path
+            file_matches = re.findall(r"diff --git a/(.+?) b/", patch_text)
+            for f in file_matches:
+                details["files"].append(f)
+                parts = f.split("/")
+                if len(parts) > 1:
+                    details["platforms"].append(parts[0])
+                    filename = parts[-1]
+                    # Remove extensions like .7z, .zip, .tar.gz, .cpp, .py
+                    base_name = re.sub(r"\.(7z|zip|tar\.gz|cpp|c|py|bin|exe|dll)$", "", filename)
+                    details["malware_names"].append(base_name)
+                else:
+                    details["malware_names"].append(f)
 
-                # Match blob hashes index 00000..sha
-                index_matches = re.findall(r"index [0-9a-fA-F]+\.\.([0-9a-fA-F]+)", patch_text)
-                for b in index_matches:
-                    if b != "0000000":
-                        details["blob_hashes"].append(b)
+            # Match blob hashes index 00000..sha
+            index_matches = re.findall(r"index [0-9a-fA-F]+\.\.([0-9a-fA-F]+)", patch_text)
+            for b in index_matches:
+                if b != "0000000":
+                    details["blob_hashes"].append(b)
 
         except Exception as e:
             log.debug("Failed to fetch patch for %s: %s", commit_url, e)

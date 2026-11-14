@@ -25,16 +25,20 @@ rotation that happens once per several thousand hourly runs.
 
 from __future__ import annotations
 
-try:
-    import fcntl as _fcntl
-except ImportError:
-    _fcntl = None
 import logging
 import os
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
+
+_fcntl: ModuleType | None
+try:
+    _fcntl = import_module("fcntl")
+except ImportError:
+    _fcntl = None
 
 log = logging.getLogger(__name__)
 

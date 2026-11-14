@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,9 @@ from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti.base import CTIItem, CTIProvider
 
 log = logging.getLogger(__name__)
+
+#: Default cool-down after a sub-provider reports nothing new.
+DEFAULT_EMPTY_TTL_SEC = 300.0
 
 
 class MultiProviderError(RuntimeError):
@@ -86,6 +90,8 @@ class MultiProvider(CTIProvider):
         providers: list[CTIProvider],
         cursor_file: Path,
         priority_tiers: bool = False,
+        *,
+        empty_ttl_sec: float = DEFAULT_EMPTY_TTL_SEC,
     ):
         if not providers:
             raise MultiProviderError(
@@ -99,7 +105,10 @@ class MultiProvider(CTIProvider):
         self.providers = providers
         self.cursor_file = cursor_file
         self.priority_tiers = priority_tiers
+        self.empty_ttl_sec = max(0.0, float(empty_ttl_sec))
         self._by_name = {p.name: p for p in providers}
+        #: Monotonic deadline until which a provider may be skipped after empty.
+        self._empty_until: dict[str, float] = {}
 
     # --- CTIProvider interface -----------------------------------------------
 
@@ -107,8 +116,22 @@ class MultiProvider(CTIProvider):
         for provider in self.providers:
             provider.close()
 
+    def _is_cooling_down(self, name: str, *, now: float) -> bool:
+        until = self._empty_until.get(name)
+        return until is not None and now < until
+
+    def _mark_empty(self, name: str, *, now: float) -> None:
+        if self.empty_ttl_sec <= 0:
+            self._empty_until.pop(name, None)
+            return
+        self._empty_until[name] = now + self.empty_ttl_sec
+
+    def _clear_empty(self, name: str) -> None:
+        self._empty_until.pop(name, None)
+
     def next_item(self) -> CTIItem | None:
         cursor = MultiCursorState.load(self.cursor_file)
+        now = time.monotonic()
 
         if self.priority_tiers:
             # Priority tiers ensure high-signal KEV & PoCs are evaluated before general feeds
@@ -126,9 +149,20 @@ class MultiProvider(CTIProvider):
         for tier in tiers:
             t_count = len(tier)
             t_start = cursor.next_index % t_count
+            # If every provider in the tier is cooling down, probe them all.
+            force_probe = all(
+                self._is_cooling_down(tier[(t_start + o) % t_count].name, now=now)
+                for o in range(t_count)
+            )
             for offset in range(t_count):
                 idx = (t_start + offset) % t_count
                 provider = tier[idx]
+                if not force_probe and self._is_cooling_down(provider.name, now=now):
+                    log.debug(
+                        "Multi CTI: skipping %s (empty within TTL)",
+                        provider.name,
+                    )
+                    continue
                 try:
                     item = provider.next_item()
                 except Exception as exc:  # one bad source shouldn't sink the cycle
@@ -139,11 +173,13 @@ class MultiProvider(CTIProvider):
                     )
                     continue
                 if item is not None:
+                    self._clear_empty(provider.name)
                     log.info(
                         "Multi CTI: picked %s (rotation advances once the item is acknowledged)",
                         provider.name,
                     )
                     return item
+                self._mark_empty(provider.name, now=now)
 
         log.debug("No new entries across %d configured CTI sources", len(self.providers))
         return None

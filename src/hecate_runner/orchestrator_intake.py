@@ -70,25 +70,13 @@ class OrchestratorIntakeMixin:
 
         if not needle and not cves:
             return None
+
+        # Prefer Core's catalog; fall back to Runner's mtime-indexed sidecar so
+        # older Core builds never reintroduce a full-corpus body scan.
         try:
             from hecate_agent.core.hunt_catalog import source_catalog
         except ImportError:
-            # Core and Runner can be upgraded independently. Older Core builds
-            # retain literal matching until the shared index becomes available.
-            for path in sorted(self.settings.hunts_root.rglob("H-*.md"), reverse=True):
-                try:
-                    text = path.read_text(encoding="utf-8")
-                    if needle and needle in text:
-                        return str(path.stem)
-                    if path.stat().st_mtime_ns >= int(
-                        (now.timestamp() - max_cve_age_sec) * 1_000_000_000
-                    ):
-                        for cve in sorted(cves):
-                            if cve in text:
-                                return f"{path.stem} covering {cve} within 72h window"
-                except (OSError, UnicodeError):
-                    continue
-            return None
+            from hecate_runner.source_index import source_catalog
 
         index = source_catalog(self.settings.hunts_root)
         url_matches = set(index.lookup("url", url)) if needle else set()
@@ -99,14 +87,15 @@ class OrchestratorIntakeMixin:
         unusual = {cve for cve in cves if not re.fullmatch(r"CVE-\d{4}-\d{4,32}", cve)}
         if unusual:
             # Preserve legacy literal matching for malformed/custom feed values;
-            # normal CVE lookups use the index without reading hunt bodies.
+            # only open bodies modified inside the CVE window.
             for path in self.settings.hunts_root.rglob("H-*.md"):
                 try:
-                    if path.stat().st_mtime_ns >= cutoff:
-                        text = path.read_text(encoding="utf-8")
-                        for cve in sorted(unusual):
-                            if cve in text:
-                                cve_matches[path.absolute()] = cve
+                    if path.stat().st_mtime_ns < cutoff:
+                        continue
+                    text = path.read_text(encoding="utf-8")
+                    for cve in sorted(unusual):
+                        if cve in text:
+                            cve_matches[path.absolute()] = cve
                 except (OSError, UnicodeError):
                     continue
         for path in sorted(url_matches | cve_matches.keys(), reverse=True):

@@ -458,7 +458,16 @@ class LabSensorFusion:
                 dst_port = str(ev.get("DestinationPort", ""))
                 dst_host = str(ev.get("DestinationHostname", ""))
                 proto = str(ev.get("Protocol", ""))
-                key = (cat, dst_ip, dst_port, dst_host, proto, pid, action, time_str)
+                key: tuple[str, ...] = (
+                    cat,
+                    dst_ip,
+                    dst_port,
+                    dst_host,
+                    proto,
+                    pid,
+                    action,
+                    time_str,
+                )
             elif cat in ("file_event", "file_change"):
                 target = str(ev.get("TargetFilename", ""))
                 key = (cat, target, pid, action, time_str)

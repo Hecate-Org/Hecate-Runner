@@ -224,9 +224,16 @@ class SiemAlertVerifier:
                 try:
                     from hecate_agent.core.sigma_evaluator import SigmaEvaluator
 
-                    for ev in telemetry_events:
-                        if SigmaEvaluator.evaluate_rule(resolved_yaml, [ev], []).true_positives > 0:
-                            matched_events.append(ev)
+                    # Batch-evaluate once; prefer triggering_events over per-event re-eval.
+                    report = SigmaEvaluator.evaluate_rule(resolved_yaml, telemetry_events, [])
+                    matched_events = list(getattr(report, "triggering_events", None) or [])
+                    if not matched_events and report.true_positives > 0:
+                        matched_events = [
+                            ev
+                            for ev in telemetry_events
+                            if SigmaEvaluator.evaluate_rule(resolved_yaml, [ev], []).true_positives
+                            > 0
+                        ]
                 except Exception as eval_exc:
                     notes.append(f"Sigma AST evaluation warning in mock mode: {eval_exc}")
 

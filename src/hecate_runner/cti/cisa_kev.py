@@ -9,8 +9,6 @@ on identifying exploitation of a specific CVE rather than a broader TTP.
 
 import json
 import logging
-import urllib.error
-import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -72,27 +70,30 @@ class CisaKevProvider(CTIProvider):
             return self._catalog_cache
 
         try:
-            req = urllib.request.Request(CISA_KEV_URL, headers={"User-Agent": "Hecate-Runner/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                if response.status != 200:
-                    log.error("CISA KEV request failed: %s", response.status)
-                    return []
-                data = json.loads(response.read().decode("utf-8"))
+            from hecate_runner.http_pool import pooled_get
 
-                # 'vulnerabilities' is a list of dicts
-                vulns: list[dict[str, Any]] = data.get("vulnerabilities", [])
+            response = pooled_get(
+                CISA_KEV_URL,
+                pool_name="cti:cisa_kev",
+                timeout=30.0,
+                headers={"User-Agent": "Hecate-Runner/1.0"},
+            )
+            if response.status_code != 200:
+                log.error("CISA KEV request failed: %s", response.status_code)
+                return []
+            data = response.json()
 
-                # Sort by dateAdded ascending so we process oldest first
-                vulns.sort(key=lambda v: v.get("dateAdded", ""))
+            # 'vulnerabilities' is a list of dicts
+            vulns: list[dict[str, Any]] = data.get("vulnerabilities", [])
 
-                self._catalog_cache = vulns
-                return vulns
+            # Sort by dateAdded ascending so we process oldest first
+            vulns.sort(key=lambda v: v.get("dateAdded", ""))
 
-        except urllib.error.URLError as e:
-            log.error("Failed to connect to CISA KEV: %s", e)
-            return []
+            self._catalog_cache = vulns
+            return vulns
+
         except Exception as e:
-            log.error("Failed to parse CISA KEV data: %s", e)
+            log.error("Failed to fetch/parse CISA KEV data: %s", e)
             return []
 
     def _build_blurb(self, vuln: dict[str, Any]) -> str:

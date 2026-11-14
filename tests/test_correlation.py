@@ -382,6 +382,43 @@ Initial hunt.
     assert "## Incremental Threat Intel Update" in updated
 
 
+def test_correlator_matches_source_url_via_refs_not_full_text(tmp_path: Path) -> None:
+    ThreatEntityCorrelator.clear_cache()
+    hunts_dir = tmp_path / "hunts" / "2026"
+    hunts_dir.mkdir(parents=True)
+    hunt_file = hunts_dir / "H-0040.md"
+    hunt_file.write_text(
+        """---
+hunt_id: H-0040
+title: "Campaign from MISP event"
+techniques: ["T1071.001"]
+---
+# H-0040
+Primary source: https://misp.example.com/events/100
+""",
+        encoding="utf-8",
+    )
+
+    correlator = ThreatEntityCorrelator(hunts_dir)
+    profiles = correlator.index_hunts()
+    assert len(profiles) == 1
+    assert not hasattr(profiles[0], "text") or not getattr(profiles[0], "text", None)
+    assert "https://misp.example.com/events/100" in profiles[0].source_refs
+
+    item = CTIItem(
+        source="misp",
+        identifier="misp-40",
+        title="Follow-on indicators",
+        source_url="https://misp.example.com/events/100",
+        content="Additional beacon domain follow-on-c2.example",
+        metadata={"indicators": {"domain": ["follow-on-c2.example"]}},
+    )
+    match = correlator.correlate(item)
+    assert match is not None
+    assert match.hunt_id == "H-0040"
+    assert match.match_type == "source_url"
+
+
 def test_threat_entity_profile_caching(tmp_path: Path) -> None:
     ThreatEntityCorrelator.clear_cache()
     from hecate_runner.correlation import _HUNT_PROFILE_CACHE

@@ -130,6 +130,59 @@ def test_returns_none_when_all_empty(tmp_path: Path) -> None:
     assert provider.next_item() is None
 
 
+def test_empty_ttl_skips_recently_empty_providers(tmp_path: Path) -> None:
+    empty = _FakeProvider("misp", [])
+    rss = _FakeProvider("rss", [_item("rss", "rss-1")])
+    provider = MultiProvider(
+        providers=[empty, rss],
+        cursor_file=tmp_path / "cursor.json",
+        empty_ttl_sec=60.0,
+    )
+
+    # First pass probes misp (empty) then rss (hit).
+    first = provider.next_item()
+    assert first is not None and first.content == "rss-1"
+    assert "misp" in provider._empty_until
+
+    # Second pass must not re-probe misp while cooling down.
+    empty._items = [_item("misp", "should-not-see")]
+    calls = {"misp": 0, "rss": 0}
+    original_misp = empty.next_item
+    original_rss = rss.next_item
+
+    def misp_next() -> CTIItem | None:
+        calls["misp"] += 1
+        return original_misp()
+
+    def rss_next() -> CTIItem | None:
+        calls["rss"] += 1
+        return original_rss()
+
+    empty.next_item = misp_next  # type: ignore[method-assign]
+    rss.next_item = rss_next  # type: ignore[method-assign]
+    rss._items = [_item("rss", "rss-2")]
+
+    second = provider.next_item()
+    assert second is not None and second.content == "rss-2"
+    assert calls["misp"] == 0
+    assert calls["rss"] == 1
+
+
+def test_empty_ttl_force_probes_when_all_cooling_down(tmp_path: Path) -> None:
+    a = _FakeProvider("rss", [])
+    b = _FakeProvider("otx", [])
+    provider = MultiProvider(
+        providers=[a, b],
+        cursor_file=tmp_path / "cursor.json",
+        empty_ttl_sec=60.0,
+    )
+    assert provider.next_item() is None
+    a._items = [_item("rss", "late")]
+    # All providers cooling down → force probe again.
+    item = provider.next_item()
+    assert item is not None and item.content == "late"
+
+
 def test_isolates_failing_sub_provider(tmp_path: Path) -> None:
     broken = _FakeProvider("misp", fail=True)
     rss = _FakeProvider("rss", [_item("rss", "rss-1")])

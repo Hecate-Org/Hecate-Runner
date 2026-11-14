@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -71,6 +72,52 @@ def test_audit_workspace_queries_persistence(mock_workspace: Path):
     assert saved["total_queries"] == res["total_queries"]
 
 
+def test_audit_skips_unchanged_hunts_via_mtime_watermark(mock_workspace: Path):
+    first = audit_workspace_queries(mock_workspace, dry_run=True)
+    assert first["skipped_unchanged"] == 0
+    assert first["hunt_watermarks"]["H-0007"]["clean"] is True
+
+    with mock.patch("hecate_runner.siem_drift.sync_queries_for_hunt") as mock_sync:
+        second = audit_workspace_queries(mock_workspace, dry_run=True)
+        mock_sync.assert_not_called()
+    assert second["skipped_unchanged"] == 1
+    assert second["total_queries"] == first["total_queries"]
+
+    # Local query change invalidates the watermark.
+    q = mock_workspace / "queries" / "H-0007" / "process__chmod.spl"
+    q.write_text(q.read_text(encoding="utf-8") + "\n| stats count", encoding="utf-8")
+    with mock.patch(
+        "hecate_runner.siem_drift.sync_queries_for_hunt",
+        return_value=[
+            {
+                "file": "process__chmod.spl",
+                "target": "splunk_spl",
+                "status": "dry_run",
+                "ok": True,
+            }
+        ],
+    ) as mock_sync:
+        third = audit_workspace_queries(mock_workspace, dry_run=True)
+        mock_sync.assert_called_once()
+    assert third["skipped_unchanged"] == 0
+
+    # force=True always re-syncs even when clean + unchanged.
+    with mock.patch(
+        "hecate_runner.siem_drift.sync_queries_for_hunt",
+        return_value=[
+            {
+                "file": "process__chmod.spl",
+                "target": "splunk_spl",
+                "status": "dry_run",
+                "ok": True,
+            }
+        ],
+    ) as mock_sync:
+        forced = audit_workspace_queries(mock_workspace, dry_run=True, force=True)
+        mock_sync.assert_called_once()
+    assert forced["skipped_unchanged"] == 0
+
+
 def test_reconcile_hunt_queries_dry_run(mock_workspace: Path):
     results = reconcile_hunt_queries(mock_workspace, "H-0007", dry_run=True, force=True)
     assert len(results) == 2
@@ -133,7 +180,13 @@ def test_notify_siem_drift(mock_workspace: Path):
             "remote_id": "Hecate_H-0007_test",
         }
     ]
-    with mock.patch("httpx.post") as mock_post:
+    with (
+        mock.patch("httpx.post") as mock_post,
+        mock.patch(
+            "hecate_runner.http_pool.get_shared_client",
+            side_effect=lambda **kwargs: SimpleNamespace(post=mock_post),
+        ),
+    ):
         mock_resp = mock.MagicMock()
         mock_resp.status_code = 200
         mock_post.return_value = mock_resp

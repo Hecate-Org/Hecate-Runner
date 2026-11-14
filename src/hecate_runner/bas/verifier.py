@@ -283,11 +283,14 @@ class DetectionVerifier:
                 if eval_report.true_positives > 0:
                     rule_triggered = True
                     matched_count = eval_report.true_positives
-                    samples = [
-                        e
-                        for e in events_to_evaluate
-                        if SigmaEvaluator.evaluate_rule(rule_yaml, [e], []).true_positives
-                    ][:3]
+                    samples = list(getattr(eval_report, "triggering_events", None) or [])[:3]
+                    if not samples:
+                        # Older evaluators may omit triggering_events; fall back once.
+                        samples = [
+                            e
+                            for e in events_to_evaluate
+                            if SigmaEvaluator.evaluate_rule(rule_yaml, [e], []).true_positives
+                        ][:3]
                     notes.append(
                         f"Sigma AST evaluator matched {matched_count} true positive event(s)."
                     )

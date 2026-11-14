@@ -64,11 +64,35 @@ def get_tracked_query_statuses(workspace: Path) -> dict[tuple[str, str, str], st
         conn.close()
 
 
+def _hunt_query_mtime_ns(hunt_dir: Path) -> int:
+    """Newest mtime among query files in a hunt directory (0 if empty/missing)."""
+    newest = 0
+    try:
+        for path in hunt_dir.iterdir():
+            if path.is_file():
+                newest = max(newest, path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+    return newest
+
+
+_CLEAN_AUDIT_STATUSES = frozenset({"in_sync", "dry_run", "decommissioned"})
+
+
+def _hunt_results_are_clean(results: list[dict[str, Any]]) -> bool:
+    """True when every prior result is sync-clean (safe to watermark-skip)."""
+    if not results:
+        return False
+    return all(str(r.get("status") or "") in _CLEAN_AUDIT_STATUSES for r in results)
+
+
 def audit_workspace_queries(
     workspace: Path,
     target: str | None = None,
     dry_run: bool = True,
     trigger: str = "cli",
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Audit all hunting queries in workspace against live or simulated SIEM/EDR platforms.
 
@@ -77,6 +101,7 @@ def audit_workspace_queries(
         target: Optional platform filter (e.g. 'splunk_spl', 'sentinel_kql').
         dry_run: When True, simulates the sync check without making network calls.
         trigger: Operational trigger initiating the audit ('cli', 'daemon', 'slack:<user>').
+        force: When True, ignore per-hunt mtime watermarks and re-sync everything.
 
     Returns:
         Structured audit report including aggregated counts and per-hunt breakdown.
@@ -93,12 +118,14 @@ def audit_workspace_queries(
             "drifted_count": 0,
             "missing_count": 0,
             "error_count": 0,
+            "skipped_unchanged": 0,
             "hunts": {},
             "drifted_by_hunt": {},
             "missing_by_hunt": {},
             "decommissioned_by_hunt": {},
             "pending_decommission_by_hunt": {},
             "hunt_lifecycles": {},
+            "hunt_watermarks": {},
             "audited_at": datetime.now(UTC).isoformat(),
             "dry_run": dry_run,
         }
@@ -111,6 +138,7 @@ def audit_workspace_queries(
     drifted_count = 0
     missing_count = 0
     error_count = 0
+    skipped_unchanged = 0
 
     all_hunts: dict[str, list[dict[str, Any]]] = {}
     drifted_by_hunt: dict[str, list[dict[str, Any]]] = {}
@@ -118,16 +146,49 @@ def audit_workspace_queries(
     decommissioned_by_hunt: dict[str, list[dict[str, Any]]] = {}
     pending_decommission_by_hunt: dict[str, list[dict[str, Any]]] = {}
     hunt_lifecycles: dict[str, dict[str, Any]] = {}
+    hunt_watermarks: dict[str, dict[str, Any]] = {}
 
     tracked_statuses = get_tracked_query_statuses(workspace)
+    prior_state = load_drift_state(workspace) or {}
+    prior_watermarks: dict[str, Any] = dict(prior_state.get("hunt_watermarks") or {})
+    prior_hunts: dict[str, Any] = dict(prior_state.get("hunts") or {})
 
-    for h_dir in hunt_dirs:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _sync_one(
+        h_dir: Path,
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], bool, int]:
         hunt_id = h_dir.name
         lifecycle = get_hunt_lifecycle(workspace, hunt_id)
+        mtime_ns = _hunt_query_mtime_ns(h_dir)
+        prior_wm = prior_watermarks.get(hunt_id) or {}
+        prior_results = prior_hunts.get(hunt_id) or []
+        if (
+            not force
+            and isinstance(prior_wm, dict)
+            and int(prior_wm.get("mtime_ns") or 0) == mtime_ns
+            and mtime_ns > 0
+            and _hunt_results_are_clean(prior_results if isinstance(prior_results, list) else [])
+            and not lifecycle.get("is_retired", False)
+        ):
+            return hunt_id, lifecycle, list(prior_results), True, mtime_ns
+        results = sync_queries_for_hunt(workspace, hunt_id, dry_run=dry_run, target=target)
+        return hunt_id, lifecycle, results or [], False, mtime_ns
+
+    # Bound parallelism: remote SIEM APIs rate-limit; keep order stable via hunt_id sort.
+    max_workers = min(4, max(1, len(hunt_dirs)))
+    synced: list[tuple[str, dict[str, Any], list[dict[str, Any]], bool, int]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_sync_one, h_dir) for h_dir in hunt_dirs]
+        for fut in as_completed(futures):
+            synced.append(fut.result())
+    synced.sort(key=lambda item: item[0])
+
+    for hunt_id, lifecycle, results, reused, mtime_ns in synced:
         hunt_lifecycles[hunt_id] = lifecycle
         is_retired = lifecycle.get("is_retired", False)
-
-        results = sync_queries_for_hunt(workspace, hunt_id, dry_run=dry_run, target=target)
+        if reused:
+            skipped_unchanged += 1
         if not results:
             continue
 
@@ -187,6 +248,12 @@ def audit_workspace_queries(
         if hunt_pending:
             pending_decommission_by_hunt[hunt_id] = hunt_pending
 
+        hunt_watermarks[hunt_id] = {
+            "mtime_ns": mtime_ns,
+            "clean": _hunt_results_are_clean(results),
+            "reused": reused,
+        }
+
     report = {
         "total_hunts": len(all_hunts),
         "total_queries": total_queries,
@@ -196,12 +263,14 @@ def audit_workspace_queries(
         "drifted_count": drifted_count,
         "missing_count": missing_count,
         "error_count": error_count,
+        "skipped_unchanged": skipped_unchanged,
         "hunts": all_hunts,
         "drifted_by_hunt": drifted_by_hunt,
         "missing_by_hunt": missing_by_hunt,
         "decommissioned_by_hunt": decommissioned_by_hunt,
         "pending_decommission_by_hunt": pending_decommission_by_hunt,
         "hunt_lifecycles": hunt_lifecycles,
+        "hunt_watermarks": hunt_watermarks,
         "audited_at": datetime.now(UTC).isoformat(),
         "dry_run": dry_run,
     }

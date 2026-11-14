@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+from pathlib import Path
+from types import ModuleType
+from typing import IO
+
+_fcntl: ModuleType | None
 try:
-    import fcntl as _fcntl
+    _fcntl = import_module("fcntl")
 except ImportError:
     _fcntl = None
-from pathlib import Path
-from typing import IO
 
 
 def acquire_work_lock(path: Path) -> IO[str] | None:

@@ -612,48 +612,55 @@ class Orchestrator(
 
         if self.settings.catalog_enrichment_enabled and not item.metadata.get("reference_only"):
             import json
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            from hecate_runner import cti
+            from hecate_runner.cti.catalogs import CatalogProvider
+            from hecate_runner.integration_health import record_health
 
             enabled = (
                 self.settings.cti_multi_provider_names
                 if self.settings.cti_provider == "multi"
                 else [self.settings.cti_provider]
             )
-            for catalog in ("lolbas", "loldrivers", "gtfobins"):
-                if catalog not in enabled:
-                    continue
-                from hecate_runner import cti
-                from hecate_runner.cti.catalogs import CatalogProvider
+            catalogs = [name for name in ("lolbas", "loldrivers", "gtfobins") if name in enabled]
 
+            def _catalog_enrich(catalog: str) -> tuple[str, list[Any] | None, str | None]:
                 provider = cti.get_provider(catalog, settings=self.settings)
                 if not isinstance(provider, CatalogProvider):
-                    continue
+                    return catalog, None, None
                 try:
-                    matches = provider.enrich(item.content)
-                    if matches:
-                        self._enriched_context += (
-                            "\nSecondary capability reference (not incident evidence):\n"
-                            + json.dumps(matches, default=str)
-                        )
-                        self.trail.step(
-                            "enrichment",
-                            "%s: %d documented capability reference(s)",
-                            catalog,
-                            len(matches),
-                        )
+                    return catalog, provider.enrich(item.content) or [], None
                 except Exception as exc:
-                    from hecate_runner.integration_health import record_health
-
                     record_health(
                         self.settings.hecate_workspace,
                         catalog,
                         False,
                         "catalog enrichment fetch/schema failure",
                     )
-                    log.warning(
-                        "Catalog enrichment %s unavailable: %s", catalog, type(exc).__name__
-                    )
+                    return catalog, None, type(exc).__name__
                 finally:
                     provider.close()
+
+            if catalogs:
+                with ThreadPoolExecutor(max_workers=min(3, len(catalogs))) as pool:
+                    futures = [pool.submit(_catalog_enrich, name) for name in catalogs]
+                    for fut in as_completed(futures):
+                        catalog, matches, err = fut.result()
+                        if err:
+                            log.warning("Catalog enrichment %s unavailable: %s", catalog, err)
+                            continue
+                        if matches:
+                            self._enriched_context += (
+                                "\nSecondary capability reference (not incident evidence):\n"
+                                + json.dumps(matches, default=str)
+                            )
+                            self.trail.step(
+                                "enrichment",
+                                "%s: %d documented capability reference(s)",
+                                catalog,
+                                len(matches),
+                            )
 
         # VirusTotal v3 Behavioral Graph expansion
         vt_behavior_blocks: list[str] = []
@@ -663,54 +670,71 @@ class Orchestrator(
             and total_obs
         ):
             try:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
                 from hecate_agent.api import extract_vt_behavior_graph
 
                 candidate_hashes = (
                     norm.get("sha256", []) + norm.get("md5", []) + norm.get("sha1", [])
                 )[:2]
-                for chash in candidate_hashes:
-                    bg = extract_vt_behavior_graph(chash)
-                    if bg:
-                        techs = [t["id"] for t in bg.get("mitre_techniques", [])]
-                        c2_ips = bg.get("contacted_ips", [])
-                        c2_domains = bg.get("contacted_domains", [])
-                        tags = bg.get("tags", [])
-                        dropped = bg.get("dropped_files", [])
 
-                        if techs or c2_ips or c2_domains or tags:
-                            self.trail.step(
-                                "enrichment",
-                                "VT behavior graph (%s...): %d technique(s), %d C2 IP(s), %d domain(s), %d tag(s)",
-                                chash[:10],
-                                len(techs),
-                                len(c2_ips),
-                                len(c2_domains),
-                                len(tags),
-                            )
-                            item.metadata.setdefault("vt_behavior_graphs", []).append(
-                                {"sample_hash": chash, "graph": bg}
-                            )
+                def _vt_graph(chash: str) -> tuple[str, dict[str, Any] | None]:
+                    return chash, extract_vt_behavior_graph(chash)
 
-                            bg_lines = [f"#### 🧬 VirusTotal Behavioral Graph ({chash[:12]}...)"]
-                            if techs:
-                                bg_lines.append(
-                                    f"- **Sandbox ATT&CK labels (context only):** {', '.join(techs[:6])}"
-                                )
-                            if tags:
-                                bg_lines.append(f"- **Capability Tags:** {', '.join(tags[:6])}")
-                            if c2_ips:
-                                bg_lines.append(
-                                    f"- **Sandbox-contacted addresses (unverified role):** {', '.join(c2_ips[:5])}"
-                                )
-                            if c2_domains:
-                                bg_lines.append(
-                                    f"- **Resolved Hostnames:** {', '.join(c2_domains[:5])}"
-                                )
-                            if dropped:
-                                bg_lines.append(
-                                    f"- **Dropped Artifacts:** {', '.join(Path(p).name for p in dropped[:4])}"
-                                )
-                            vt_behavior_blocks.append("\n".join(bg_lines))
+                graphs: list[tuple[str, dict[str, Any]]] = []
+                if candidate_hashes:
+                    with ThreadPoolExecutor(max_workers=min(2, len(candidate_hashes))) as pool:
+                        graph_futures = [pool.submit(_vt_graph, ch) for ch in candidate_hashes]
+                        for graph_future in as_completed(graph_futures):
+                            chash, bg = graph_future.result()
+                            if bg:
+                                graphs.append((chash, bg))
+
+                # Preserve candidate order for stable draft text.
+                order = {h: i for i, h in enumerate(candidate_hashes)}
+                graphs.sort(key=lambda pair: order.get(pair[0], 0))
+
+                for chash, bg in graphs:
+                    techs = [t["id"] for t in bg.get("mitre_techniques", [])]
+                    c2_ips = bg.get("contacted_ips", [])
+                    c2_domains = bg.get("contacted_domains", [])
+                    tags = bg.get("tags", [])
+                    dropped = bg.get("dropped_files", [])
+
+                    if techs or c2_ips or c2_domains or tags:
+                        self.trail.step(
+                            "enrichment",
+                            "VT behavior graph (%s...): %d technique(s), %d C2 IP(s), %d domain(s), %d tag(s)",
+                            chash[:10],
+                            len(techs),
+                            len(c2_ips),
+                            len(c2_domains),
+                            len(tags),
+                        )
+                        item.metadata.setdefault("vt_behavior_graphs", []).append(
+                            {"sample_hash": chash, "graph": bg}
+                        )
+
+                        bg_lines = [f"#### 🧬 VirusTotal Behavioral Graph ({chash[:12]}...)"]
+                        if techs:
+                            bg_lines.append(
+                                f"- **Sandbox ATT&CK labels (context only):** {', '.join(techs[:6])}"
+                            )
+                        if tags:
+                            bg_lines.append(f"- **Capability Tags:** {', '.join(tags[:6])}")
+                        if c2_ips:
+                            bg_lines.append(
+                                f"- **Sandbox-contacted addresses (unverified role):** {', '.join(c2_ips[:5])}"
+                            )
+                        if c2_domains:
+                            bg_lines.append(
+                                f"- **Resolved Hostnames:** {', '.join(c2_domains[:5])}"
+                            )
+                        if dropped:
+                            bg_lines.append(
+                                f"- **Dropped Artifacts:** {', '.join(Path(p).name for p in dropped[:4])}"
+                            )
+                        vt_behavior_blocks.append("\n".join(bg_lines))
             except Exception as exc:
                 log.debug("VT behavior graph extraction omitted (%s)", exc)
 

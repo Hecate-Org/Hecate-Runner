@@ -36,6 +36,9 @@ DIALECT_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "mock": (".spl", ".kql", ".eql", ".cql"),
 }
 
+#: path -> (mtime_ns, canonical_status, hunt_id, title, frontmatter)
+_HUNT_FM_CACHE: dict[str, tuple[int, str, str, str, dict[str, Any]]] = {}
+
 
 class HuntExecutionScheduler:
     """Discovers, schedules, stages, and executes hunting sweeps across active hunts."""
@@ -86,15 +89,24 @@ class HuntExecutionScheduler:
                             channel,
                             "Hecate Auto Hunt Notification",
                             blocks=None if is_attachment else (b if isinstance(b, list) else None),
-                            attachments=b if is_attachment else None,
+                            attachments=b if isinstance(b, list) and is_attachment else None,
                         )
 
                     self.notify_fn = _notify
             except Exception as exc:
                 log.debug("Could not initialize default SlackNotifier for scheduler: %s", exc)
 
+    @classmethod
+    def clear_frontmatter_cache(cls) -> None:
+        """Drop cached hunt frontmatter (tests / lifecycle bulk edits)."""
+        _HUNT_FM_CACHE.clear()
+
     def discover_active_hunts(self) -> list[dict[str, Any]]:
-        """Find all hunts with status: active and associated query files in the workspace."""
+        """Find all hunts with status: active and associated query files in the workspace.
+
+        Frontmatter is cached by file mtime so cadence sweeps do not re-parse
+        every markdown body when nothing changed.
+        """
         hunts_dir = self.workspace / "hunts"
         if not hunts_dir.exists():
             return []
@@ -102,21 +114,32 @@ class HuntExecutionScheduler:
         active_hunts = []
         target = self.provider.name.lower()
         allowed_exts = DIALECT_EXTENSIONS.get(target, (".spl", ".kql", ".eql", ".cql"))
+        live_keys: set[str] = set()
 
         for hunt_file in sorted(hunts_dir.glob("**/*.md")):
             try:
-                content = hunt_file.read_text(encoding="utf-8")
-                fm, _, _ = parse_hunt_frontmatter(content)
-                status = str(fm.get("status") or "")
-                try:
-                    canonical = normalize_lifecycle_state(status)
-                except ValueError:
-                    continue
+                key = str(hunt_file.resolve())
+                live_keys.add(key)
+                mtime_ns = hunt_file.stat().st_mtime_ns
+                cached = _HUNT_FM_CACHE.get(key)
+                if cached is not None and cached[0] == mtime_ns:
+                    canonical, hunt_id, title, fm = cached[1], cached[2], cached[3], cached[4]
+                else:
+                    content = hunt_file.read_text(encoding="utf-8")
+                    fm, _, _ = parse_hunt_frontmatter(content)
+                    status = str(fm.get("status") or "")
+                    try:
+                        canonical = normalize_lifecycle_state(status)
+                    except ValueError:
+                        _HUNT_FM_CACHE.pop(key, None)
+                        continue
+                    hunt_id = str(fm.get("hunt_id") or hunt_file.stem).upper()
+                    title = str(fm.get("title") or "")
+                    _HUNT_FM_CACHE[key] = (mtime_ns, canonical, hunt_id, title, fm)
 
                 if canonical != "active":
                     continue
 
-                hunt_id = str(fm.get("hunt_id") or hunt_file.stem).upper()
                 query_dir = self.workspace / "queries" / hunt_id
                 query_files: list[Path] = []
                 if query_dir.exists():
@@ -127,7 +150,7 @@ class HuntExecutionScheduler:
                 active_hunts.append(
                     {
                         "hunt_id": hunt_id,
-                        "title": fm.get("title", ""),
+                        "title": title,
                         "path": hunt_file,
                         "query_files": query_files,
                         "watermark": watermark,
@@ -136,6 +159,9 @@ class HuntExecutionScheduler:
                 )
             except Exception as exc:
                 log.warning("Skipping unreadable hunt file %s: %s", hunt_file, exc)
+
+        for stale in set(_HUNT_FM_CACHE) - live_keys:
+            _HUNT_FM_CACHE.pop(stale, None)
 
         return active_hunts
 
