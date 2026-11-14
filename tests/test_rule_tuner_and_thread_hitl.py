@@ -366,3 +366,76 @@ def test_slack_app_mention_handling(tmp_path: Path):
     text = say_mock.call_args[1]["text"]
     assert "Sigma Rule Tuned & Re-Transpiled for `H-0706`" in text
     assert "filter_admintools" in text
+
+
+def test_rule_tuner_auto_tune_from_miss_preview(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    query_dir = workspace / "queries" / "H-0707"
+    query_dir.mkdir(parents=True)
+    rule_file = query_dir / "rule.yml"
+    rule_file.write_text(BASE_SIGMA_RULE, encoding="utf-8")
+
+    tuner = RuleTuner(workspace)
+    # Missed event where the binary was powershell.exe instead of cmd.exe
+    missed_events = [
+        {
+            "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "CommandLine": "powershell.exe -enc ...",
+        }
+    ]
+
+    res = tuner.auto_tune_from_miss("H-0707", missed_events, apply=False)
+    assert res.ok is True
+    assert "Expand Image" in res.action_summary or "powershell.exe" in res.action_summary
+    assert (
+        "+    - '\\cmd.exe'" in res.diff or "powershell.exe" in res.diff or "selection" in res.diff
+    )
+    assert "powershell.exe" in res.new_rule_yaml
+    # Original rule on disk must NOT have changed when apply=False
+    assert rule_file.read_text(encoding="utf-8") == BASE_SIGMA_RULE
+
+
+def test_rule_tuner_auto_tune_from_miss_apply(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    query_dir = workspace / "queries" / "H-0708"
+    query_dir.mkdir(parents=True)
+    rule_file = query_dir / "rule.yml"
+    rule_file.write_text(BASE_SIGMA_RULE, encoding="utf-8")
+
+    tuner = RuleTuner(workspace)
+    missed_events = [
+        {
+            "Image": "C:\\Windows\\System32\\cmd.exe",
+            "CommandLine": "cmd.exe /c whoami",
+            "ParentImage": "C:\\Windows\\Temp\\loader.exe",
+        }
+    ]
+
+    res = tuner.auto_tune_from_miss("H-0708", missed_events, apply=True)
+    assert res.ok is True
+    persisted_yaml = rule_file.read_text(encoding="utf-8")
+    assert persisted_yaml != BASE_SIGMA_RULE
+    # Native query file should have been transpiled
+    spl_file = query_dir / "rule.spl"
+    assert spl_file.is_file()
+
+
+def test_rule_tuner_suggest_tuning_for_drift(tmp_path: Path):
+    tuner = RuleTuner(tmp_path)
+    res_drift = tuner.suggest_tuning_for_drift(
+        "H-0709", {"target": "splunk_spl", "file_name": "proc.spl", "drift_type": "modified"}
+    )
+    assert res_drift.ok is True
+    assert (
+        "re-sync" in res_drift.action_summary.lower()
+        or "diverged" in res_drift.action_summary.lower()
+    )
+
+    res_missing = tuner.suggest_tuning_for_drift(
+        "H-0709", {"target": "sentinel_kql", "file_name": "proc.kql", "drift_type": "missing"}
+    )
+    assert res_missing.ok is True
+    assert (
+        "restore" in res_missing.action_summary.lower()
+        or "deploy" in res_missing.action_summary.lower()
+    )

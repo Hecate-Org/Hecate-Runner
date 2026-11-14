@@ -381,6 +381,18 @@ def bas_detonate_cmd(
             siem_table.add_row("Verification Notes", "; ".join(siem_res.notes))
 
         console.print(siem_table)
+
+        if siem_res.tuning_suggestion:
+            console.print(
+                Panel(
+                    f"[bold yellow]💡 Automated Rule Tuning Suggestion for {hunt_id}:[/bold yellow]\n\n"
+                    f"• [bold]Action:[/bold] {siem_res.tuning_suggestion.get('action_summary')}\n"
+                    f"• [bold]Diff:[/bold]\n```diff\n{siem_res.tuning_suggestion.get('diff', '')}\n```\n"
+                    f'• [dim]Apply this tuning: `hecate-runner sweep tune {hunt_id} "<instruction>"`[/dim]',
+                    title="Detection Miss Mitigation",
+                    border_style="yellow",
+                )
+            )
     if not result.success or not result.cleanup_success:
         raise typer.Exit(code=1)
 
@@ -734,6 +746,22 @@ def bas_verify_cmd(
         table.add_row("Notes", "; ".join(res.notes))
 
     console.print(table)
+
+    tuning = getattr(res, "tuning_suggestion", None)
+    if not tuning and "siem_res" in locals() and hasattr(siem_res, "tuning_suggestion"):
+        tuning = siem_res.tuning_suggestion
+
+    if tuning:
+        console.print(
+            Panel(
+                f"[bold yellow]💡 Automated Rule Tuning Suggestion for {hunt_id}:[/bold yellow]\n\n"
+                f"• [bold]Action:[/bold] {tuning.get('action_summary')}\n"
+                f"• [bold]Diff:[/bold]\n```diff\n{tuning.get('diff', '')}\n```\n"
+                f'• [dim]Apply this tuning: `hecate-runner sweep tune {hunt_id} "<instruction>"`[/dim]',
+                title="Detection Miss Mitigation",
+                border_style="yellow",
+            )
+        )
 
     if write_back:
         fm["bas_verified"] = confirms_technique(res.to_dict())

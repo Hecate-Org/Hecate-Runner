@@ -33,6 +33,8 @@ def run_job(settings: Settings, job: str) -> None:
 
         sync_misp_outbox(settings, max_items=1)
     elif job == "siem":
+        from datetime import UTC, datetime
+
         from hecate_runner.drift_alerts import notify_drift_report
         from hecate_runner.siem_drift import audit_workspace_queries, reconcile_all_drifted_queries
 
@@ -46,6 +48,32 @@ def run_job(settings: Settings, job: str) -> None:
             reconcile_all_drifted_queries(
                 settings.hecate_workspace, dry_run=False, actor="maintenance"
             )
+
+        if report.get("drifted_count"):
+            try:
+                from hecate_runner.rule_tuner import RuleTuner
+
+                tuner = RuleTuner(settings.hecate_workspace)
+                suggestions_dir = settings.hecate_workspace / ".hecate" / "tuning_suggestions"
+                suggestions_dir.mkdir(parents=True, exist_ok=True)
+                for h_id, entries in report.get("drifted_by_hunt", {}).items():
+                    for entry in entries:
+                        sugg_res = tuner.suggest_tuning_for_drift(h_id, entry)
+                        if sugg_res.ok:
+                            sugg_data = {
+                                "hunt_id": h_id,
+                                "target": entry.get("target"),
+                                "file_name": entry.get("file_name"),
+                                "action_summary": sugg_res.action_summary,
+                                "drift_type": entry.get("drift_type", "drifted"),
+                                "generated_at": datetime.now(UTC).isoformat(),
+                            }
+                            atomic_write_text(
+                                suggestions_dir / f"{h_id}_drift.json",
+                                json.dumps(sugg_data, indent=2),
+                            )
+            except Exception as tune_err:
+                log.debug("Failed saving SIEM drift tuning suggestion: %s", tune_err)
     elif job == "alerts":
         from hecate_runner.drift_alerts import deliver_drift_alerts
         from hecate_runner.notifications import notify_siem_drift

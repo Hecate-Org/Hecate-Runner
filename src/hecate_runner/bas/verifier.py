@@ -64,6 +64,7 @@ class VerificationResult:
     alert_search_id: str = ""
     alert_name: str = ""
     alert_time_utc: str = ""
+    tuning_suggestion: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -378,6 +379,23 @@ class DetectionVerifier:
                 "No telemetry arrived during detonation window (check agent or ingestion pipeline)."
             )
 
+        tuning_suggestion = None
+        if status == VerificationStatus.DETECTION_MISS and events_to_evaluate and hunt_id:
+            try:
+                from hecate_runner.rule_tuner import RuleTuner
+
+                tuner = RuleTuner(self.workspace)
+                suggestion_res = tuner.auto_tune_from_miss(hunt_id, events_to_evaluate, apply=False)
+                if suggestion_res.ok:
+                    tuning_suggestion = {
+                        "action_summary": suggestion_res.action_summary,
+                        "diff": suggestion_res.diff,
+                        "new_rule_yaml": suggestion_res.new_rule_yaml,
+                    }
+                    notes.append(f"Auto-tuning suggestion: {suggestion_res.action_summary}")
+            except Exception as tune_exc:
+                log.debug("Auto-tuning suggestion in verifier failed: %s", tune_exc)
+
         return VerificationResult(
             hunt_id=hunt_id,
             technique_id=technique_id,
@@ -409,4 +427,5 @@ class DetectionVerifier:
             ),
             search_job_id=search_job_id,
             siem_alert_fired=siem_alert_fired,
+            tuning_suggestion=tuning_suggestion,
         )

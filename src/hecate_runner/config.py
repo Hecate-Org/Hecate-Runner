@@ -556,6 +556,17 @@ class Settings(BaseSettings):
             "Reviewed live execution is configured separately through BAS."
         ),
     )
+    purple_team_continuous_replay_interval_sec: int = Field(
+        default=7200,
+        ge=0,
+        alias="HECATE_PURPLE_TEAM_CONTINUOUS_REPLAY_INTERVAL_SEC",
+        description="Interval in seconds between background Purple Team replay verification sweeps across active hunts (0 to disable).",
+    )
+    purple_team_auto_tune_on_miss: bool = Field(
+        default=True,
+        alias="HECATE_PURPLE_TEAM_AUTO_TUNE_ON_MISS",
+        description="Automatically generate rule tuning suggestions when continuous replay or live BAS detects a missed alert.",
+    )
     sigma_timeout_sec: int = Field(
         default=1800,
         ge=30,
