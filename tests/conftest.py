@@ -21,6 +21,8 @@ from hecate_runner.hecate_client import (
     TechniqueMetadata,
 )
 
+pytest_plugins = ("tests.offline_guard",)
+
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:

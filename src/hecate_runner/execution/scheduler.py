@@ -86,7 +86,7 @@ class HuntExecutionScheduler:
                             channel,
                             "Hecate Auto Hunt Notification",
                             blocks=None if is_attachment else (b if isinstance(b, list) else None),
-                            attachments=b if is_attachment else None,
+                            attachments=b if isinstance(b, list) and is_attachment else None,
                         )
 
                     self.notify_fn = _notify

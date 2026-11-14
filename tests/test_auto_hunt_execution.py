@@ -83,7 +83,10 @@ def test_build_count_query_dialects() -> None:
     spl = 'Image="*/sh" CommandLine="* -c *"'
     assert build_count_query(spl, "splunk") == f"{spl} | stats count"
     assert build_count_query(f"{spl} | stats count", "splunk") == f"{spl} | stats count"
-    assert build_count_query(f"{spl} | stats count by user", "splunk") == f"{spl} | stats count by user | stats sum(count) as count"
+    assert (
+        build_count_query(f"{spl} | stats count by user", "splunk")
+        == f"{spl} | stats count by user | stats sum(count) as count"
+    )
 
     kql = "DeviceProcessEvents | where ProcessCommandLine contains 'test'"
     kql_count = build_count_query(kql, "sentinel")

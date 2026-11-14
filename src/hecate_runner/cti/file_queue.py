@@ -9,22 +9,25 @@ after successful acknowledgment.
 from __future__ import annotations
 
 import contextlib
-
-try:
-    import fcntl as _fcntl
-except ImportError:
-    _fcntl = None
 import json
 import logging
 import re
 import shutil
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any, ClassVar
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti.base import CTIItem, CTIProvider
+
+_fcntl: ModuleType | None
+try:
+    _fcntl = import_module("fcntl")
+except ImportError:
+    _fcntl = None
 
 log = logging.getLogger(__name__)
 
