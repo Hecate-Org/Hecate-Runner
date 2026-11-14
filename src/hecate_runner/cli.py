@@ -305,6 +305,8 @@ def daemon(
     stop_event = threading.Event()
     last_sweep_check: float = 0.0
     sweep_interval_sec = float(settings.auto_hunt_sweep_interval_sec)
+    last_replay_check: float = 0.0
+    replay_interval_sec = float(settings.purple_team_continuous_replay_interval_sec)
 
     def _sig_handler(signum: int, frame: Any) -> None:
         signame = signal.Signals(signum).name
@@ -323,6 +325,7 @@ def daemon(
             f"• CTI Provider: [cyan]{settings.cti_provider}[/cyan]\n"
             f"• Idle Poll Interval: [cyan]{effective_interval}s[/cyan]\n"
             f"• Auto Hunt Sweeps: [cyan]{'enabled (' + str(settings.auto_hunt_sweep_interval_sec) + 's interval)' if (sweeps and settings.auto_hunt_execution_enabled) else 'disabled'}[/cyan]\n"
+            f"• Continuous Purple Team: [cyan]{'enabled (' + str(settings.purple_team_continuous_replay_interval_sec) + 's interval)' if settings.purple_team_continuous_replay_interval_sec > 0 else 'disabled'}[/cyan]\n"
             f"• Max Cycles: [cyan]{max_cycles or 'unlimited'}[/cyan]\n"
             f"• Research Reuse: [cyan]{'enabled (<=' + str(settings.research_reuse_max_age_days) + 'd)' if settings.research_reuse_enabled else 'disabled'}[/cyan]\n"
             f"• Dry Run: [cyan]{dry_run}[/cyan]\n"
@@ -372,6 +375,34 @@ def daemon(
                         log.error("Daemon hunt sweep error: %s", sweep_err, exc_info=True)
                     finally:
                         last_sweep_check = now_ts
+
+            # Run periodic continuous Purple Team replay verification
+            if replay_interval_sec > 0 and not dry_run:
+                now_ts = time.time()
+                if (now_ts - last_replay_check) >= replay_interval_sec:
+                    log.info(
+                        "Daemon executing continuous Purple Team replay verification across active hunts..."
+                    )
+                    try:
+                        from hecate_runner.purple_team import run_continuous_replay_sweep
+
+                        sweep_outcomes = run_continuous_replay_sweep(settings)
+                        if sweep_outcomes:
+                            missed = sum(
+                                1
+                                for o in sweep_outcomes
+                                if o.get("passed_rules", 0) < o.get("total_rules", 0)
+                            )
+                            console.print(
+                                f"[bold magenta]🛡️ Daemon completed Purple Team continuous replay across "
+                                f"{len(sweep_outcomes)} hunts ({missed} with tuning suggestions generated).[/bold magenta]"
+                            )
+                    except Exception as pt_err:
+                        log.error(
+                            "Daemon Purple Team continuous replay error: %s", pt_err, exc_info=True
+                        )
+                    finally:
+                        last_replay_check = now_ts
 
             if max_cycles is not None and cycles_completed >= max_cycles:
                 console.print(
