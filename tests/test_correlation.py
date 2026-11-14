@@ -223,6 +223,8 @@ def test_incremental_enricher_appends_indicators_and_rules(tmp_path: Path) -> No
 hunt_id: H-0001
 title: "Adversaries exploiting CVE-2026-9000"
 status: planning
+platform:
+- Linux
 techniques: ["T1190"]
 ---
 # H-0001: CVE-2026-9000
@@ -272,6 +274,16 @@ Placeholder for queries.
     assert queries_dir.exists()
     rule_files = list(queries_dir.glob("*.yml"))
     assert len(rule_files) >= 1
+    # Links must be workspace-relative, not absolute file:// machine paths
+    assert "file://" not in updated_text
+    assert "queries/H-0001/" in updated_text
+    # Linux hunts must not get Windows-only DNS QueryName rules
+    domain_rules = [p for p in rule_files if "domain" in p.name]
+    assert domain_rules
+    domain_yaml = domain_rules[0].read_text(encoding="utf-8")
+    assert "product: linux" in domain_yaml
+    assert "DestinationHostname" in domain_yaml
+    assert "QueryName" not in domain_yaml
 
 
 def test_incremental_enricher_updates_indicator_sweep_inventory(tmp_path: Path) -> None:
