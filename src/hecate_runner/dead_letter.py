@@ -14,16 +14,19 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any
-
-try:
-    import fcntl as _fcntl
-except ImportError:
-    _fcntl = None
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti import CTIItem
+
+_fcntl: ModuleType | None
+try:
+    _fcntl = import_module("fcntl")
+except ImportError:
+    _fcntl = None
 
 log = logging.getLogger(__name__)
 

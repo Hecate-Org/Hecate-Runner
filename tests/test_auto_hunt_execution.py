@@ -83,7 +83,10 @@ def test_build_count_query_dialects() -> None:
     spl = 'Image="*/sh" CommandLine="* -c *"'
     assert build_count_query(spl, "splunk") == f"{spl} | stats count"
     assert build_count_query(f"{spl} | stats count", "splunk") == f"{spl} | stats count"
-    assert build_count_query(f"{spl} | stats count by user", "splunk") == f"{spl} | stats count by user | stats sum(count) as count"
+    assert (
+        build_count_query(f"{spl} | stats count by user", "splunk")
+        == f"{spl} | stats count by user | stats sum(count) as count"
+    )
 
     kql = "DeviceProcessEvents | where ProcessCommandLine contains 'test'"
     kql_count = build_count_query(kql, "sentinel")
@@ -253,7 +256,11 @@ def test_watermark_store_persistence(tmp_path: Path) -> None:
 # --- HuntExecutionScheduler tests --------------------------------------------
 
 
-def test_scheduler_stage_and_execute(mock_workspace: Path) -> None:
+def test_scheduler_stage_and_execute(mock_workspace: Path, monkeypatch) -> None:
+    def no_model(*args, **kwargs):
+        raise RuntimeError("No model configured for this offline scheduler test")
+
+    monkeypatch.setattr("hecate_agent.core.llm_router.create_router", no_model)
     settings = Settings(
         hecate_workspace=mock_workspace,
         query_provider="mock",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -78,7 +79,8 @@ def run_demo(*, keep: bool = False, console: Console | None = None) -> tuple[int
         fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         fake_bin.chmod(0o755)
 
-        settings = Settings(
+        settings_factory: Callable[..., Settings] = Settings
+        settings = settings_factory(
             _env_file=None,
             **{
                 "hecate_workspace": ws,

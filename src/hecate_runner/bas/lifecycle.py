@@ -8,10 +8,6 @@ an audited quarantine state whenever cleanup cannot be confirmed.
 
 from __future__ import annotations
 
-try:
-    import fcntl as _fcntl
-except ImportError:
-    _fcntl = None
 import json
 import logging
 import os
@@ -22,11 +18,19 @@ import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.base import SafetyViolationError
+
+_fcntl: ModuleType | None
+try:
+    _fcntl = import_module("fcntl")
+except ImportError:
+    _fcntl = None
 
 log = logging.getLogger(__name__)
 

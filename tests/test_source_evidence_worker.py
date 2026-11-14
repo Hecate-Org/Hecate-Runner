@@ -163,8 +163,16 @@ def test_timeout_kills_worker_and_descendants(isolated_client, tmp_path, stage):
     for pid in pids:
         # An adopted zombie may briefly await PID 1; it is no longer executing.
         status = Path(f"/proc/{pid}/stat")
-        if status.exists():
-            assert status.read_text().split(")", 1)[1].split()[0] == "Z"
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                state = status.read_text().split(")", 1)[1].split()[0]
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            assert time.monotonic() < deadline, f"Worker descendant {pid} is still executing"
+            time.sleep(0.01)
 
 
 def test_worker_failure_does_not_expose_provider_output(isolated_client):

@@ -5,11 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
@@ -29,7 +34,8 @@ jobs:
       - name: Checkout Hecate-Core (sibling dependency for hecate-agent)
         uses: actions/checkout@v5
         with:
-          repository: BrizoSec/Hecate-Core
+          repository: Hecate-Org/Hecate-Core
+          ref: ${{ vars.HECATE_CORE_REF || 'main' }}
           path: .hecate-core-checkout
           ssh-key: ${{ secrets.HECATE_CORE_DEPLOY_KEY }}
 

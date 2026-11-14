@@ -163,7 +163,9 @@ def smoke_lab(tmp_path, monkeypatch):
     provider = Mock()
     provider.detonate.return_value = detonation
     monkeypatch.setattr("hecate_runner.bas.get_bas_provider", lambda *args: provider)
-    monkeypatch.setattr("hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: sensor)
+    monkeypatch.setattr(
+        "hecate_runner.bas.runtime.LabProcessSensor", lambda *args, **kwargs: sensor
+    )
     monkeypatch.setattr("hecate_runner.bas.sensor.LabProcessSensor", lambda *args, **kwargs: sensor)
     monkeypatch.setattr("hecate_runner.bas.runtime.audit_container_tmpfs", lambda *args: [])
     settings = Settings(

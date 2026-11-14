@@ -489,7 +489,7 @@ def _procedure_matches_rule(
             }
         )
     try:
-        return SigmaEvaluator.evaluate_rule(rule_yaml, candidates, []).true_positives > 0
+        return bool(SigmaEvaluator.evaluate_rule(rule_yaml, candidates, []).true_positives > 0)
     except Exception:
         return False
 
