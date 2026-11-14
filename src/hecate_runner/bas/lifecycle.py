@@ -288,8 +288,10 @@ def reset_lab(
             header_tokens = lines[0].strip().split()
             if lines[0].strip() in {"COMMAND", "CMD"}:
                 cmds = [line.strip() for line in lines[1:] if line.strip()]
-            elif header_tokens and header_tokens[0] == "PID" and any(
-                h in {"COMMAND", "CMD", "ARGS"} for h in header_tokens[1:]
+            elif (
+                header_tokens
+                and header_tokens[0] == "PID"
+                and any(h in {"COMMAND", "CMD", "ARGS"} for h in header_tokens[1:])
             ):
                 cmds = [
                     line.split(None, 1)[1].strip()
@@ -302,11 +304,7 @@ def reset_lab(
                 )
             record["docker_available"] = True
             allowed = {"/usr/bin/strace", "/usr/local/bin/sandcat"}
-            lingering = [
-                cmd
-                for cmd in cmds
-                if not cmd or cmd.split()[0] not in allowed
-            ]
+            lingering = [cmd for cmd in cmds if not cmd or cmd.split()[0] not in allowed]
             record["lingering_processes_found"] = lingering
             if lingering:
                 raise SafetyViolationError(
