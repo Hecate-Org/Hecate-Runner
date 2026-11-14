@@ -94,7 +94,8 @@ def test_process_certificate_event(certstream_provider: CertStreamProvider):
     assert "Indicators (1 total): domain (1)" in item.content
 
 
-def test_cursor_state_and_acknowledgement(certstream_provider: CertStreamProvider):
+def test_cursor_state_and_acknowledgement(certstream_provider: CertStreamProvider, monkeypatch):
+    monkeypatch.setattr(certstream_provider, "_poll_stream", lambda: None)
     cursor_file = certstream_provider.cursor_file
     assert not cursor_file.exists()
 

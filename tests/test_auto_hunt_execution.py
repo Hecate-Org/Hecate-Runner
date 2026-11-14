@@ -256,7 +256,11 @@ def test_watermark_store_persistence(tmp_path: Path) -> None:
 # --- HuntExecutionScheduler tests --------------------------------------------
 
 
-def test_scheduler_stage_and_execute(mock_workspace: Path) -> None:
+def test_scheduler_stage_and_execute(mock_workspace: Path, monkeypatch) -> None:
+    def no_model(*args, **kwargs):
+        raise RuntimeError("No model configured for this offline scheduler test")
+
+    monkeypatch.setattr("hecate_agent.core.llm_router.create_router", no_model)
     settings = Settings(
         hecate_workspace=mock_workspace,
         query_provider="mock",
