@@ -97,3 +97,5 @@ Thumbs.db
 # anyway, but listed so `ruff check .` and an accidental `git add -A`
 # both skip them.
 /patch*.py
+# CI dependency scan report (uploaded as an artifact, never packaged).
+/dependency-audit.json
