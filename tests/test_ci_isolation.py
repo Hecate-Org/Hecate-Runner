@@ -1,7 +1,10 @@
 """The default unit suite must stay offline and ignore operator dotenv files."""
 
+import asyncio
+import socket
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -24,3 +27,16 @@ def test_temporary_dotenv_fixture_is_supported(tmp_path):
 def test_unmocked_network_request_is_rejected_before_transport():
     with pytest.raises(pytest.fail.Exception, match="live requests are forbidden"):
         httpx.get("https://example.invalid/ci-guard-probe")
+
+
+def test_asyncio_internal_socketpair_is_supported():
+    async def value():
+        return "offline"
+
+    assert asyncio.run(value()) == "offline"
+
+
+def test_loopback_connections_still_require_mocking():
+    sock = SimpleNamespace(family=socket.AF_INET)
+    with pytest.raises(pytest.fail.Exception, match="live connections are forbidden"):
+        socket.socket.connect(sock, ("127.0.0.1", 11434))
