@@ -184,6 +184,14 @@ class SiemAlertVerifier:
         can_simulate = bool(resolved_yaml) and (
             not candidate_query or candidate_query == disk_query
         )
+        if not query_text and technique_id:
+            from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+            proc = APPROVED_PROCEDURES.get(technique_id)
+            if proc and proc.argv:
+                query_source = "approved_procedure"
+                cmd_escaped = proc.command.replace('"', '\\"')
+                query_text = f'CommandLine="*{cmd_escaped}*" OR Image="*{proc.argv[0]}*"'
         notes.append(f"Candidate query from {query_source}: {query_text}")
 
         # 3. Handle Mock / Offline Mode
@@ -399,7 +407,7 @@ class SiemAlertVerifier:
             ended = datetime.fromisoformat(detonation.end_time_utc.replace("Z", "+00:00"))
             if ended.tzinfo is None:
                 ended = ended.replace(tzinfo=UTC)
-            earliest_time = (started - timedelta(seconds=30)).isoformat()
+            earliest_time = str(int((started - timedelta(seconds=60)).timestamp()))
         except (ValueError, TypeError):
             notes.append("Invalid detonation wall-clock timestamp; using the last two minutes.")
 
@@ -437,7 +445,8 @@ class SiemAlertVerifier:
                                     "this is not proof of alert firing."
                                 )
                                 break
-                            # Job is done but 0 results found: break job poll to re-dispatch if time remains
+                            # Job is done but 0 results found: allow 1s for index commit before re-dispatching
+                            time.sleep(1.0)
                             break
 
                         time.sleep(self.poll_interval_sec)

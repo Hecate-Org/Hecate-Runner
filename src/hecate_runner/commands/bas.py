@@ -251,6 +251,20 @@ def bas_detonate_cmd(
         timeout_sec=timeout,
     )
 
+    from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+    proc = APPROVED_PROCEDURES.get(technique_id)
+    sensor = None
+    if provider_name == "caldera" and target.environment == "lab" and norm_platform == "linux":
+        from hecate_runner.bas.sensor import LabProcessSensor
+
+        try:
+            sensor = LabProcessSensor(settings.bas_sensor_container, settings.bas_linux_host)
+            sensor.preflight()
+        except Exception as sensor_exc:
+            console.print(f"[yellow]Sensor preflight notice: {sensor_exc}[/yellow]")
+            sensor = None
+
     lease = None
     if target.environment == "lab":
         from hecate_runner.bas.lifecycle import LabLease
@@ -283,6 +297,15 @@ def bas_detonate_cmd(
     except Exception as exc:
         console.print(f"[bold red]Detonation failed with exception:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
+
+    raw_events: list[dict[str, Any]] = []
+    if sensor and result.success and proc:
+        if hasattr(sensor, "collect_fused"):
+            raw_events = sensor.collect_fused(result, proc.argv, expected_files=proc.expected_files)
+        else:
+            raw_events = sensor.collect(result, proc.argv)
+    else:
+        raw_events = result.telemetry_signatures
 
     status_color = "green" if result.success else "red"
     console.print(
@@ -318,6 +341,8 @@ def bas_detonate_cmd(
             candidate_query=siem_query,
             siem_target=siem_target,
             t0_detonate=t0_detonate,
+            raw_events=raw_events,
+            fidelity_scope=proc.fidelity_scope if proc else None,
         )
 
         siem_table = Table(
