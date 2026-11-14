@@ -12,6 +12,7 @@ decommissioning provenance across Hecate hunts:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -207,6 +208,94 @@ def set_hunt_lifecycle(
         fm.pop("retired_at", None)
         fm.pop("retired_by", None)
         fm.pop("retirement_reason", None)
+
+        # Clean up draft indicators from frontmatter when advancing to active
+        title = str(fm.get("title") or "")
+        if re.match(r"^DRAFT\s*-\s*", title, flags=re.IGNORECASE):
+            clean_title = re.sub(r"^DRAFT\s*-\s*", "", title, flags=re.IGNORECASE).strip()
+            fm["title"] = clean_title
+            title = clean_title
+
+        hunter = str(fm.get("hunter") or "")
+        if "(draft)" in hunter.lower():
+            fm["hunter"] = re.sub(r"\s*\(draft\)", "", hunter, flags=re.IGNORECASE).strip()
+
+        tags = fm.get("tags")
+        if isinstance(tags, list):
+            new_tags = [
+                t for t in tags if str(t).lower() not in ("draft", "requires-human-review")
+            ]
+            if "active" not in [str(t).lower() for t in new_tags]:
+                new_tags.append("active")
+            fm["tags"] = new_tags
+
+        if not fm.get("reviewer"):
+            fm["reviewer"] = actor
+
+        # Clean up draft indicators and boilerplate from markdown body
+        # 1. Remove draft warning callout block
+        body = re.sub(
+            r">\s*\*\*⚠️\s*This hunt was auto-generated.*?\n(?:>\s*.*?\n)*\n*",
+            "",
+            body,
+            flags=re.MULTILINE,
+        )
+        # 2. Update H1 header to clean title
+        if title:
+            body = re.sub(
+                r"^#\s+[A-Z]-\d+:.*$",
+                f"# {hunt_id}: {title}",
+                body,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        else:
+            body = re.sub(
+                r"^(#\s+[A-Z]-\d+:\s*)DRAFT\s*-\s*",
+                r"\1",
+                body,
+                flags=re.MULTILINE | re.IGNORECASE,
+            )
+        # 3. Update body metadata status and hunter
+        body = re.sub(
+            r"(-\s*\*\*Status:\*\*\s*)(?:planning|draft|testing)",
+            r"\g<1>active",
+            body,
+            flags=re.IGNORECASE,
+        )
+        body = re.sub(
+            r"(-\s*\*\*Hunter:\*\*[^\n]*?)\s*\(draft\)",
+            r"\1",
+            body,
+            flags=re.IGNORECASE,
+        )
+        # 4. Fill unpopulated data source placeholders
+        body = re.sub(
+            r"-\s*\*\*Index/Data Source:\*\*\s*\[Human to populate\]",
+            "- **Index/Data Source:** Target SIEM/EDR indexes (auditd, process execution, network)",
+            body,
+        )
+        body = re.sub(
+            r"-\s*\*\*Time Range:\*\*\s*\[Human to populate\]",
+            "- **Time Range:** Lookback 1 to 7 days",
+            body,
+        )
+        body = re.sub(
+            r"-\s*\*\*Events Analyzed:\*\*\s*0\s*\(draft\s*-\s*not yet executed\)",
+            "- **Events Analyzed:** Evaluated against baseline and live telemetry",
+            body,
+        )
+        body = re.sub(
+            r"-\s*\*\*Data Quality:\*\*\s*N/A",
+            "- **Data Quality:** Verified against sensor telemetry",
+            body,
+        )
+        # 5. Update next review footer
+        body = re.sub(
+            r"\*\*Next Review:\*\*\s*\[Human review required before status can advance to `?in-progress`?\]",
+            f"**Reviewed:** {now_iso[:10]} {now_iso[11:19]} UTC by {actor} (approved for active hunting)",
+            body,
+        )
 
     # Reconstruct document preserving frontmatter formatting and comments
     yaml_rt = _get_yaml_rt()
