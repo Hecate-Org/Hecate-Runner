@@ -207,7 +207,9 @@ def test_siem_verifier_live_execution_mocked(mock_siem_workspace: Path, monkeypa
     mock_client.create_search_job.assert_called_once()
     from datetime import datetime, timedelta
 
-    expected = (datetime.fromisoformat(det.start_time_utc) - timedelta(seconds=30)).isoformat()
+    expected = str(
+        int((datetime.fromisoformat(det.start_time_utc) - timedelta(seconds=60)).timestamp())
+    )
     assert mock_client.create_search_job.call_args.kwargs["earliest_time"] == expected
     mock_client.get_search_results.assert_called_once_with("1793600999.123", count=25)
 
