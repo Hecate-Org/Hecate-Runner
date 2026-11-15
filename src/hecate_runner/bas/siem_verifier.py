@@ -52,6 +52,7 @@ class SiemAlertVerificationResult:
     alert_evidence: dict[str, Any] = field(default_factory=dict)
     sample_events: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    tuning_suggestion: dict[str, Any] | None = None
     verified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -265,6 +266,25 @@ class SiemAlertVerifier:
                 f"matched={matched} (AST logic probe, not live SIEM alert)."
             )
 
+            tuning_suggestion = None
+            if status == "detection_miss" and telemetry_events and hunt_id:
+                try:
+                    from hecate_runner.rule_tuner import RuleTuner
+
+                    tuner = RuleTuner(self.workspace)
+                    suggestion_res = tuner.auto_tune_from_miss(
+                        hunt_id, telemetry_events, apply=False
+                    )
+                    if suggestion_res.ok:
+                        tuning_suggestion = {
+                            "action_summary": suggestion_res.action_summary,
+                            "diff": suggestion_res.diff,
+                            "new_rule_yaml": suggestion_res.new_rule_yaml,
+                        }
+                        notes.append(f"Auto-tuning suggestion: {suggestion_res.action_summary}")
+                except Exception as tune_exc:
+                    log.debug("Auto-tuning suggestion generation failed: %s", tune_exc)
+
             result = SiemAlertVerificationResult(
                 hunt_id=hunt_id,
                 technique_id=technique_id,
@@ -284,6 +304,7 @@ class SiemAlertVerifier:
                 search_job_id="",
                 sample_events=matched_events[:1] if matched_events else telemetry_events[:1],
                 notes=notes,
+                tuning_suggestion=tuning_suggestion,
             )
             self._persist_result(result)
             return result
@@ -511,6 +532,23 @@ class SiemAlertVerifier:
                 "Smoke check evidence does not validate the attack technique, even if a SIEM alert fired."
             )
 
+        tuning_suggestion = None
+        if status == "detection_miss" and telemetry_events and hunt_id:
+            try:
+                from hecate_runner.rule_tuner import RuleTuner
+
+                tuner = RuleTuner(self.workspace)
+                suggestion_res = tuner.auto_tune_from_miss(hunt_id, telemetry_events, apply=False)
+                if suggestion_res.ok:
+                    tuning_suggestion = {
+                        "action_summary": suggestion_res.action_summary,
+                        "diff": suggestion_res.diff,
+                        "new_rule_yaml": suggestion_res.new_rule_yaml,
+                    }
+                    notes.append(f"Auto-tuning suggestion: {suggestion_res.action_summary}")
+            except Exception as tune_exc:
+                log.debug("Auto-tuning suggestion generation failed: %s", tune_exc)
+
         result = SiemAlertVerificationResult(
             hunt_id=hunt_id,
             technique_id=technique_id,
@@ -541,6 +579,7 @@ class SiemAlertVerifier:
             search_job_id=job_sid,
             sample_events=matched_results[:3],
             notes=notes,
+            tuning_suggestion=tuning_suggestion,
         )
         self._persist_result(result)
         return result

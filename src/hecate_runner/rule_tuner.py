@@ -438,3 +438,198 @@ class RuleTuner:
                 )
 
         return self.tune_hunt_rule(hunt_id, instruction)
+
+    def auto_tune_from_miss(
+        self,
+        hunt_id: str,
+        missed_events: list[dict[str, Any]],
+        instruction: str | None = None,
+        apply: bool = False,
+    ) -> RuleTuningResult:
+        """Derive an expansion or repair instruction from missed attack telemetry and optionally mutate the rule."""
+        norm_hunt_id = hunt_id.strip().upper()
+        query_dir = self.workspace / "queries" / norm_hunt_id
+        if not query_dir.exists():
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary="",
+                error=f"Query directory not found for {norm_hunt_id} at {query_dir}",
+            )
+
+        sigma_files = sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
+        if not sigma_files:
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary="",
+                error=f"No Sigma YAML files found under {query_dir}",
+            )
+
+        rule_file = sigma_files[0]
+        original_yaml = rule_file.read_text(encoding="utf-8")
+
+        if not instruction:
+            if not missed_events:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    rule_file=rule_file,
+                    error="No missed events provided to diagnose",
+                )
+
+            # Analyze original rule vs missed events
+            try:
+                rule_dict = yaml.safe_load(original_yaml) or {}
+            except Exception as exc:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    rule_file=rule_file,
+                    error=f"Failed to parse rule YAML: {exc}",
+                )
+
+            detection = rule_dict.get("detection") or {}
+            derived_instruction = None
+
+            # Look through detection blocks to see which constraint caused the false negative
+            for name, block in detection.items():
+                if name.lower() in ("condition", "timeframe") or not isinstance(block, dict):
+                    continue
+
+                for key, val in block.items():
+                    field_base = key.split("|")[0].strip()
+                    # Check parent process constraint
+                    if field_base.lower() in ("parentimage", "parent"):
+                        observed_parents = [
+                            str(ev.get("ParentImage") or ev.get("parent") or "")
+                            for ev in missed_events
+                            if (ev.get("ParentImage") or ev.get("parent"))
+                        ]
+                        if observed_parents:
+                            clean_parent = Path(observed_parents[0]).name
+                            val_str = str(val).lower()
+                            if clean_parent.lower() not in val_str:
+                                derived_instruction = (
+                                    f"Expand ParentImage to include {clean_parent}"
+                                )
+                                break
+
+                    # Check Image constraint
+                    if field_base.lower() in ("image", "process", "path"):
+                        observed_images = [
+                            str(ev.get("Image") or ev.get("process") or "")
+                            for ev in missed_events
+                            if (ev.get("Image") or ev.get("process"))
+                        ]
+                        if observed_images:
+                            clean_img = Path(observed_images[0]).name
+                            val_str = str(val).lower()
+                            if clean_img.lower() not in val_str:
+                                derived_instruction = f"Expand Image to include {clean_img}"
+                                break
+
+                    # Check CommandLine constraint
+                    if field_base.lower() in ("commandline", "cmdline"):
+                        observed_cmds = [
+                            str(ev.get("CommandLine") or ev.get("commandline") or "")
+                            for ev in missed_events
+                            if (ev.get("CommandLine") or ev.get("commandline"))
+                        ]
+                        if observed_cmds:
+                            cmd_sample = observed_cmds[0]
+                            # Find meaningful argument token
+                            tokens = [
+                                t
+                                for t in cmd_sample.split()
+                                if len(t) > 2
+                                and not t.startswith("-")
+                                and not t.endswith((".exe", ".sh"))
+                            ]
+                            target_token = (
+                                tokens[0]
+                                if tokens
+                                else cmd_sample.split()[-1]
+                                if cmd_sample.split()
+                                else cmd_sample
+                            )
+                            derived_instruction = f"Expand CommandLine to include {target_token}"
+                            break
+
+                if derived_instruction:
+                    break
+
+            # Fallback if no specific constraint bottleneck identified
+            if not derived_instruction:
+                ev0 = missed_events[0]
+                if ev0.get("CommandLine"):
+                    derived_instruction = f"Expand CommandLine to include {ev0['CommandLine']}"
+                elif ev0.get("Image"):
+                    derived_instruction = f"Expand Image to include {Path(str(ev0['Image'])).name}"
+                else:
+                    return RuleTuningResult(
+                        ok=False,
+                        hunt_id=norm_hunt_id,
+                        action_summary="",
+                        rule_file=rule_file,
+                        error="Could not derive tuning instruction from missed events",
+                    )
+
+            instruction = derived_instruction
+
+        if apply:
+            return self.tune_hunt_rule(norm_hunt_id, instruction)
+
+        # Generate preview without persisting to disk
+        try:
+            new_yaml, summary = self.tune_rule_yaml(original_yaml, instruction)
+        except Exception as exc:
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary="",
+                rule_file=rule_file,
+                error=str(exc),
+            )
+
+        diff_lines = list(
+            difflib.unified_diff(
+                original_yaml.splitlines(keepends=True),
+                new_yaml.splitlines(keepends=True),
+                fromfile=f"a/{rule_file.name}",
+                tofile=f"b/{rule_file.name}",
+            )
+        )
+        return RuleTuningResult(
+            ok=True,
+            hunt_id=norm_hunt_id,
+            action_summary=f"Suggested tuning ({summary}): `{instruction}`",
+            rule_file=rule_file,
+            diff="".join(diff_lines),
+            new_rule_yaml=new_yaml,
+        )
+
+    def suggest_tuning_for_drift(
+        self,
+        hunt_id: str,
+        drift_entry: dict[str, Any],
+    ) -> RuleTuningResult:
+        """Suggest reconciliation or rule tuning based on SIEM query drift."""
+        norm_hunt_id = hunt_id.strip().upper()
+        target = str(drift_entry.get("target") or "siem").lower()
+        file_name = str(drift_entry.get("file_name") or "")
+        drift_type = str(drift_entry.get("drift_type") or drift_entry.get("status") or "drifted")
+
+        if drift_type in ("missing", "missing_query"):
+            summary = f"Deploy authoritative Git definition for {target} to restore deleted SIEM query ({file_name})."
+        else:
+            summary = f"SIEM query in {target} has diverged from repository version ({file_name}). Re-sync with Git authority."
+
+        return RuleTuningResult(
+            ok=True,
+            hunt_id=norm_hunt_id,
+            action_summary=summary,
+            diff="",
+        )
