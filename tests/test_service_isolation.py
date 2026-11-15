@@ -154,3 +154,86 @@ def test_service_units_use_dedicated_accounts_and_protect_host_code():
             assert "HECATE_SERVICE_ISOLATED=1" in text
             assert "HECATE_STRICT_CREDENTIAL_ROLES=1" in text
             assert "ReadWritePaths=/home" not in text
+
+
+def test_role_runtime_matches_service_cwd_home_and_isolation(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    command = Mock()
+    monkeypatch.setattr(installer, "command", command)
+    runtime = tmp_path / "runtime"
+    sentinel = "-".join(["private", "fixture"])
+    installer.check_role_runtime(
+        "reader", runtime, tmp_path / "workspace", {"SPLUNK_READ_TOKEN": sentinel}
+    )
+    args, kwargs = command.call_args
+    assert kwargs["cwd"] == runtime
+    assert kwargs["env"]["HOME"] == "/var/lib/hecate/homes/reader"
+    assert kwargs["env"]["HECATE_SERVICE_ISOLATED"] == "1"
+    assert kwargs["env"]["HECATE_STRICT_CREDENTIAL_ROLES"] == "1"
+    assert sentinel not in " ".join(args)
+
+
+def test_role_preflight_can_start_from_an_inaccessible_operator_cwd(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("Requires POSIX non-root directory permissions")
+    locked = tmp_path / "operator-home"
+    locked.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def launch_role(*args, **kwargs):
+        # Exercise real Settings startup using this test's installed interpreter.
+        # An unreadable cwd reproduces the service identity's home restriction.
+        return subprocess.run(
+            [sys.executable, *args[5:]],
+            env=kwargs["env"],
+            cwd=kwargs.get("cwd"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+    monkeypatch.setattr(installer, "command", launch_role)
+    monkeypatch.chdir(locked)
+    locked.chmod(0)
+    try:
+        installer.check_role_runtime("reader", runtime, workspace, {})
+    finally:
+        locked.chmod(0o700)
+        os.chdir(tmp_path)
+
+
+def test_failed_command_diagnostics_are_private_and_not_printed(tmp_path, capsys):
+    import json
+    import stat
+    import subprocess
+
+    sentinel = "-".join(["private", "fixture"])
+    failure = subprocess.CalledProcessError(1, ["python"], stderr=sentinel)
+    installer.record_failure(tmp_path, "reader configuration preflight", failure)
+    path = tmp_path / "failure.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    details = json.loads(path.read_text())
+    assert details["phase"] == "reader configuration preflight"
+    assert details["returncode"] == 1
+    assert details["stderr"] == sentinel
+    assert capsys.readouterr().out == ""
+
+
+def test_isolated_settings_never_read_even_an_explicit_dotenv(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("HECATE_RUNNER_MIN_HOURS_BETWEEN_DRAFTS=91\n")
+    monkeypatch.setenv("HECATE_SERVICE_ISOLATED", "1")
+    monkeypatch.setattr(
+        "hecate_runner.config.DotEnvSettingsSource._read_env_file",
+        lambda *args, **kwargs: pytest.fail("Isolated Settings must not read dotenv files"),
+    )
+    assert Settings(hecate_workspace=tmp_path, _env_file=path).min_hours_between_drafts != 91

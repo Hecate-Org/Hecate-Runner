@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 ROLES = ("reader", "writer", "slack")
@@ -41,11 +42,52 @@ RESERVED = {
 
 
 def command(
-    *args: str, check: bool = True, env: dict | None = None
+    *args: str, check: bool = True, env: dict | None = None, cwd: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        list(args), check=check, capture_output=True, text=True, timeout=120, env=env
+        list(args), check=check, capture_output=True, text=True, timeout=120, env=env, cwd=cwd
     )
+
+
+def check_role_runtime(role: str, runtime: Path, workspace: Path, values: dict[str, str]) -> None:
+    env = {
+        **values,
+        "PATH": f"{runtime}/venv/bin:/usr/bin:/bin",
+        "HOME": f"/var/lib/hecate/homes/{role}",
+        "HECATE_SERVICE_ISOLATED": "1",
+        "PYTHON_DOTENV_DISABLED": "1",
+        "HECATE_STRICT_CREDENTIAL_ROLES": "1",
+        "HECATE_WORKSPACE": str(workspace),
+        "HECATE_BIN": str(runtime / "venv/bin/hecate-agent"),
+    }
+    command(
+        "/usr/sbin/runuser",
+        "-u",
+        f"hecate-{role}",
+        "--",
+        str(runtime / "venv/bin/python"),
+        "-I",
+        "-c",
+        "from hecate_runner.config import Settings; Settings()",
+        env=env,
+        # Match the service unit. Inheriting the operator's mode-0750 home
+        # makes pydantic's eager .env discovery fail before sources are filtered.
+        cwd=runtime,
+    )
+
+
+def record_failure(backup: Path, phase: str, failure: Exception) -> None:
+    details: dict[str, object] = {"phase": phase, "exception": type(failure).__name__}
+    if isinstance(failure, subprocess.CalledProcessError):
+        details.update(returncode=failure.returncode, stdout=failure.stdout, stderr=failure.stderr)
+    else:
+        details["message"] = str(failure)
+    # Captured output may contain configuration values. Keep it private and
+    # emit only the controlled phase label in the terminal error.
+    fd = os.open(backup / "failure.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(details, stream, indent=2)
+        stream.write("\n")
 
 
 def read_environment(path: Path, role: str) -> dict[str, str]:
@@ -285,6 +327,8 @@ def install(args) -> None:
     snapshot["operator_was_data_member"] = operator_in_data
     (backup / "previous-state.json").write_text(json.dumps(snapshot, indent=2))
     activated = False
+    phase = "credential installation"
+    effective_environments: dict[str, dict[str, str]] = {}
     try:
         config_root.mkdir(exist_ok=True, mode=0o750)
         os.chmod(config_root, 0o711)
@@ -329,36 +373,25 @@ def install(args) -> None:
                 stream.write("\n".join(lines) + "\n")
             os.chown(target, 0, grp.getgrnam(f"hecate-{role}").gr_gid)
             os.chmod(target, 0o640)
+            effective_environments[role] = values
+        phase = "runtime selection"
         current.unlink(missing_ok=True)
         current.symlink_to(release)
         for role in ROLES:
-            env = {
-                "PATH": "/usr/bin:/bin",
-                "HECATE_SERVICE_ISOLATED": "1",
-                "PYTHON_DOTENV_DISABLED": "1",
-                "HECATE_WORKSPACE": str(workspace),
-                **environments[role],
-            }
-            command(
-                "/usr/sbin/runuser",
-                "-u",
-                f"hecate-{role}",
-                "--",
-                str(current / "venv/bin/python"),
-                "-I",
-                "-c",
-                "from hecate_runner.config import Settings; Settings()",
-                env=env,
-            )
+            phase = f"{role} configuration preflight"
+            check_role_runtime(role, current, workspace, effective_environments[role])
         # Validate units before replacing any installed unit.
+        phase = "systemd unit validation"
         command(
             "/usr/bin/systemd-analyze",
             "verify",
             *(str(unit_source / f"{unit}.service") for unit in UNITS),
         )
+        phase = "stopping previous workers"
         activated = True
         command("/usr/bin/systemctl", "stop", "hecate-runner-daemon", "hecate-runner-maintenance")
         user_command(args.operator, "stop", "hecate-slack-bot", check=False)
+        phase = "workspace permissions"
         data_gid = grp.getgrnam("hecate-data").gr_gid
         if not operator_in_data:
             command("/usr/sbin/usermod", "--append", "--groups", "hecate-data", args.operator)
@@ -374,6 +407,7 @@ def install(args) -> None:
                 path, 0o2770 if path.is_dir() else (stat.S_IMODE(info.st_mode) | 0o060) & ~0o6007
             )
         (backup / "workspace-permissions.json").write_text(json.dumps(permissions))
+        phase = "unit installation"
         Path("/var/lib/hecate/workspace").mkdir(exist_ok=True)
         for unit in UNITS:
             shutil.copyfile(unit_source / f"{unit}.service", unit_root / f"{unit}.service")
@@ -394,10 +428,12 @@ def install(args) -> None:
             else:
                 text = f"[Service]\nBindPaths={workspace}:/var/lib/hecate/workspace\n"
             (dropins / "90-isolation.conf").write_text(text)
+        phase = "service activation"
         command("/usr/bin/systemctl", "daemon-reload")
         command("/usr/bin/systemctl", "enable", "--now", "hecate-bas-broker", *UNITS[:-1])
         time.sleep(3)
         for unit in UNITS:
+            phase = f"{unit} activation verification"
             command("/usr/bin/systemctl", "is-active", unit)
             expected = (
                 "hecate-bas"
@@ -409,11 +445,15 @@ def install(args) -> None:
             ).stdout.strip()
             if actual != expected:
                 raise RuntimeError("Service identity verification failed")
+        phase = "legacy Slack deactivation"
         user_command(args.operator, "disable", "hecate-slack-bot", check=False)
         print(f"Isolated services active. Private rollback snapshot: {backup}")
         if not operator_in_data:
             print("Open a new login session for operator access to newly created shared artifacts.")
-    except Exception:
+    except Exception as failure:
+        # Recovery must still run if a full disk prevents diagnostics.
+        with suppress(OSError):
+            record_failure(backup, phase, failure)
         if activated:
             command("/usr/bin/systemctl", "stop", *UNITS, check=False)
         for unit in UNITS:
@@ -464,7 +504,8 @@ def install(args) -> None:
         if old_slack:
             user_command(args.operator, "start", "hecate-slack-bot", check=False)
         raise RuntimeError(
-            f"Service migration failed and restoration was attempted; inspect {backup}"
+            f"Service migration failed during {phase}; restoration was attempted. "
+            f"Private diagnostics: {backup}/failure.json"
         ) from None
 
 
