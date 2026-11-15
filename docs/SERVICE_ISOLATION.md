@@ -178,3 +178,10 @@ setgid directories 2770 and regular files 0660. Existing correct modes are
 accepted without an ownership-changing chmod. Other groups and world access are
 not accepted. Manual installations retain owner-only data unless the operator
 uses a tree explicitly provisioned for the private shared group.
+
+Public release approvals remain separate from shared queue data. In a managed
+shared workspace, only the workspace owner can record approval. Approval files
+use 0640 with that owner's UID and the private data group, so the publisher can
+read but cannot create a trusted approval itself. Group-writable records and
+worker-owned records are rejected. Existing records widened during migration
+require fresh explicit operator review; they are not silently trusted again.

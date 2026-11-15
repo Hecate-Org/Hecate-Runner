@@ -16,7 +16,7 @@ def _shared_gid() -> int:
         raise PermissionError("Isolated data requires the hecate-data group") from exc
 
 
-def _shared_policy(path: Path, *, directory: bool) -> bool:
+def uses_shared_policy(path: Path, *, directory: bool) -> bool:
     if os.environ.get("HECATE_SERVICE_ISOLATED") == "1":
         return True
     # Operator CLI commands must preserve a tree explicitly provisioned for the
@@ -35,7 +35,7 @@ def _shared_policy(path: Path, *, directory: bool) -> bool:
 
 
 def _mode(path: Path, *, directory: bool) -> int:
-    if _shared_policy(path, directory=directory):
+    if uses_shared_policy(path, directory=directory):
         return 0o2770 if directory else 0o660
     return 0o700 if directory else 0o600
 
@@ -45,7 +45,7 @@ def _protect(path: Path, *, directory: bool) -> None:
     valid_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
     if not valid_type:
         raise PermissionError("Private data must use regular files and directories")
-    if _shared_policy(path, directory=directory) and info.st_gid != _shared_gid():
+    if uses_shared_policy(path, directory=directory) and info.st_gid != _shared_gid():
         raise PermissionError("Isolated data must belong to hecate-data")
     expected = _mode(path, directory=directory)
     # Migrated objects retain their original owner. A different worker must
