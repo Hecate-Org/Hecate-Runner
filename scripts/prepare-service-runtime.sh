@@ -31,10 +31,10 @@ uv export --project "$runner_root" --frozen --no-dev --no-emit-local --no-emit-p
     --format requirements.txt --output-file "$runtime_stage/requirements.txt" > /dev/null
 # A few locked packages (such as sgmllib3k) have only source archives.
 # Any required wheel build happens here as the unprivileged operator.
-uv pip install --python "$runtime_stage/venv/bin/python" --require-hashes \
+uv pip install --no-config --python "$runtime_stage/venv/bin/python" --require-hashes \
     --requirements "$runtime_stage/requirements.txt"
 uv build --wheel --out-dir "$runtime_stage/wheels" "$core_root"
 uv build --wheel --out-dir "$runtime_stage/wheels" "$runner_root"
-uv pip install --python "$runtime_stage/venv/bin/python" --no-deps "$runtime_stage"/wheels/*.whl
+uv pip install --no-config --python "$runtime_stage/venv/bin/python" --no-deps "$runtime_stage"/wheels/*.whl
 "$runtime_stage/venv/bin/python" -I -c 'import hecate_agent.api, hecate_runner.cli; print("Service runtime imports passed")'
 echo "Prepared runtime at $runtime_stage"
