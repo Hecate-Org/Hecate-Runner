@@ -105,17 +105,25 @@ def systemd_path(path: Path) -> str:
 def prepare_runtime(stage: Path, release: Path) -> None:
     old = str(stage)
     shutil.copytree(stage, release, symlinks=True)
-    for path in release.rglob("*"):
+    paths = list(release.rglob("*"))
+    # Rewrite the complete graph before resolving any link. For example,
+    # python3 -> python -> /old/stage/python is valid once both links move,
+    # regardless of directory iteration order.
+    for path in paths:
         if path.is_symlink():
             target = os.readlink(path)
             if target.startswith(old + "/"):
                 path.unlink()
                 path.symlink_to(str(release) + target[len(old) :])
+    for path in paths:
+        if path.is_symlink():
             resolved = path.resolve()
             if not resolved.is_relative_to(release) and not str(resolved).startswith(
                 ("/usr/", "/lib/")
             ):
-                raise ValueError("Runtime symlink escapes the installed release")
+                raise ValueError(
+                    f"Runtime symlink escapes the installed release: {path.relative_to(release)}"
+                )
             continue
         if path.is_file() and (path.parent == release / "venv/bin" or path.name == "pyvenv.cfg"):
             raw = path.read_bytes()
@@ -207,7 +215,16 @@ def install(args) -> None:
     if current.exists() and not current.is_symlink():
         raise ValueError("/opt/hecate/runtime must be a managed release symlink")
     release = prefix / "releases" / timestamp
-    prepare_runtime(stage, release)
+    try:
+        prepare_runtime(stage, release)
+    except FileExistsError:
+        # Never remove a release created by a previous/concurrent invocation.
+        raise
+    except Exception:
+        # A failed, inactive candidate must not accumulate partial runtimes.
+        if release.exists():
+            shutil.rmtree(release)
+        raise
     if command("/usr/bin/getent", "group", "hecate-data", check=False).returncode:
         command("/usr/sbin/groupadd", "--system", "hecate-data")
     for role in (*ROLES, "bas"):
