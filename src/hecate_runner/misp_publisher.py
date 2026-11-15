@@ -30,6 +30,7 @@ from hecate_agent.core.provenance import refang
 from hecate_runner.config import Settings
 from hecate_runner.github_publisher import snapshot_hunt_artifacts
 from hecate_runner.integration_health import protect_request_logs
+from hecate_runner.private_data import prepare_directory, protect_file
 from hecate_runner.sqlite_utils import connect_sqlite
 
 log = logging.getLogger(__name__)
@@ -54,10 +55,11 @@ def _database(settings: Settings) -> Path:
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
     path = _database(settings)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
+    prepare_directory(path.parent)
+    if path.exists() or path.is_symlink():
+        protect_file(path)
     db = connect_sqlite(path, timeout=30, wal=True, busy_timeout_ms=30000)
-    path.chmod(0o600)
+    protect_file(path)
     db.row_factory = sqlite3.Row
     db.execute(
         """CREATE TABLE IF NOT EXISTS exports (
