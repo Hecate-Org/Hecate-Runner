@@ -90,7 +90,9 @@ The installer validates inputs, creates the dedicated accounts and root-owned
 runtime, snapshots installed units/configuration and workspace permissions,
 then stops the old daemon/maintenance and desktop Slack service before
 switching identities. It enables system services for all three workers.
-Existing artifact owners are preserved; private .env/key files are excluded
+The desktop operator joins only the shared hecate-data group and must open a
+new login session to access new worker-owned files. Existing artifact owners
+are preserved; private .env/key files are excluded
 from the shared-group permission changes. Unexpected artifact symlinks or
 unmanaged systemd overrides stop the migration. To retire a reviewed legacy
 override, supply its exact path with --retire-dropin (repeatable); the snapshot

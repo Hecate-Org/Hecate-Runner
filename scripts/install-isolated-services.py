@@ -264,6 +264,9 @@ def install(args) -> None:
         "old_runtime": old_runtime,
     }
     (backup / "previous-state.json").write_text(json.dumps(snapshot, indent=2))
+    operator_in_data = "hecate-data" in command("/usr/bin/id", "-nG", args.operator).stdout.split()
+    snapshot["operator_was_data_member"] = operator_in_data
+    (backup / "previous-state.json").write_text(json.dumps(snapshot, indent=2))
     activated = False
     try:
         config_root.mkdir(exist_ok=True, mode=0o750)
@@ -340,6 +343,8 @@ def install(args) -> None:
         command("/usr/bin/systemctl", "stop", "hecate-runner-daemon", "hecate-runner-maintenance")
         user_command(args.operator, "stop", "hecate-slack-bot", check=False)
         data_gid = grp.getgrnam("hecate-data").gr_gid
+        if not operator_in_data:
+            command("/usr/sbin/usermod", "--append", "--groups", "hecate-data", args.operator)
         for path in [workspace, *workspace.rglob("*")]:
             if path != workspace and private_workspace_path(path.relative_to(workspace)):
                 continue
@@ -389,6 +394,8 @@ def install(args) -> None:
                 raise RuntimeError("Service identity verification failed")
         user_command(args.operator, "disable", "hecate-slack-bot", check=False)
         print(f"Isolated services active. Private rollback snapshot: {backup}")
+        if not operator_in_data:
+            print("Open a new login session for operator access to newly created shared artifacts.")
     except Exception:
         if activated:
             command("/usr/bin/systemctl", "stop", *UNITS, check=False)
@@ -405,6 +412,16 @@ def install(args) -> None:
                 shutil.rmtree(overrides)
             if previous_overrides.exists():
                 shutil.copytree(previous_overrides, overrides, dirs_exist_ok=True)
+        if activated:
+            # New artifacts belong to a worker. Preserve operator access if the
+            # migration is rolled back and its data-group membership is removed.
+            known_paths = {entry[0] for entry in permissions}
+            worker_uids = {pwd.getpwnam(f"hecate-{role}").pw_uid for role in ROLES}
+            for path in workspace.rglob("*"):
+                if str(path) not in known_paths and path.lstat().st_uid in worker_uids:
+                    os.chown(path, pwd.getpwnam(args.operator).pw_uid, -1, follow_symlinks=False)
+            if not operator_in_data:
+                command("/usr/bin/gpasswd", "--delete", args.operator, "hecate-data", check=False)
         for path, gid, mode in reversed(permissions):
             os.chown(path, -1, gid)
             os.chmod(path, mode)
