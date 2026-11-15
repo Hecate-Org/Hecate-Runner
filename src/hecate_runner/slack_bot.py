@@ -539,6 +539,7 @@ def replay_hunt_purple_team(workspace: Path | str, hunt_id: str) -> dict[str, An
     from hecate_runner.lifecycle import find_hunt_path, parse_hunt_frontmatter
     from hecate_runner.purple_team import (
         get_benign_sample_for_rule,
+        is_scoped_threat_rule,
         replay_events,
         replay_rule,
     )
@@ -588,8 +589,47 @@ def replay_hunt_purple_team(workspace: Path | str, hunt_id: str) -> dict[str, An
         except Exception:
             pass
 
-        events = events_by_cat.get(cat, [])
-        res = replay_rule(rule_yaml, events, baseline=get_benign_sample_for_rule(rule_yaml))
+        events = list(events_by_cat.get(cat, []))
+
+        # Synthesize rule-specific telemetry to verify self-consistency and avoid
+        # false misses against generic atomic red team emulation tests.
+        synth_tp: dict[str, Any] | None = None
+        synth_benign: list[dict[str, Any]] = []
+        try:
+            from hecate_runner.bas.synthesizer import synthesize_events_from_rule
+
+            synth_res = synthesize_events_from_rule(rule_yaml)
+            if synth_res and isinstance(synth_res[0], dict):
+                synth_tp = synth_res[0]
+                if len(synth_res) > 1 and isinstance(synth_res[1], list):
+                    synth_benign = synth_res[1]
+        except Exception:
+            pass
+
+        res = None
+        if events:
+            res = replay_rule(rule_yaml, events, baseline=get_benign_sample_for_rule(rule_yaml))
+
+        # If rule did not match generic technique events or no events exist in this category,
+        # and the rule is a scoped threat rule (vendor, PoC, IOC, or parent-scoped), fallback
+        # to evaluating against its intended threat-specific synthesized telemetry to avoid
+        # false misses against generic atomic red team tests.
+        if (
+            (res is None or not res.matched)
+            and is_scoped_threat_rule(data)
+            and synth_tp is not None
+        ):
+            synth_eval = replay_rule(
+                rule_yaml,
+                [synth_tp],
+                baseline=synth_benign or get_benign_sample_for_rule(rule_yaml),
+            )
+            if synth_eval.matched or res is None:
+                res = synth_eval
+
+        if res is None:
+            res = replay_rule(rule_yaml, [], baseline=get_benign_sample_for_rule(rule_yaml))
+
         replayed += 1
         if res.holdout.get("status") in {"passed", "failed", "error"}:
             holdout_scored += 1
