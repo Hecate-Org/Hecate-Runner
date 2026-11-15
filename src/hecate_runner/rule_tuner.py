@@ -453,6 +453,7 @@ class RuleTuner:
         missed_events: list[dict[str, Any]],
         instruction: str | None = None,
         apply: bool = False,
+        rule_file: Path | str | None = None,
     ) -> RuleTuningResult:
         """Derive an expansion or repair instruction from missed attack telemetry and optionally mutate the rule."""
         norm_hunt_id = normalize_hunt_id(hunt_id)
@@ -465,17 +466,20 @@ class RuleTuner:
                 error=f"Query directory not found for {norm_hunt_id} at {query_dir}",
             )
 
-        sigma_files = sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
-        if not sigma_files:
-            return RuleTuningResult(
-                ok=False,
-                hunt_id=norm_hunt_id,
-                action_summary="",
-                error=f"No Sigma YAML files found under {query_dir}",
-            )
+        if rule_file is not None:
+            resolved_rule_file = Path(rule_file) if isinstance(rule_file, str) else rule_file
+        else:
+            sigma_files = sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
+            if not sigma_files:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    error=f"No Sigma YAML files found under {query_dir}",
+                )
+            resolved_rule_file = sigma_files[0]
 
-        rule_file = sigma_files[0]
-        original_yaml = read_artifact(rule_file, self.workspace)
+        original_yaml = read_artifact(resolved_rule_file, self.workspace)
 
         if not instruction:
             if not missed_events:
@@ -483,7 +487,7 @@ class RuleTuner:
                     ok=False,
                     hunt_id=norm_hunt_id,
                     action_summary="",
-                    rule_file=rule_file,
+                    rule_file=resolved_rule_file,
                     error="No missed events provided to diagnose",
                 )
 
@@ -495,8 +499,49 @@ class RuleTuner:
                     ok=False,
                     hunt_id=norm_hunt_id,
                     action_summary="",
-                    rule_file=rule_file,
+                    rule_file=resolved_rule_file,
                     error=f"Failed to parse rule YAML: {exc}",
+                )
+
+            category = str(rule_dict.get("logsource", {}).get("category", "") or "").lower()
+            if category:
+                cat_events = [
+                    ev
+                    for ev in missed_events
+                    if ev.get("category") == category
+                    or ev.get("data_source") == category
+                    or (
+                        category == "process_creation"
+                        and ("CommandLine" in ev or "ParentImage" in ev or "Image" in ev)
+                    )
+                    or (
+                        category == "file_event"
+                        and ("TargetFilename" in ev or "TargetObject" in ev)
+                    )
+                    or (
+                        category == "network_connection"
+                        and (
+                            "DestinationIp" in ev
+                            or "DestinationHostname" in ev
+                            or "DestinationPort" in ev
+                        )
+                    )
+                    or (
+                        category == "webserver"
+                        and ("cs-method" in ev or "cs-uri-stem" in ev or "c-uri" in ev)
+                    )
+                    or (category == "dns_query" and ("QueryName" in ev))
+                ]
+            else:
+                cat_events = missed_events
+
+            if not cat_events:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    rule_file=resolved_rule_file,
+                    error=f"No missed events in category '{category}' to diagnose",
                 )
 
             detection = rule_dict.get("detection") or {}
@@ -513,7 +558,7 @@ class RuleTuner:
                     if field_base.lower() in ("parentimage", "parent"):
                         observed_parents = [
                             str(ev.get("ParentImage") or ev.get("parent") or "")
-                            for ev in missed_events
+                            for ev in cat_events
                             if (ev.get("ParentImage") or ev.get("parent"))
                         ]
                         if observed_parents:
@@ -529,7 +574,7 @@ class RuleTuner:
                     if field_base.lower() in ("image", "process", "path"):
                         observed_images = [
                             str(ev.get("Image") or ev.get("process") or "")
-                            for ev in missed_events
+                            for ev in cat_events
                             if (ev.get("Image") or ev.get("process"))
                         ]
                         if observed_images:
@@ -543,7 +588,7 @@ class RuleTuner:
                     if field_base.lower() in ("commandline", "cmdline"):
                         observed_cmds = [
                             str(ev.get("CommandLine") or ev.get("commandline") or "")
-                            for ev in missed_events
+                            for ev in cat_events
                             if (ev.get("CommandLine") or ev.get("commandline"))
                         ]
                         if observed_cmds:
@@ -570,7 +615,7 @@ class RuleTuner:
                     if field_base.lower() in ("targetobject", "registry_key", "key"):
                         observed_targets = [
                             str(ev.get("TargetObject") or ev.get("targetobject") or "")
-                            for ev in missed_events
+                            for ev in cat_events
                             if (ev.get("TargetObject") or ev.get("targetobject"))
                         ]
                         if observed_targets:
@@ -586,7 +631,7 @@ class RuleTuner:
                     if field_base.lower() in ("pipename", "pipe"):
                         observed_pipes = [
                             str(ev.get("PipeName") or ev.get("pipename") or "")
-                            for ev in missed_events
+                            for ev in cat_events
                             if (ev.get("PipeName") or ev.get("pipename"))
                         ]
                         if observed_pipes:
@@ -605,7 +650,7 @@ class RuleTuner:
                                 or ev.get("operationName")
                                 or ""
                             )
-                            for ev in missed_events
+                            for ev in cat_events
                             if (
                                 ev.get("eventName")
                                 or ev.get("methodName")
@@ -624,25 +669,57 @@ class RuleTuner:
 
             # Fallback if no specific constraint bottleneck identified
             if not derived_instruction:
-                ev0 = missed_events[0]
-                if ev0.get("CommandLine"):
-                    derived_instruction = f"Expand CommandLine to include {ev0['CommandLine']}"
-                elif ev0.get("Image"):
-                    derived_instruction = f"Expand Image to include {Path(str(ev0['Image'])).name}"
-                elif ev0.get("TargetObject"):
-                    derived_instruction = f"Expand TargetObject to include {ev0['TargetObject']}"
-                elif ev0.get("PipeName"):
-                    derived_instruction = f"Expand PipeName to include {ev0['PipeName']}"
-                elif ev0.get("eventName"):
-                    derived_instruction = f"Expand eventName to include {ev0['eventName']}"
-                else:
-                    return RuleTuningResult(
-                        ok=False,
-                        hunt_id=norm_hunt_id,
-                        action_summary="",
-                        rule_file=rule_file,
-                        error="Could not derive tuning instruction from missed events",
-                    )
+                ev0 = cat_events[0]
+                if category in ("process_creation", ""):
+                    if ev0.get("CommandLine"):
+                        derived_instruction = f"Expand CommandLine to include {ev0['CommandLine']}"
+                    elif ev0.get("Image"):
+                        derived_instruction = (
+                            f"Expand Image to include {Path(str(ev0['Image'])).name}"
+                        )
+                elif category == "file_event":
+                    if ev0.get("TargetFilename"):
+                        derived_instruction = (
+                            f"Expand TargetFilename to include {ev0['TargetFilename']}"
+                        )
+                    elif ev0.get("TargetObject"):
+                        derived_instruction = (
+                            f"Expand TargetObject to include {ev0['TargetObject']}"
+                        )
+                elif category == "network_connection":
+                    if ev0.get("DestinationIp"):
+                        derived_instruction = (
+                            f"Expand DestinationIp to include {ev0['DestinationIp']}"
+                        )
+                    elif ev0.get("DestinationHostname"):
+                        derived_instruction = (
+                            f"Expand DestinationHostname to include {ev0['DestinationHostname']}"
+                        )
+                elif category == "webserver":
+                    if ev0.get("cs-uri-stem"):
+                        derived_instruction = f"Expand cs-uri-stem to include {ev0['cs-uri-stem']}"
+                    elif ev0.get("c-uri"):
+                        derived_instruction = f"Expand c-uri to include {ev0['c-uri']}"
+                elif category == "dns_query" and ev0.get("QueryName"):
+                    derived_instruction = f"Expand QueryName to include {ev0['QueryName']}"
+
+                if not derived_instruction:
+                    if ev0.get("TargetObject"):
+                        derived_instruction = (
+                            f"Expand TargetObject to include {ev0['TargetObject']}"
+                        )
+                    elif ev0.get("PipeName"):
+                        derived_instruction = f"Expand PipeName to include {ev0['PipeName']}"
+                    elif ev0.get("eventName"):
+                        derived_instruction = f"Expand eventName to include {ev0['eventName']}"
+                    else:
+                        return RuleTuningResult(
+                            ok=False,
+                            hunt_id=norm_hunt_id,
+                            action_summary="",
+                            rule_file=resolved_rule_file,
+                            error="Could not derive tuning instruction from missed events",
+                        )
 
             instruction = derived_instruction
 
@@ -657,23 +734,50 @@ class RuleTuner:
                 ok=False,
                 hunt_id=norm_hunt_id,
                 action_summary="",
-                rule_file=rule_file,
+                rule_file=resolved_rule_file,
                 error=str(exc),
             )
+
+        if "semantic validation warning" in summary.lower():
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary=summary,
+                rule_file=resolved_rule_file,
+                error=f"Semantic validation failed: {summary}",
+            )
+
+        # Verify that the candidate actually matches the missed events
+        try:
+            from hecate_agent.core.sigma_evaluator import SigmaEvaluator
+
+            eval_res = SigmaEvaluator.evaluate_rule(
+                new_yaml, intrusion_events=cat_events, baseline_events=[]
+            )
+            if eval_res.true_positives == 0:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    rule_file=resolved_rule_file,
+                    error="Derived tuning does not resolve the missed telemetry",
+                )
+        except Exception as eval_exc:
+            log.debug("Verification of tuned rule candidate skipped: %s", eval_exc)
 
         diff_lines = list(
             difflib.unified_diff(
                 original_yaml.splitlines(keepends=True),
                 new_yaml.splitlines(keepends=True),
-                fromfile=f"a/{rule_file.name}",
-                tofile=f"b/{rule_file.name}",
+                fromfile=f"a/{resolved_rule_file.name}",
+                tofile=f"b/{resolved_rule_file.name}",
             )
         )
         return RuleTuningResult(
             ok=True,
             hunt_id=norm_hunt_id,
             action_summary=f"Suggested tuning ({summary}): `{instruction}`",
-            rule_file=rule_file,
+            rule_file=resolved_rule_file,
             diff="".join(diff_lines),
             new_rule_yaml=new_yaml,
         )

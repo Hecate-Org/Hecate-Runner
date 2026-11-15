@@ -613,6 +613,60 @@ class ReplayResult:
         }
 
 
+def is_scoped_threat_rule(rule_data: dict[str, Any]) -> bool:
+    """Determine if a Sigma rule is scoped to a specific threat, vendor, software, or appliance.
+
+    Vendor-scoped and threat-specific rules should not be flagged as misses against generic
+    technique emulation tests that execute unrelated commands or binaries (e.g. php-fpm or certutil).
+    """
+    if not isinstance(rule_data, dict):
+        return False
+    title = str(rule_data.get("title", "")).lower()
+    desc = str(rule_data.get("description", "")).lower()
+    author = str(rule_data.get("author", "")).lower()
+
+    vendor_indicators = (
+        "cve-",
+        "gpustack",
+        "pan-os",
+        "globalprotect",
+        "wordpress",
+        "node-red",
+        "freeswitch",
+        "forticlient",
+        "fortivrs",
+        "apache",
+        "httpd",
+        "nginx",
+        "php2shell",
+        "deterministic",
+        "poc",
+        "source guidance",
+        "source intelligence",
+        "source indicators",
+        "quoted in the source",
+    )
+    if any(ind in title or ind in desc or ind in author for ind in vendor_indicators):
+        return True
+
+    detection = rule_data.get("detection") or {}
+    for sel_key, sel_val in detection.items():
+        if sel_key in ("condition", "timeframe"):
+            continue
+        items = sel_val if isinstance(sel_val, list) else [sel_val]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for k in item:
+                k_lower = k.lower()
+                if "parentimage" in k_lower or "parentcommandline" in k_lower:
+                    return True
+                if "cs-uri-stem" in k_lower or "cs-uri-query" in k_lower:
+                    return True
+
+    return False
+
+
 def replay_rule(
     rule_yaml: str,
     events: list[dict[str, Any]],
@@ -806,16 +860,17 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
 
             passed = res.get("passed_rules", 0)
             total = res.get("total_rules", 0)
-            holdout_failed = res.get("holdout_rules_failed", 0)
 
             tuning_suggestion: dict[str, Any] | None = None
-            if passed < total or holdout_failed > 0:
-                events_list: list[dict[str, Any]] = []
+            if passed < total:
                 from hecate_runner.lifecycle import find_hunt_path, parse_hunt_frontmatter
+                from hecate_runner.workspace_paths import query_directory
 
                 hunt_path = find_hunt_path(workspace, hunt_id)
                 if hunt_path and hunt_path.is_file():
                     try:
+                        import yaml
+
                         fm, body, _ = parse_hunt_frontmatter(read_artifact(hunt_path, workspace))
                         techs = list(fm.get("techniques") or [])
                         ev_by_cat = replay_events(
@@ -823,54 +878,87 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
                             artifacts=[],
                             cti_text=body or "",
                             techniques=techs,
-                            enable_atomic=True,
+                            enable_atomic=False,
                             platforms=list(fm.get("platform") or []),
                         )
-                        events_list = [ev for cat_events in ev_by_cat.values() for ev in cat_events]
+                        # If no CTI-extracted observables, fallback to techniques
+                        if not any(ev_by_cat.values()):
+                            ev_by_cat = replay_events(
+                                records=[],
+                                artifacts=[],
+                                cti_text=body or "",
+                                techniques=techs,
+                                enable_atomic=True,
+                                platforms=list(fm.get("platform") or []),
+                            )
+
+                        q_dir = query_directory(workspace, hunt_id)
+                        sigma_files = (
+                            sorted(list(q_dir.glob("*.yml")) + list(q_dir.glob("*.yaml")))
+                            if q_dir.exists()
+                            else []
+                        )
+
+                        for s_file in sigma_files:
+                            rule_yaml = read_artifact(s_file, workspace)
+                            rule_data = yaml.safe_load(rule_yaml) or {}
+                            cat = str(
+                                rule_data.get("logsource", {}).get("category", "") or ""
+                            ).lower()
+                            cat_events = ev_by_cat.get(cat, [])
+                            if cat_events:
+                                tune_res = tuner.auto_tune_from_miss(
+                                    hunt_id,
+                                    cat_events,
+                                    apply=False,
+                                    rule_file=s_file,
+                                )
+                                if tune_res.ok:
+                                    tuning_suggestion = {
+                                        "hunt_id": hunt_id,
+                                        "action_summary": tune_res.action_summary,
+                                        "diff": tune_res.diff,
+                                        "new_rule_yaml": tune_res.new_rule_yaml,
+                                        "generated_at": datetime.now(UTC).isoformat(),
+                                    }
+                                    sugg_file = suggestions_dir / f"{hunt_id}.json"
+                                    write_artifact(
+                                        sugg_file,
+                                        json.dumps(tuning_suggestion, indent=2),
+                                        workspace,
+                                    )
+                                    log.info(
+                                        "Continuous verification generated tuning suggestion for %s: %s",
+                                        hunt_id,
+                                        tune_res.action_summary,
+                                    )
+
+                                    if getattr(settings, "slack_channel_purple_team", None):
+                                        try:
+                                            from hecate_runner.notifications import (
+                                                notify_purple_team,
+                                            )
+
+                                            notify_purple_team(
+                                                settings,
+                                                hunt_id=hunt_id,
+                                                technique=f"Continuous Replay ({passed}/{total} rules passed)",
+                                                success=False,
+                                                telemetry_count=len(cat_events),
+                                                summary=f"⚠️ Continuous replay miss detected ({passed}/{total} rules passed). {tune_res.action_summary}",
+                                            )
+                                        except Exception as notify_exc:
+                                            log.debug(
+                                                "Failed notifying Slack of continuous replay tuning: %s",
+                                                notify_exc,
+                                            )
+                                    break
                     except Exception as parse_exc:
                         log.debug(
                             "Failed parsing hunt %s for continuous tuning: %s",
                             hunt_id,
                             parse_exc,
                         )
-
-                if events_list:
-                    tune_res = tuner.auto_tune_from_miss(hunt_id, events_list, apply=False)
-                    if tune_res.ok:
-                        tuning_suggestion = {
-                            "hunt_id": hunt_id,
-                            "action_summary": tune_res.action_summary,
-                            "diff": tune_res.diff,
-                            "new_rule_yaml": tune_res.new_rule_yaml,
-                            "generated_at": datetime.now(UTC).isoformat(),
-                        }
-                        sugg_file = suggestions_dir / f"{hunt_id}.json"
-                        write_artifact(
-                            sugg_file, json.dumps(tuning_suggestion, indent=2), workspace
-                        )
-                        log.info(
-                            "Continuous verification generated tuning suggestion for %s: %s",
-                            hunt_id,
-                            tune_res.action_summary,
-                        )
-
-                        if getattr(settings, "slack_channel_purple_team", None):
-                            try:
-                                from hecate_runner.notifications import notify_purple_team
-
-                                notify_purple_team(
-                                    settings,
-                                    hunt_id=hunt_id,
-                                    technique=f"Continuous Replay ({passed}/{total} rules passed)",
-                                    success=False,
-                                    telemetry_count=len(events_list),
-                                    summary=f"⚠️ Continuous replay miss detected ({passed}/{total} rules passed). {tune_res.action_summary}",
-                                )
-                            except Exception as notify_exc:
-                                log.debug(
-                                    "Failed notifying Slack of continuous replay tuning: %s",
-                                    notify_exc,
-                                )
 
             res["tuning_suggestion"] = tuning_suggestion
             outcomes.append(res)
