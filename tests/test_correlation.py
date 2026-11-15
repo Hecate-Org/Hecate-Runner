@@ -443,9 +443,7 @@ def test_publication_snapshot_excludes_incremental_query_stubs(tmp_path: Path) -
     assert not any("incremental" in path for path in files)
 
 
-def test_orchestrator_skips_publish_on_correlation_noop(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_orchestrator_skips_publish_on_correlation_noop(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "workspace"
     hunts_dir = workspace / "hunts" / "2026"
     hunts_dir.mkdir(parents=True)
