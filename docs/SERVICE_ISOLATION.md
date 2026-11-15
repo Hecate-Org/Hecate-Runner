@@ -51,7 +51,10 @@ Use a Splunk principal restricted to searching the intended indexes for the
 reader token, and a separate principal with only the necessary saved-search
 management rights for the writer token. Do not rename the same administrator
 token into both fields. If lab ingestion is enabled, its distinct ingestion
-token should be restricted to the lab index. The installer verifies that the
+token must be a distinct HTTP Event Collector (HEC) token with only the lab
+index allowed. Set SPLUNK_HEC_URL to its HTTPS base URL (for this host,
+https://localhost:8088). Isolated ingestion requires HEC and never falls back
+to the broad management receiver or password authentication. The installer verifies that the
 read/write values differ; administrators must verify their actual server-side
 permissions. GitHub's read token should also be restricted to the repositories
 and read operations the intake sources require.
