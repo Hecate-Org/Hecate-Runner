@@ -34,6 +34,13 @@ def _discover_env_files(workspace: Path | None = None) -> tuple[str, ...]:
 class Settings(BaseSettings):
     """Runtime configuration for the hecate-runner orchestrator."""
 
+    def __init__(self, **values: Any) -> None:
+        if os.environ.get("HECATE_SERVICE_ISOLATED") == "1":
+            # BaseSettings constructs DotEnvSettingsSource before calling
+            # settings_customise_sources. Disable its eager filesystem read.
+            values["_env_file"] = None
+        super().__init__(**values)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

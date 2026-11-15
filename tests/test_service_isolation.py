@@ -226,3 +226,14 @@ def test_failed_command_diagnostics_are_private_and_not_printed(tmp_path, capsys
     assert details["returncode"] == 1
     assert details["stderr"] == sentinel
     assert capsys.readouterr().out == ""
+
+
+def test_isolated_settings_never_read_even_an_explicit_dotenv(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("HECATE_RUNNER_MIN_HOURS_BETWEEN_DRAFTS=91\n")
+    monkeypatch.setenv("HECATE_SERVICE_ISOLATED", "1")
+    monkeypatch.setattr(
+        "hecate_runner.config.DotEnvSettingsSource._read_env_file",
+        lambda *args, **kwargs: pytest.fail("Isolated Settings must not read dotenv files"),
+    )
+    assert Settings(hecate_workspace=tmp_path, _env_file=path).min_hours_between_drafts != 91
