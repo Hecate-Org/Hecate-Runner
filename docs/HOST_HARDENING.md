@@ -9,6 +9,10 @@ access or kernel exploits. See [the actual catalog and limits](BAS_AUTOMATION.md
 The installed-host observations below are deployment history, not a guarantee
 for a fresh adopter host. Verify the effective controls on your own installation.
 
+Use [the dedicated-account service migration](SERVICE_ISOLATION.md) to separate
+application workers from desktop credentials and administrative groups. Updating
+the repository unit templates alone does not change installed services.
+
 ## Applied lab controls
 
 - Nonroot agent, read-only root, all capabilities dropped, no privilege

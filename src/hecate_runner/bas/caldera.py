@@ -415,8 +415,19 @@ class CalderaConnector(BASProvider):
                 state = completed_op.get("state", "").lower()
                 chain = completed_op.get("chain", [])
                 if state in ("finished", "out_of_time"):
-                    op_finished = True
-                    break
+                    cleanup_links = [lnk for lnk in chain if lnk.get("cleanup") in (1, True, "1")]
+                    if request.cleanup_on_finish and procedure and procedure.cleanup_command:
+                        if cleanup_links and all(
+                            lnk.get("status") not in (-3, None) for lnk in cleanup_links
+                        ):
+                            op_finished = True
+                            break
+                        elif not cleanup_links and state == "finished":
+                            time.sleep(poll_interval)
+                            continue
+                    else:
+                        op_finished = True
+                        break
                 time.sleep(poll_interval)
 
             end_time = datetime.now(UTC)
@@ -565,7 +576,7 @@ class CalderaConnector(BASProvider):
                     )
                 else:
                     cleanup_error = "Remote cleanup is unconfirmed: cleanup receipts are incomplete or target another agent."
-            elif procedure and execution_succeeded:
+            elif procedure:
                 from hecate_runner.bas.approved import ARTIFACT_FREE_TECHNIQUES
 
                 if (

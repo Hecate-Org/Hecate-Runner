@@ -33,19 +33,17 @@ def test_write_cursor(provider):
     assert json.loads(provider.cursor_file.read_text())["last_date_added"] == dt.isoformat()
 
 
-@patch("urllib.request.urlopen")
-def test_fetch_catalog_success(mock_urlopen, provider):
+@patch("httpx.get")
+def test_fetch_catalog_success(mock_get, provider):
     mock_response = MagicMock()
-    mock_response.status = 200
-    mock_response.read.return_value = json.dumps(
-        {
-            "vulnerabilities": [
-                {"cveID": "CVE-2", "dateAdded": "2026-09-02"},
-                {"cveID": "CVE-1", "dateAdded": "2026-09-01"},
-            ]
-        }
-    ).encode("utf-8")
-    mock_urlopen.return_value.__enter__.return_value = mock_response
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "vulnerabilities": [
+            {"cveID": "CVE-2", "dateAdded": "2026-09-02"},
+            {"cveID": "CVE-1", "dateAdded": "2026-09-01"},
+        ]
+    }
+    mock_get.return_value = mock_response
 
     vulns = provider._fetch_catalog()
     assert len(vulns) == 2
@@ -54,36 +52,34 @@ def test_fetch_catalog_success(mock_urlopen, provider):
     assert vulns[1]["cveID"] == "CVE-2"
 
 
-@patch("urllib.request.urlopen")
-def test_next_item_yields_new(mock_urlopen, provider):
+@patch("httpx.get")
+def test_next_item_yields_new(mock_get, provider):
     # Set cursor to 2026-09-01
     provider._write_cursor(datetime(2026, 9, 1, tzinfo=UTC))
 
     mock_response = MagicMock()
-    mock_response.status = 200
-    mock_response.read.return_value = json.dumps(
-        {
-            "vulnerabilities": [
-                {
-                    "cveID": "CVE-1",
-                    "dateAdded": "2026-09-01",
-                    "vendorProject": "A",
-                    "product": "B",
-                    "vulnerabilityName": "C",
-                    "knownRansomwareCampaignUse": "Known",
-                },
-                {
-                    "cveID": "CVE-2",
-                    "dateAdded": "2026-09-02",
-                    "vendorProject": "D",
-                    "product": "E",
-                    "vulnerabilityName": "F",
-                    "knownRansomwareCampaignUse": "Unknown",
-                },
-            ]
-        }
-    ).encode("utf-8")
-    mock_urlopen.return_value.__enter__.return_value = mock_response
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "vulnerabilities": [
+            {
+                "cveID": "CVE-1",
+                "dateAdded": "2026-09-01",
+                "vendorProject": "A",
+                "product": "B",
+                "vulnerabilityName": "C",
+                "knownRansomwareCampaignUse": "Known",
+            },
+            {
+                "cveID": "CVE-2",
+                "dateAdded": "2026-09-02",
+                "vendorProject": "D",
+                "product": "E",
+                "vulnerabilityName": "F",
+                "knownRansomwareCampaignUse": "Unknown",
+            },
+        ]
+    }
+    mock_get.return_value = mock_response
 
     item = provider.next_item()
     assert item is not None

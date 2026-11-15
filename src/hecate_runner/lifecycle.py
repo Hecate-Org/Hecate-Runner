@@ -20,7 +20,12 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
-from hecate_runner.atomic_write import atomic_write_text
+from hecate_runner.workspace_paths import (
+    normalize_hunt_id,
+    read_artifact,
+    workspace_path,
+    write_artifact,
+)
 
 log = logging.getLogger(__name__)
 
@@ -64,11 +69,16 @@ def normalize_lifecycle_state(status: str) -> str:
 
 def find_hunt_path(workspace: Path, hunt_id: str) -> Path | None:
     """Locate the markdown file for a given hunt ID in workspace/hunts."""
-    hunts_dir = workspace / "hunts"
+    hunt_id = normalize_hunt_id(hunt_id)
+    hunts_dir = workspace_path(workspace, "hunts")
     if not hunts_dir.exists():
         return None
     matches = sorted(hunts_dir.glob(f"**/{hunt_id}.md"))
-    return matches[0] if matches else None
+    return (
+        workspace_path(workspace, matches[0].relative_to(workspace.resolve()).as_posix())
+        if matches
+        else None
+    )
 
 
 def parse_hunt_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
@@ -122,7 +132,7 @@ def get_hunt_lifecycle(workspace: Path, hunt_id: str) -> dict[str, Any]:
             "path": None,
         }
 
-    content = hunt_path.read_text(encoding="utf-8")
+    content = read_artifact(hunt_path, workspace)
     fm, _, _ = parse_hunt_frontmatter(content)
 
     raw_status = str(fm.get("status") or "planning")
@@ -179,7 +189,7 @@ def set_hunt_lifecycle(
             "error": f"Hunt file not found for {hunt_id}",
         }
 
-    content = hunt_path.read_text(encoding="utf-8")
+    content = read_artifact(hunt_path, workspace)
     fm, raw_yaml, body = parse_hunt_frontmatter(content)
     if not fm and not raw_yaml:
         # Non-frontmatter file or unexpected structure
@@ -308,7 +318,7 @@ def set_hunt_lifecycle(
     yaml_rt.dump(fm, stream)
     new_yaml = stream.getvalue()
     new_content = f"---\n{new_yaml}---\n{body.lstrip()}"
-    atomic_write_text(hunt_path, new_content)
+    write_artifact(hunt_path, new_content, workspace)
 
     log.info(
         "Hunt %s lifecycle updated: %s -> %s (by %s)",
@@ -343,7 +353,7 @@ def record_hunt_execution(
     if not hunt_path:
         return {"ok": False, "hunt_id": hunt_id, "error": f"Hunt file not found for {hunt_id}"}
 
-    content = hunt_path.read_text(encoding="utf-8")
+    content = read_artifact(hunt_path, workspace)
     fm, raw_yaml, body = parse_hunt_frontmatter(content)
     if not fm and not raw_yaml:
         return {
@@ -461,7 +471,7 @@ def record_hunt_execution(
         )
 
     new_content = f"---\n{new_yaml}---\n{body.rstrip()}\n{exec_entry}"
-    atomic_write_text(hunt_path, new_content)
+    write_artifact(hunt_path, new_content, workspace)
 
     log.info("Recorded execution for %s: outcome=%s, matches=%d", hunt_id, outcome, matched_count)
     return {

@@ -58,8 +58,17 @@ def test_forward_events_basic_auth_fallback(monkeypatch):
 
 def test_tls_verification_defaults_on_and_allows_explicit_override(monkeypatch, tmp_path):
     monkeypatch.delenv("SPLUNK_VERIFY_SSL", raising=False)
+    monkeypatch.delenv("SPLUNK_HEC_URL", raising=False)
     with mock.patch("httpx.Client") as client:
+        # Default host is localhost → skip verify (self-signed lab certs).
         assert forward_events_to_splunk([{"event": "test"}], workspace=tmp_path) == 1
+        assert client.call_args.kwargs["verify"] is False
+        # Non-loopback host verifies TLS by default.
+        forward_events_to_splunk(
+            [{"event": "test"}],
+            workspace=tmp_path,
+            host="https://splunk.example:8089",
+        )
         assert client.call_args.kwargs["verify"] is True
         forward_events_to_splunk([{"event": "test"}], workspace=tmp_path, verify_ssl=False)
         assert client.call_args.kwargs["verify"] is False
@@ -97,3 +106,67 @@ def test_forwarder_uses_selected_workspace_credentials(monkeypatch, tmp_path):
         post = client.return_value.__enter__.return_value.post
         assert post.call_args.args[0].startswith("https://selected/")
         assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer selected-token"
+
+
+def test_isolated_hec_wraps_events_and_never_uses_management_credentials(monkeypatch):
+    import json
+
+    import httpx
+
+    monkeypatch.setenv("HECATE_STRICT_CREDENTIAL_ROLES", "1")
+    monkeypatch.setenv("SPLUNK_HEC_URL", "https://localhost:8088")
+    monkeypatch.setenv("SPLUNK_INGEST_TOKEN", "-".join(["hec", "fixture"]))
+    monkeypatch.setenv("SPLUNK_PASSWORD", "-".join(["forbidden", "fallback"]))
+    response = httpx.Response(
+        200, json={"code": 0}, request=httpx.Request("POST", "https://localhost")
+    )
+    with mock.patch("httpx.Client.post", return_value=response) as post:
+        assert forward_events_to_splunk([{"Image": "lab-process"}]) == 1
+        assert post.call_count == 1
+        assert post.call_args.args[0] == "https://localhost:8088/services/collector/event"
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Splunk " + "-".join(
+            ["hec", "fixture"]
+        )
+        assert json.loads(post.call_args.kwargs["content"]) == {
+            "index": "main",
+            "sourcetype": "hecate:telemetry",
+            "event": {"Image": "lab-process"},
+        }
+        assert not isinstance(post.call_args.kwargs["auth"], tuple)
+
+
+def test_isolated_ingestion_refuses_missing_hec_configuration(monkeypatch):
+    monkeypatch.setenv("HECATE_STRICT_CREDENTIAL_ROLES", "1")
+    monkeypatch.delenv("SPLUNK_HEC_URL", raising=False)
+    monkeypatch.setenv("SPLUNK_TOKEN", "-".join(["legacy", "fixture"]))
+    with mock.patch("httpx.Client") as client:
+        assert forward_events_to_splunk([{"Image": "lab-process"}]) == 0
+        client.assert_not_called()
+
+
+def test_hec_rejections_never_retry_with_broader_credentials(monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("SPLUNK_HEC_URL", "https://localhost:8088")
+    monkeypatch.setenv("SPLUNK_INGEST_TOKEN", "-".join(["hec", "fixture"]))
+    monkeypatch.setenv("SPLUNK_PASSWORD", "-".join(["forbidden", "fallback"]))
+    for status, code in [(403, 7), (200, 7), (401, 4)]:
+        response = httpx.Response(
+            status, json={"code": code}, request=httpx.Request("POST", "https://localhost")
+        )
+        with mock.patch("httpx.Client.post", return_value=response) as post:
+            assert forward_events_to_splunk([{"Image": "lab-process"}]) == 0
+            assert post.call_count == 1
+
+
+def test_hec_rejects_credentials_or_unsafe_url_syntax(monkeypatch):
+    monkeypatch.setenv("SPLUNK_INGEST_TOKEN", "-".join(["hec", "fixture"]))
+    for url in [
+        "http://localhost:8088",
+        "https://localhost:8088/other",
+        "https://localhost:8088?token=bad",
+    ]:
+        monkeypatch.setenv("SPLUNK_HEC_URL", url)
+        with mock.patch("httpx.Client") as client:
+            assert forward_events_to_splunk([{"Image": "lab-process"}]) == 0
+            client.assert_not_called()

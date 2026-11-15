@@ -18,6 +18,10 @@ def test_collect_detection_engineering_metrics(settings: Settings, tmp_path: Pat
     queries_dir.mkdir(parents=True)
     rule_file = queries_dir / "audit__suspicious_process.yml"
     rule_file.write_text("title: Suspicious Process Creation\ntags:\n  - attack.t1059.001\n")
+    # Noise outside queries/ must not inflate the Sigma inventory.
+    (ws / "noise.yml").write_text("title: not a detection rule\n")
+    (ws / ".venv").mkdir()
+    (ws / ".venv" / "site.yml").write_text("title: venv junk\n")
 
     hunts_dir = ws / "hunts" / "2026" / "Q4"
     hunts_dir.mkdir(parents=True)
@@ -37,7 +41,7 @@ def test_collect_detection_engineering_metrics(settings: Settings, tmp_path: Pat
     settings = settings.model_copy(update={"hecate_workspace": ws})
     metrics = collect_detection_engineering_metrics(settings, hours=24)
 
-    assert metrics["total_sigma_rules"] >= 1
+    assert metrics["total_sigma_rules"] == 1
     assert metrics["recent_hunts_count"] == 1
     assert metrics["rules_evaluated_24h"] == 5
     assert metrics["rules_validated_24h"] == 4

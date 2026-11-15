@@ -223,6 +223,8 @@ def test_incremental_enricher_appends_indicators_and_rules(tmp_path: Path) -> No
 hunt_id: H-0001
 title: "Adversaries exploiting CVE-2026-9000"
 status: planning
+platform:
+- Linux
 techniques: ["T1190"]
 ---
 # H-0001: CVE-2026-9000
@@ -272,6 +274,16 @@ Placeholder for queries.
     assert queries_dir.exists()
     rule_files = list(queries_dir.glob("*.yml"))
     assert len(rule_files) >= 1
+    # Links must be workspace-relative, not absolute file:// machine paths
+    assert "file://" not in updated_text
+    assert "queries/H-0001/" in updated_text
+    # Linux hunts must not get Windows-only DNS QueryName rules
+    domain_rules = [p for p in rule_files if "domain" in p.name]
+    assert domain_rules
+    domain_yaml = domain_rules[0].read_text(encoding="utf-8")
+    assert "product: linux" in domain_yaml
+    assert "DestinationHostname" in domain_yaml
+    assert "QueryName" not in domain_yaml
 
 
 def test_incremental_enricher_updates_indicator_sweep_inventory(tmp_path: Path) -> None:
@@ -380,6 +392,43 @@ Initial hunt.
     updated = hunt_file.read_text(encoding="utf-8")
     assert "novel-c2-beacon.org" in updated
     assert "## Incremental Threat Intel Update" in updated
+
+
+def test_correlator_matches_source_url_via_refs_not_full_text(tmp_path: Path) -> None:
+    ThreatEntityCorrelator.clear_cache()
+    hunts_dir = tmp_path / "hunts" / "2026"
+    hunts_dir.mkdir(parents=True)
+    hunt_file = hunts_dir / "H-0040.md"
+    hunt_file.write_text(
+        """---
+hunt_id: H-0040
+title: "Campaign from MISP event"
+techniques: ["T1071.001"]
+---
+# H-0040
+Primary source: https://misp.example.com/events/100
+""",
+        encoding="utf-8",
+    )
+
+    correlator = ThreatEntityCorrelator(hunts_dir)
+    profiles = correlator.index_hunts()
+    assert len(profiles) == 1
+    assert not hasattr(profiles[0], "text") or not getattr(profiles[0], "text", None)
+    assert "https://misp.example.com/events/100" in profiles[0].source_refs
+
+    item = CTIItem(
+        source="misp",
+        identifier="misp-40",
+        title="Follow-on indicators",
+        source_url="https://misp.example.com/events/100",
+        content="Additional beacon domain follow-on-c2.example",
+        metadata={"indicators": {"domain": ["follow-on-c2.example"]}},
+    )
+    match = correlator.correlate(item)
+    assert match is not None
+    assert match.hunt_id == "H-0040"
+    assert match.match_type == "source_url"
 
 
 def test_threat_entity_profile_caching(tmp_path: Path) -> None:

@@ -25,6 +25,13 @@ from typing import Any
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.base import SafetyViolationError
+from hecate_runner.bas.docker_access import run_docker
+
+_fcntl: ModuleType | None
+try:
+    _fcntl = import_module("fcntl")
+except ImportError:
+    _fcntl = None
 
 _fcntl: ModuleType | None
 try:
@@ -179,9 +186,8 @@ class LabLease:
 def audit_container_tmpfs(container_name: str = "hecate-bas-agent") -> list[str]:
     """Return non-baseline files/directories present in /tmp inside the container."""
     try:
-        proc = subprocess.run(
+        proc = run_docker(
             [
-                "docker",
                 "exec",
                 container_name,
                 "find",
@@ -195,8 +201,6 @@ def audit_container_tmpfs(container_name: str = "hecate-bas-agent") -> list[str]
                 "-path",
                 "/tmp",
             ],
-            capture_output=True,
-            text=True,
             timeout=10,
             check=False,
         )
@@ -218,10 +222,8 @@ def clean_container_tmpfs(
         if not path.startswith("/tmp/") or path == "/tmp/hecate-exec.trace" or ".." in path:
             continue
         try:
-            res = subprocess.run(
-                ["docker", "exec", container_name, "rm", "-rf", path],
-                capture_output=True,
-                text=True,
+            res = run_docker(
+                ["exec", container_name, "rm", "-rf", path],
                 timeout=10,
                 check=False,
             )
@@ -262,27 +264,45 @@ def reset_lab(
             "status": "failed",
         }
         try:
-            proc = subprocess.run(
-                ["docker", "top", container_name, "-eo", "args"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-            )
+            try:
+                proc = run_docker(
+                    ["top", container_name, "-eo", "args"],
+                    timeout=10,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                proc = run_docker(
+                    ["top", container_name, "-eo", "pid,args"],
+                    timeout=10,
+                    check=True,
+                )
             if proc.returncode != 0:
                 raise SafetyViolationError("Container process inspection failed.")
             lines = proc.stdout.strip().splitlines()
-            if len(lines) < 2 or lines[0].strip() not in {"COMMAND", "CMD"}:
+            if len(lines) < 2:
+                raise SafetyViolationError(
+                    "Container process inspection returned no usable process list."
+                )
+            header_tokens = lines[0].strip().split()
+            if lines[0].strip() in {"COMMAND", "CMD"}:
+                cmds = [line.strip() for line in lines[1:] if line.strip()]
+            elif (
+                header_tokens
+                and header_tokens[0] == "PID"
+                and any(h in {"COMMAND", "CMD", "ARGS"} for h in header_tokens[1:])
+            ):
+                cmds = [
+                    line.split(None, 1)[1].strip()
+                    for line in lines[1:]
+                    if line.strip() and len(line.split(None, 1)) > 1
+                ]
+            else:
                 raise SafetyViolationError(
                     "Container process inspection returned no usable process list."
                 )
             record["docker_available"] = True
             allowed = {"/usr/bin/strace", "/usr/local/bin/sandcat"}
-            lingering = [
-                line.strip()
-                for line in lines[1:]
-                if not line.strip() or line.split()[0] not in allowed
-            ]
+            lingering = [cmd for cmd in cmds if not cmd or cmd.split()[0] not in allowed]
             record["lingering_processes_found"] = lingering
             if lingering:
                 raise SafetyViolationError(

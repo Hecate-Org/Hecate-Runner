@@ -69,20 +69,21 @@ def test_atom_feed_and_patch_parsing(tmp_path: Path) -> None:
     )
 
     mock_atom_resp = MagicMock()
-    mock_atom_resp.read.return_value = SAMPLE_ATOM_FEED.encode("utf-8")
-    mock_atom_resp.__enter__.return_value = mock_atom_resp
+    mock_atom_resp.status_code = 200
+    mock_atom_resp.content = SAMPLE_ATOM_FEED.encode("utf-8")
+    mock_atom_resp.text = SAMPLE_ATOM_FEED
 
     mock_patch_resp = MagicMock()
-    mock_patch_resp.read.return_value = SAMPLE_PATCH_DATA.encode("utf-8")
-    mock_patch_resp.__enter__.return_value = mock_patch_resp
+    mock_patch_resp.status_code = 200
+    mock_patch_resp.content = SAMPLE_PATCH_DATA.encode("utf-8")
+    mock_patch_resp.text = SAMPLE_PATCH_DATA
 
-    def mock_urlopen(req, *args, **kwargs):
-        url = req.full_url if hasattr(req, "full_url") else str(req)
-        if url.endswith(".patch"):
+    def mock_get(url, *args, **kwargs):
+        if str(url).endswith(".patch"):
             return mock_patch_resp
         return mock_atom_resp
 
-    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+    with patch("httpx.get", side_effect=mock_get):
         item = provider.next_item()
         assert item is not None
         assert item.source == "vxunderground"

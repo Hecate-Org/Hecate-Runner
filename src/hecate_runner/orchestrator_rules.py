@@ -248,11 +248,9 @@ class OrchestratorRulesMixin:
                 counter += 1
 
             try:
+                # Defer native transpile to the single post-purple/BAS pass in
+                # ``_attach_sigma_rules`` so each rule converts once.
                 rule_path.write_text(rule_yaml, encoding="utf-8")
-                try:
-                    transpile_and_write_native(rule_path, rule_yaml)
-                except Exception as t_err:
-                    log.debug("Native EDR transpilation of %s skipped (%s)", rule_path.name, t_err)
             except OSError as exc:
                 log.warning("Failed to write Pass 2 rule to %s: %s", rule_path, exc)
                 continue
@@ -430,13 +428,8 @@ class OrchestratorRulesMixin:
                     counter += 1
 
                 try:
+                    # Defer native transpile to the single post-purple/BAS pass.
                     rule_path.write_text(rule_yaml, encoding="utf-8")
-                    try:
-                        transpile_and_write_native(rule_path, rule_yaml)
-                    except Exception as t_err:
-                        log.debug(
-                            "Native EDR transpilation of %s skipped (%s)", rule_path.name, t_err
-                        )
                 except OSError as exc:
                     log.warning("Failed to write Pass 2 rule to %s: %s", rule_path, exc)
                     continue
@@ -614,7 +607,7 @@ class OrchestratorRulesMixin:
         req.sigma_rules = result.rules
         req.review_gaps = result.review_gaps
 
-        # Ensure native EDR and SIEM query files (.kql, .cql, .leql) are generated
+        # Single native transpile pass after purple/BAS may have tuned YAML.
         for r_entry in result.rules:
             r_yaml = r_entry.get("rule_yaml")
             r_path_str = r_entry.get("path")
@@ -627,7 +620,7 @@ class OrchestratorRulesMixin:
                 r_path = out_dir / f"{cat}__{slug or 'rule'}.yml"
             if r_yaml and r_path.parent.exists():
                 try:
-                    transpile_and_write_native(r_path, r_yaml)
+                    r_entry["_transpile"] = transpile_and_write_native(r_path, r_yaml)
                 except Exception as t_err:
                     log.debug("Native EDR query generation for %s skipped (%s)", r_path.name, t_err)
 
@@ -721,9 +714,11 @@ class OrchestratorRulesMixin:
                 continue
 
             try:
-                from hecate_agent.api import transpile_sigma_rule
+                trans_queries = rule.get("_transpile")
+                if not isinstance(trans_queries, dict):
+                    from hecate_agent.api import transpile_sigma_rule
 
-                trans_queries = transpile_sigma_rule(r_yaml)
+                    trans_queries = transpile_sigma_rule(r_yaml)
                 for target, t_res in trans_queries.items():
                     if getattr(t_res, "success", False) and getattr(t_res, "query", None):
                         res = deploy_transpiled_query(

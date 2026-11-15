@@ -251,6 +251,20 @@ def bas_detonate_cmd(
         timeout_sec=timeout,
     )
 
+    from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+    proc = APPROVED_PROCEDURES.get(technique_id)
+    sensor = None
+    if provider_name == "caldera" and target.environment == "lab" and norm_platform == "linux":
+        from hecate_runner.bas.sensor import LabProcessSensor
+
+        try:
+            sensor = LabProcessSensor(settings.bas_sensor_container, settings.bas_linux_host)
+            sensor.preflight()
+        except Exception as sensor_exc:
+            console.print(f"[yellow]Sensor preflight notice: {sensor_exc}[/yellow]")
+            sensor = None
+
     lease = None
     if target.environment == "lab":
         from hecate_runner.bas.lifecycle import LabLease
@@ -283,6 +297,15 @@ def bas_detonate_cmd(
     except Exception as exc:
         console.print(f"[bold red]Detonation failed with exception:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
+
+    raw_events: list[dict[str, Any]] = []
+    if sensor and result.success and proc:
+        if hasattr(sensor, "collect_fused"):
+            raw_events = sensor.collect_fused(result, proc.argv, expected_files=proc.expected_files)
+        else:
+            raw_events = sensor.collect(result, proc.argv)
+    else:
+        raw_events = result.telemetry_signatures
 
     status_color = "green" if result.success else "red"
     console.print(
@@ -318,6 +341,8 @@ def bas_detonate_cmd(
             candidate_query=siem_query,
             siem_target=siem_target,
             t0_detonate=t0_detonate,
+            raw_events=raw_events,
+            fidelity_scope=proc.fidelity_scope if proc else None,
         )
 
         siem_table = Table(
@@ -356,6 +381,18 @@ def bas_detonate_cmd(
             siem_table.add_row("Verification Notes", "; ".join(siem_res.notes))
 
         console.print(siem_table)
+
+        if siem_res.tuning_suggestion:
+            console.print(
+                Panel(
+                    f"[bold yellow]💡 Automated Rule Tuning Suggestion for {hunt_id}:[/bold yellow]\n\n"
+                    f"• [bold]Action:[/bold] {siem_res.tuning_suggestion.get('action_summary')}\n"
+                    f"• [bold]Diff:[/bold]\n```diff\n{siem_res.tuning_suggestion.get('diff', '')}\n```\n"
+                    f'• [dim]Apply this tuning: `hecate-runner sweep tune {hunt_id} "<instruction>"`[/dim]',
+                    title="Detection Miss Mitigation",
+                    border_style="yellow",
+                )
+            )
     if not result.success or not result.cleanup_success:
         raise typer.Exit(code=1)
 
@@ -710,6 +747,22 @@ def bas_verify_cmd(
 
     console.print(table)
 
+    tuning = getattr(res, "tuning_suggestion", None)
+    if not tuning and "siem_res" in locals() and hasattr(siem_res, "tuning_suggestion"):
+        tuning = siem_res.tuning_suggestion
+
+    if tuning:
+        console.print(
+            Panel(
+                f"[bold yellow]💡 Automated Rule Tuning Suggestion for {hunt_id}:[/bold yellow]\n\n"
+                f"• [bold]Action:[/bold] {tuning.get('action_summary')}\n"
+                f"• [bold]Diff:[/bold]\n```diff\n{tuning.get('diff', '')}\n```\n"
+                f'• [dim]Apply this tuning: `hecate-runner sweep tune {hunt_id} "<instruction>"`[/dim]',
+                title="Detection Miss Mitigation",
+                border_style="yellow",
+            )
+        )
+
     if write_back:
         fm["bas_verified"] = confirms_technique(res.to_dict())
         fm["bas_provider"] = res.provider
@@ -756,3 +809,243 @@ def bas_verify_cmd(
         )
     if not det_result.success or not det_result.cleanup_success or res.status.value == "error":
         raise typer.Exit(code=1)
+
+
+def _looks_like_sigma_yaml(text: str) -> bool:
+    lowered = text.lstrip()
+    return "detection:" in lowered and ("title:" in lowered or "logsource:" in lowered)
+
+
+def _sigma_rule_rank(path: Path, text: str) -> tuple[int, str]:
+    """Lower rank = better. Prefer behavioral cores over incremental IOC stubs."""
+    name = path.name.lower()
+    if "incremental" in name:
+        return (100, name)
+    score = 50
+    lowered = text.lower()
+    if "category: process_creation" in lowered:
+        # Parent→child process chains beat single-field command quotes.
+        if "parentimage" in lowered and ("selection_child" in lowered or "image|" in lowered):
+            score = 5
+        else:
+            score = 10
+    elif "category: webserver" in lowered:
+        score = 11
+    elif "category: file_event" in lowered or "category: network_connection" in lowered:
+        score = 12
+    elif "category: dns_query" in lowered:
+        score = 40
+    if "correlation-engine" in lowered or "incremental campaign detection" in lowered:
+        score += 50
+    if "command the source shows" in lowered or "command_the_source" in name:
+        score += 40
+    if "level: low" in lowered:
+        score += 5
+    if "level: high" in lowered or "level: critical" in lowered:
+        score -= 2
+    return (score, name)
+
+
+def _load_sigma_from_query_dirs(roots: list[Path], hunt_id: str) -> str:
+    """Prefer authoritative Sigma YAML under queries/<hunt_id>/ over markdown fences."""
+    candidates: list[tuple[tuple[int, str], Path, str]] = []
+    for root in roots:
+        hunt_dir = root / "queries" / hunt_id
+        paths: list[Path] = []
+        if hunt_dir.is_dir():
+            paths.extend(hunt_dir.glob("*.yml"))
+            paths.extend(hunt_dir.glob("*.yaml"))
+        queries_root = root / "queries"
+        if queries_root.is_dir():
+            paths.extend(queries_root.glob(f"**/{hunt_id}*.yml"))
+            paths.extend(queries_root.glob(f"**/{hunt_id}*.yaml"))
+        for path in paths:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if not _looks_like_sigma_yaml(text):
+                continue
+            candidates.append((_sigma_rule_rank(path, text), path, text))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][2]
+
+
+def _load_sigma_from_hunt_markdown(roots: list[Path], hunt_id: str) -> str:
+    """Last-resort: extract a Sigma fence from the hunt markdown body."""
+    import re
+
+    for root in roots:
+        matches = (
+            sorted((root / "hunts").glob(f"**/{hunt_id}.md")) if (root / "hunts").exists() else []
+        )
+        matches += sorted(root.glob(f"**/{hunt_id}.md"))
+        for path in matches:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for block in re.findall(r"```ya?ml\s*\n(.*?)```", content, re.DOTALL | re.IGNORECASE):
+                if _looks_like_sigma_yaml(block):
+                    return str(block).strip() + "\n"
+    return ""
+
+
+def bas_synthesize_cmd(
+    target: Annotated[
+        str,
+        typer.Argument(help="Hunt ID (e.g. H-0032) or path to a Sigma rule YAML file."),
+    ],
+    forward_siem: Annotated[
+        bool,
+        typer.Option(
+            "--forward-siem",
+            help=(
+                "Forward synthesized JSON telemetry to Splunk using sourcetype "
+                "hecate:telemetry and index hecate_synthetic (override with "
+                "SPLUNK_SYNTHETIC_INDEX). Does not use vendor Sysmon/CloudTrail sourcetypes."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Synthesize cross-platform telemetry from rule predicates and evaluate true-positive / baseline controls."""
+    from hecate_runner.bas.forwarder import (
+        SYNTHETIC_SPLUNK_SOURCETYPE,
+        forward_events_to_splunk,
+        infer_splunk_sourcetype,
+        synthetic_splunk_index,
+    )
+    from hecate_runner.bas.synthesizer import (
+        evaluate_rule_synthetically,
+        synthesize_events_from_rule,
+    )
+
+    settings = _get_settings()
+    workspace = (
+        Path(
+            getattr(settings, "hecate_workspace", None)
+            or getattr(settings, "workspace", None)
+            or "."
+        )
+        .expanduser()
+        .resolve()
+    )
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(workspace / ".env", override=False)
+    except ImportError:
+        pass
+
+    hunt_id = ""
+    rule_yaml = ""
+    rule_source = ""
+
+    target_path = Path(target).expanduser()
+    if target_path.exists() and target_path.is_file():
+        rule_yaml = target_path.read_text(encoding="utf-8")
+        hunt_id = target_path.stem
+        rule_source = str(target_path.resolve())
+    else:
+        clean_target = target.upper()
+        if not clean_target.startswith("H-"):
+            clean_target = f"H-{clean_target.zfill(4)}"
+        hunt_id = clean_target
+
+        pub_path = getattr(settings, "public_repo_path", None)
+        pub_repo = Path(pub_path) if pub_path else (workspace.parent / "Hecate-Public")
+        roots = [workspace]
+        if pub_repo.exists() and pub_repo.resolve() != workspace.resolve():
+            roots.append(pub_repo.resolve())
+
+        rule_yaml = _load_sigma_from_query_dirs(roots, hunt_id)
+        if rule_yaml:
+            rule_source = f"queries/{hunt_id}/*.yml"
+        else:
+            rule_yaml = _load_sigma_from_hunt_markdown(roots, hunt_id)
+            if rule_yaml:
+                rule_source = f"hunts/**/{hunt_id}.md"
+
+    if not rule_yaml:
+        console.print(f"[red]Could not locate a Sigma rule for target:[/red] {target}")
+        raise typer.Exit(code=1)
+
+    if rule_source:
+        console.print(f"[dim]Loaded Sigma from {rule_source}[/dim]")
+
+    tp_event, benign_events = synthesize_events_from_rule(rule_yaml, hunt_id=hunt_id)
+    eval_res = evaluate_rule_synthetically(rule_yaml, hunt_id=hunt_id)
+
+    table = Table(title=f"Synthesized Telemetry & Evaluation for {hunt_id}")
+    table.add_column("Type", style="bold cyan")
+    table.add_column("Product", style="green")
+    table.add_column("Category", style="yellow")
+    table.add_column("Key Telemetry Attributes", style="white")
+
+    skip_keys = {
+        "product",
+        "category",
+        "data_source",
+        "timestamp_utc",
+        "TimeCreated",
+        "hunt_id",
+        "technique_id",
+        "_hecate_synthetic",
+        "_hecate_native_schema",
+    }
+    tp_attrs = ", ".join(f"{k}={v}" for k, v in tp_event.items() if k not in skip_keys)
+    table.add_row(
+        "True Positive",
+        str(tp_event.get("product")),
+        str(tp_event.get("category")),
+        tp_attrs[:120] + ("..." if len(tp_attrs) > 120 else ""),
+    )
+
+    for idx, b in enumerate(benign_events, 1):
+        b_attrs = ", ".join(f"{k}={v}" for k, v in b.items() if k not in skip_keys)
+        table.add_row(
+            f"Benign Baseline #{idx}",
+            str(b.get("product")),
+            str(b.get("category")),
+            b_attrs[:120] + ("..." if len(b_attrs) > 120 else ""),
+        )
+
+    console.print(table)
+
+    is_ok = bool(eval_res.get("is_clean") and eval_res.get("rule_triggered"))
+    status_str = (
+        "[bold green]PASSED (True Positive Triggered, Controls Clean)[/bold green]"
+        if is_ok
+        else "[bold red]FAILED (Missed True Positive or Control Triggered)[/bold red]"
+    )
+    console.print(
+        Panel(
+            f"Rule Validation: {status_str}\n"
+            f"True Positives: {eval_res.get('true_positives')} | False Positives: {eval_res.get('false_positives')}\n"
+            "[dim]In-memory Sigma self-check only — not proof against native Windows/cloud schemas.[/dim]",
+            title="Sigma In-Memory Evaluation",
+            border_style="green" if is_ok else "red",
+        )
+    )
+
+    if forward_siem:
+        sourcetype = infer_splunk_sourcetype(tp_event, synthetic=True)
+        index_name = synthetic_splunk_index(workspace)
+        all_events = [tp_event, *benign_events]
+        ingested = forward_events_to_splunk(
+            all_events,
+            index=index_name,
+            sourcetype=sourcetype or SYNTHETIC_SPLUNK_SOURCETYPE,
+            workspace=workspace,
+        )
+        console.print(
+            f"[bold green]Ingested {ingested} synthetic events into Splunk "
+            f"(index={index_name}, sourcetype={sourcetype})[/bold green]"
+        )
+        if ingested == 0:
+            console.print(
+                "[yellow]No events accepted — ensure the synthetic index exists and "
+                "SPLUNK_HEC_URL / ingest credentials are configured.[/yellow]"
+            )

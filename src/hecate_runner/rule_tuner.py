@@ -17,7 +17,12 @@ from typing import Any
 
 import yaml
 
-from hecate_runner.atomic_write import atomic_write_text
+from hecate_runner.workspace_paths import (
+    normalize_hunt_id,
+    query_directory,
+    read_artifact,
+    write_artifact,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +49,14 @@ CANONICAL_FIELDS: dict[str, str] = {
     "filepath": "Image",
     "directory": "Image",
     "folder": "Image",
+    "targetobject": "TargetObject",
+    "details": "Details",
+    "pipename": "PipeName",
+    "imageloaded": "ImageLoaded",
+    "eventsource": "eventSource",
+    "eventname": "eventName",
+    "operationname": "operationName",
+    "resource": "resource",
 }
 
 
@@ -255,8 +268,8 @@ class RuleTuner:
 
     def tune_hunt_rule(self, hunt_id: str, instruction: str) -> RuleTuningResult:
         """Find the Sigma rule for a hunt, apply tuning instruction, and persist changes."""
-        norm_hunt_id = hunt_id.strip().upper()
-        query_dir = self.workspace / "queries" / norm_hunt_id
+        norm_hunt_id = normalize_hunt_id(hunt_id)
+        query_dir = query_directory(self.workspace, norm_hunt_id)
         if not query_dir.exists():
             return RuleTuningResult(
                 ok=False,
@@ -275,7 +288,7 @@ class RuleTuner:
             )
 
         rule_file = sigma_files[0]
-        original_yaml = rule_file.read_text(encoding="utf-8")
+        original_yaml = read_artifact(rule_file, self.workspace)
 
         try:
             new_yaml, summary = self.tune_rule_yaml(original_yaml, instruction)
@@ -315,7 +328,7 @@ class RuleTuner:
         }
 
         # Atomically write updated Sigma rule
-        atomic_write_text(rule_file, new_yaml)
+        write_artifact(rule_file, new_yaml, self.workspace)
 
         # Update transpiled query files
         stem = rule_file.stem
@@ -324,9 +337,7 @@ class RuleTuner:
                 ext = ext_map.get(tgt)
                 if ext:
                     q_path = query_dir / f"{stem}{ext}"
-                    from hecate_runner.native_queries import write_query_if_changed
-
-                    write_query_if_changed(q_path, t_res.query)
+                    write_artifact(q_path, t_res.query.strip() + "\n", self.workspace)
                     successful_targets.append(tgt)
 
         # Check for subsumption or duplication against existing rules
@@ -369,7 +380,7 @@ class RuleTuner:
         if matches:
             hunt_doc = matches[0]
             try:
-                doc_text = hunt_doc.read_text(encoding="utf-8")
+                doc_text = read_artifact(hunt_doc, self.workspace)
                 # Append a note in Revision / Grounding history
                 tuning_note = (
                     f"\n\n### Conversational Rule Tuning ({instruction})\n"
@@ -380,7 +391,7 @@ class RuleTuner:
                     tuning_note += (
                         f"- **Subsumption Warnings:** {'; '.join(subsumption_warnings)}\n"
                     )
-                atomic_write_text(hunt_doc, doc_text + tuning_note)
+                write_artifact(hunt_doc, doc_text + tuning_note, self.workspace)
             except Exception as h_err:
                 log.debug("Note update to %s skipped (%s)", hunt_doc.name, h_err)
 
@@ -435,3 +446,257 @@ class RuleTuner:
                 )
 
         return self.tune_hunt_rule(hunt_id, instruction)
+
+    def auto_tune_from_miss(
+        self,
+        hunt_id: str,
+        missed_events: list[dict[str, Any]],
+        instruction: str | None = None,
+        apply: bool = False,
+    ) -> RuleTuningResult:
+        """Derive an expansion or repair instruction from missed attack telemetry and optionally mutate the rule."""
+        norm_hunt_id = normalize_hunt_id(hunt_id)
+        query_dir = query_directory(self.workspace, norm_hunt_id)
+        if not query_dir.exists():
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary="",
+                error=f"Query directory not found for {norm_hunt_id} at {query_dir}",
+            )
+
+        sigma_files = sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
+        if not sigma_files:
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary="",
+                error=f"No Sigma YAML files found under {query_dir}",
+            )
+
+        rule_file = sigma_files[0]
+        original_yaml = read_artifact(rule_file, self.workspace)
+
+        if not instruction:
+            if not missed_events:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    rule_file=rule_file,
+                    error="No missed events provided to diagnose",
+                )
+
+            # Analyze original rule vs missed events
+            try:
+                rule_dict = yaml.safe_load(original_yaml) or {}
+            except Exception as exc:
+                return RuleTuningResult(
+                    ok=False,
+                    hunt_id=norm_hunt_id,
+                    action_summary="",
+                    rule_file=rule_file,
+                    error=f"Failed to parse rule YAML: {exc}",
+                )
+
+            detection = rule_dict.get("detection") or {}
+            derived_instruction = None
+
+            # Look through detection blocks to see which constraint caused the false negative
+            for name, block in detection.items():
+                if name.lower() in ("condition", "timeframe") or not isinstance(block, dict):
+                    continue
+
+                for key, val in block.items():
+                    field_base = key.split("|")[0].strip()
+                    # Check parent process constraint
+                    if field_base.lower() in ("parentimage", "parent"):
+                        observed_parents = [
+                            str(ev.get("ParentImage") or ev.get("parent") or "")
+                            for ev in missed_events
+                            if (ev.get("ParentImage") or ev.get("parent"))
+                        ]
+                        if observed_parents:
+                            clean_parent = Path(observed_parents[0]).name
+                            val_str = str(val).lower()
+                            if clean_parent.lower() not in val_str:
+                                derived_instruction = (
+                                    f"Expand ParentImage to include {clean_parent}"
+                                )
+                                break
+
+                    # Check Image constraint
+                    if field_base.lower() in ("image", "process", "path"):
+                        observed_images = [
+                            str(ev.get("Image") or ev.get("process") or "")
+                            for ev in missed_events
+                            if (ev.get("Image") or ev.get("process"))
+                        ]
+                        if observed_images:
+                            clean_img = Path(observed_images[0]).name
+                            val_str = str(val).lower()
+                            if clean_img.lower() not in val_str:
+                                derived_instruction = f"Expand Image to include {clean_img}"
+                                break
+
+                    # Check CommandLine constraint
+                    if field_base.lower() in ("commandline", "cmdline"):
+                        observed_cmds = [
+                            str(ev.get("CommandLine") or ev.get("commandline") or "")
+                            for ev in missed_events
+                            if (ev.get("CommandLine") or ev.get("commandline"))
+                        ]
+                        if observed_cmds:
+                            cmd_sample = observed_cmds[0]
+                            # Find meaningful argument token
+                            tokens = [
+                                t
+                                for t in cmd_sample.split()
+                                if len(t) > 2
+                                and not t.startswith("-")
+                                and not t.endswith((".exe", ".sh"))
+                            ]
+                            target_token = (
+                                tokens[0]
+                                if tokens
+                                else cmd_sample.split()[-1]
+                                if cmd_sample.split()
+                                else cmd_sample
+                            )
+                            derived_instruction = f"Expand CommandLine to include {target_token}"
+                            break
+
+                    # Check TargetObject constraint (Windows Registry)
+                    if field_base.lower() in ("targetobject", "registry_key", "key"):
+                        observed_targets = [
+                            str(ev.get("TargetObject") or ev.get("targetobject") or "")
+                            for ev in missed_events
+                            if (ev.get("TargetObject") or ev.get("targetobject"))
+                        ]
+                        if observed_targets:
+                            target_sample = observed_targets[0]
+                            val_str = str(val).lower()
+                            if target_sample.lower() not in val_str:
+                                derived_instruction = (
+                                    f"Expand TargetObject to include {target_sample}"
+                                )
+                                break
+
+                    # Check PipeName constraint (Named Pipes)
+                    if field_base.lower() in ("pipename", "pipe"):
+                        observed_pipes = [
+                            str(ev.get("PipeName") or ev.get("pipename") or "")
+                            for ev in missed_events
+                            if (ev.get("PipeName") or ev.get("pipename"))
+                        ]
+                        if observed_pipes:
+                            pipe_sample = observed_pipes[0]
+                            val_str = str(val).lower()
+                            if pipe_sample.lower() not in val_str:
+                                derived_instruction = f"Expand PipeName to include {pipe_sample}"
+                                break
+
+                    # Check eventName constraint (Cloud Audit)
+                    if field_base.lower() in ("eventname", "methodname", "operationname"):
+                        observed_events = [
+                            str(
+                                ev.get("eventName")
+                                or ev.get("methodName")
+                                or ev.get("operationName")
+                                or ""
+                            )
+                            for ev in missed_events
+                            if (
+                                ev.get("eventName")
+                                or ev.get("methodName")
+                                or ev.get("operationName")
+                            )
+                        ]
+                        if observed_events:
+                            ev_sample = observed_events[0]
+                            val_str = str(val).lower()
+                            if ev_sample.lower() not in val_str:
+                                derived_instruction = f"Expand eventName to include {ev_sample}"
+                                break
+
+                if derived_instruction:
+                    break
+
+            # Fallback if no specific constraint bottleneck identified
+            if not derived_instruction:
+                ev0 = missed_events[0]
+                if ev0.get("CommandLine"):
+                    derived_instruction = f"Expand CommandLine to include {ev0['CommandLine']}"
+                elif ev0.get("Image"):
+                    derived_instruction = f"Expand Image to include {Path(str(ev0['Image'])).name}"
+                elif ev0.get("TargetObject"):
+                    derived_instruction = f"Expand TargetObject to include {ev0['TargetObject']}"
+                elif ev0.get("PipeName"):
+                    derived_instruction = f"Expand PipeName to include {ev0['PipeName']}"
+                elif ev0.get("eventName"):
+                    derived_instruction = f"Expand eventName to include {ev0['eventName']}"
+                else:
+                    return RuleTuningResult(
+                        ok=False,
+                        hunt_id=norm_hunt_id,
+                        action_summary="",
+                        rule_file=rule_file,
+                        error="Could not derive tuning instruction from missed events",
+                    )
+
+            instruction = derived_instruction
+
+        if apply:
+            return self.tune_hunt_rule(norm_hunt_id, instruction)
+
+        # Generate preview without persisting to disk
+        try:
+            new_yaml, summary = self.tune_rule_yaml(original_yaml, instruction)
+        except Exception as exc:
+            return RuleTuningResult(
+                ok=False,
+                hunt_id=norm_hunt_id,
+                action_summary="",
+                rule_file=rule_file,
+                error=str(exc),
+            )
+
+        diff_lines = list(
+            difflib.unified_diff(
+                original_yaml.splitlines(keepends=True),
+                new_yaml.splitlines(keepends=True),
+                fromfile=f"a/{rule_file.name}",
+                tofile=f"b/{rule_file.name}",
+            )
+        )
+        return RuleTuningResult(
+            ok=True,
+            hunt_id=norm_hunt_id,
+            action_summary=f"Suggested tuning ({summary}): `{instruction}`",
+            rule_file=rule_file,
+            diff="".join(diff_lines),
+            new_rule_yaml=new_yaml,
+        )
+
+    def suggest_tuning_for_drift(
+        self,
+        hunt_id: str,
+        drift_entry: dict[str, Any],
+    ) -> RuleTuningResult:
+        """Suggest reconciliation or rule tuning based on SIEM query drift."""
+        norm_hunt_id = normalize_hunt_id(hunt_id)
+        target = str(drift_entry.get("target") or "siem").lower()
+        file_name = str(drift_entry.get("file_name") or "")
+        drift_type = str(drift_entry.get("drift_type") or drift_entry.get("status") or "drifted")
+
+        if drift_type in ("missing", "missing_query"):
+            summary = f"Deploy authoritative Git definition for {target} to restore deleted SIEM query ({file_name})."
+        else:
+            summary = f"SIEM query in {target} has diverged from repository version ({file_name}). Re-sync with Git authority."
+
+        return RuleTuningResult(
+            ok=True,
+            hunt_id=norm_hunt_id,
+            action_summary=summary,
+            diff="",
+        )

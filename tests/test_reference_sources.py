@@ -330,20 +330,24 @@ def test_attack_monthly_delta_ignores_version_noise_and_checks_corpus_coverage(
     tmp_path: Path,
 ) -> None:
     current = [bundle()]
+    revision = [OLD]
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         if request.url.host == "api.github.com":
-            return httpx.Response(200, json={"sha": NEW})
+            return httpx.Response(200, json={"sha": revision[0]})
         return httpx.Response(200, json=current[0])
 
     provider = AttackDeltaProvider(
         tmp_path, client=httpx.Client(transport=httpx.MockTransport(handler)), interval_seconds=0
     )
     assert provider.next_item() is None
+    # modified-only noise under a new revision must not create pending work.
+    revision[0] = "c" * 40
     current[0] = bundle(modified="2026-02-01")
     assert provider.next_item() is None
+    revision[0] = NEW
     current[0] = bundle(procedure=True)
     item = provider.next_item()
     assert item and item.metadata["technique_id"] == "T1059.001"
@@ -357,6 +361,12 @@ def test_attack_monthly_delta_ignores_version_noise_and_checks_corpus_coverage(
     provider.interval_seconds = 30 * 86400
     assert provider.next_item() is None
     assert len(calls) == before
+
+    # Same ATT&CK revision: refresh interval may fire, but STIX bodies are not re-downloaded.
+    provider.interval_seconds = 0
+    assert provider.next_item() is None
+    assert sum(1 for c in calls[before:] if "/enterprise-attack/" in c or "/ics-attack/" in c) == 0
+    assert any("api.github.com" in c for c in calls[before:])
 
 
 @pytest.mark.parametrize(

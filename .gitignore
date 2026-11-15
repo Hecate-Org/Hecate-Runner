@@ -76,6 +76,7 @@ dmypy.json
 .env.*
 *.env.*
 !.env.example
+!deploy/service-env/*.env.example
 
 # Runtime state (should live in the Hecate workspace, not the repo)
 .hecate/
@@ -97,3 +98,5 @@ Thumbs.db
 # anyway, but listed so `ruff check .` and an accidental `git add -A`
 # both skip them.
 /patch*.py
+# CI dependency scan report (uploaded as an artifact, never packaged).
+/dependency-audit.json

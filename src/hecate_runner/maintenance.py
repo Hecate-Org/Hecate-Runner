@@ -17,6 +17,7 @@ from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.config import Settings
 from hecate_runner.log_rotation import rotate_log_if_needed
 from hecate_runner.work_locks import acquire_work_lock
+from hecate_runner.workspace_paths import normalize_hunt_id, workspace_path, write_artifact
 
 log = logging.getLogger(__name__)
 JOBS = ("github", "misp", "siem", "alerts")
@@ -33,6 +34,8 @@ def run_job(settings: Settings, job: str) -> None:
 
         sync_misp_outbox(settings, max_items=1)
     elif job == "siem":
+        from datetime import UTC, datetime
+
         from hecate_runner.drift_alerts import notify_drift_report
         from hecate_runner.siem_drift import audit_workspace_queries, reconcile_all_drifted_queries
 
@@ -46,6 +49,36 @@ def run_job(settings: Settings, job: str) -> None:
             reconcile_all_drifted_queries(
                 settings.hecate_workspace, dry_run=False, actor="maintenance"
             )
+
+        if report.get("drifted_count"):
+            try:
+                from hecate_runner.rule_tuner import RuleTuner
+
+                tuner = RuleTuner(settings.hecate_workspace)
+                suggestions_dir = workspace_path(
+                    settings.hecate_workspace, ".hecate", "tuning_suggestions"
+                )
+                suggestions_dir.mkdir(parents=True, exist_ok=True)
+                for h_id, entries in report.get("drifted_by_hunt", {}).items():
+                    h_id = normalize_hunt_id(h_id)
+                    for entry in entries:
+                        sugg_res = tuner.suggest_tuning_for_drift(h_id, entry)
+                        if sugg_res.ok:
+                            sugg_data = {
+                                "hunt_id": h_id,
+                                "target": entry.get("target"),
+                                "file_name": entry.get("file_name"),
+                                "action_summary": sugg_res.action_summary,
+                                "drift_type": entry.get("drift_type", "drifted"),
+                                "generated_at": datetime.now(UTC).isoformat(),
+                            }
+                            write_artifact(
+                                suggestions_dir / f"{h_id}_drift.json",
+                                json.dumps(sugg_data, indent=2),
+                                settings.hecate_workspace,
+                            )
+            except Exception as tune_err:
+                log.debug("Failed saving SIEM drift tuning suggestion: %s", tune_err)
     elif job == "alerts":
         from hecate_runner.drift_alerts import deliver_drift_alerts
         from hecate_runner.notifications import notify_siem_drift

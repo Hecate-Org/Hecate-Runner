@@ -27,9 +27,80 @@ def splunk_settings(workspace: Path | None = None) -> dict[str, str]:
     from dotenv import dotenv_values
 
     values = (
-        dotenv_values(Path(workspace) / ".env", interpolate=False) if workspace is not None else {}
+        dotenv_values(Path(workspace) / ".env", interpolate=False)
+        if workspace is not None and os.environ.get("HECATE_SERVICE_ISOLATED") != "1"
+        else {}
     )
     return {**{key: value for key, value in values.items() if value is not None}, **os.environ}
+
+
+SYNTHETIC_SPLUNK_SOURCETYPE = "hecate:telemetry"
+DEFAULT_SYNTHETIC_SPLUNK_INDEX = "hecate_synthetic"
+
+
+def synthetic_splunk_index(workspace: Path | None = None) -> str:
+    """Index for predicate-synthesized events (never silently use ``main``)."""
+    env = splunk_settings(workspace)
+    return (env.get("SPLUNK_SYNTHETIC_INDEX") or DEFAULT_SYNTHETIC_SPLUNK_INDEX).strip() or (
+        DEFAULT_SYNTHETIC_SPLUNK_INDEX
+    )
+
+
+def infer_splunk_sourcetype(event: dict[str, Any], *, synthetic: bool | None = None) -> str:
+    """Infer a Splunk sourcetype for an event.
+
+    Synthetic Hecate JSON (flat dicts from the predicate synthesizer) must use
+    ``hecate:telemetry``. Vendor sourcetypes (Sysmon XML, CloudTrail, …) are only
+    returned when ``synthetic=False``, or when the event sets
+    ``_hecate_native_schema`` / lacks ``_hecate_synthetic``.
+    """
+    if synthetic is None:
+        synthetic = bool(event.get("_hecate_synthetic")) and not bool(
+            event.get("_hecate_native_schema")
+        )
+    if synthetic:
+        return SYNTHETIC_SPLUNK_SOURCETYPE
+
+    product = str(event.get("product") or "").lower()
+    category = str(event.get("category") or event.get("data_source") or "").lower()
+    service = str(event.get("service") or "").lower()
+
+    if product == "windows":
+        if (
+            category
+            in (
+                "registry_set",
+                "registry_event",
+                "registry_add",
+                "registry_delete",
+                "pipe_created",
+                "named_pipe",
+                "driver_load",
+                "create_remote_thread",
+                "process_access",
+            )
+            or service == "sysmon"
+        ):
+            return "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+        if category in ("windows_security", "security_event") or service == "security":
+            return "WinEventLog:Security"
+        return "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+
+    if product in ("gcp", "google_cloud", "google"):
+        return "google:gcp:pubsub:message"
+    if product in ("azure", "azure_ad", "entra_id"):
+        return "azure:activity"
+    if product in ("kubernetes", "k8s") or category == "kubernetes_audit":
+        return "kube:audit"
+    if (
+        product in ("aws", "cloud", "cloudtrail")
+        or category in ("cloud_audit", "identity_audit")
+        or service == "cloudtrail"
+    ):
+        return "aws:cloudtrail"
+    if category == "webserver":
+        return "access_combined"
+    return SYNTHETIC_SPLUNK_SOURCETYPE
 
 
 def forward_events_to_splunk(
@@ -44,7 +115,7 @@ def forward_events_to_splunk(
     timeout_sec: float = 15.0,
     workspace: Path | None = None,
 ) -> int:
-    """Ingest a list of telemetry events into Splunk via Simple Receiver REST API.
+    """Ingest events through index-scoped HEC, or the legacy receiver outside strict mode.
 
     Args:
         events: List of telemetry event dictionaries.
@@ -73,38 +144,79 @@ def forward_events_to_splunk(
     if not splunk_host.startswith(("http://", "https://")):
         splunk_host = f"https://{splunk_host}"
 
-    splunk_token = token or setting("SPLUNK_TOKEN")
+    strict = env.get("HECATE_STRICT_CREDENTIAL_ROLES", "").lower() in {"1", "true", "yes"}
+    hec_url = setting("SPLUNK_HEC_URL").rstrip("/")
+    splunk_token = token or setting("SPLUNK_INGEST_TOKEN")
+    if strict and (not hec_url or not splunk_token):
+        log.warning("Isolated ingestion requires SPLUNK_HEC_URL and an index-scoped HEC token")
+        return 0
+    if hec_url:
+        try:
+            url = httpx.URL(hec_url)
+            if (
+                url.scheme != "https"
+                or not url.host
+                or url.userinfo
+                or url.path not in {"", "/"}
+                or url.query
+                or url.fragment
+            ):
+                raise ValueError("Invalid HEC base URL")
+        except (ValueError, httpx.InvalidURL):
+            log.warning("HEC requires an HTTPS base URL without credentials, query or path")
+            return 0
+        if not splunk_token:
+            return 0
+    if not splunk_token and not strict:
+        splunk_token = setting("SPLUNK_TOKEN")
     splunk_user = username or setting("SPLUNK_USERNAME") or "admin"
     splunk_pass = password or setting("SPLUNK_PASSWORD")
+    if strict or hec_url:
+        splunk_pass = ""
 
     if verify_ssl is None:
-        verify_ssl = setting("SPLUNK_VERIFY_SSL", "true").strip().lower() not in (
-            "false",
-            "0",
-            "no",
-        )
+        configured = setting("SPLUNK_VERIFY_SSL", "").strip().lower()
+        if configured in ("false", "0", "no"):
+            verify_ssl = False
+        elif configured in ("true", "1", "yes"):
+            verify_ssl = True
+        else:
+            # Dev containers often present a self-signed cert on localhost.
+            ssl_host_src = hec_url or splunk_host
+            host_only = (httpx.URL(ssl_host_src).host or "").lower()
+            verify_ssl = host_only not in {"localhost", "127.0.0.1", "::1"}
 
-    endpoint = f"{splunk_host}/services/receivers/simple"
-    params = {"index": index, "sourcetype": sourcetype}
+    endpoint = (
+        f"{hec_url}/services/collector/event"
+        if hec_url
+        else f"{splunk_host}/services/receivers/simple"
+    )
+    params = {} if hec_url else {"index": index, "sourcetype": sourcetype}
 
-    # Format events as newline-delimited JSON
-    payload_lines = [json.dumps(ev) for ev in events]
+    payload_lines = [
+        json.dumps({"index": index, "sourcetype": sourcetype, "event": ev} if hec_url else ev)
+        for ev in events
+    ]
     data = "\n".join(payload_lines)
 
     headers = {"Content-Type": "application/json"}
     auth: tuple[str, str] | httpx._client.UseClientDefault = httpx.USE_CLIENT_DEFAULT
     if splunk_token:
         auth_val = (
-            splunk_token
-            if splunk_token.startswith(("Bearer ", "Basic ", "Splunk "))
-            else f"Bearer {splunk_token}"
+            "Splunk " + splunk_token
+            if hec_url
+            else (
+                splunk_token
+                if splunk_token.startswith(("Bearer ", "Basic ", "Splunk "))
+                else f"Bearer {splunk_token}"
+            )
         )
         headers["Authorization"] = auth_val
     elif splunk_pass:
         auth = (splunk_user, splunk_pass)
 
     try:
-        with httpx.Client(verify=verify_ssl, timeout=timeout_sec) as client:
+        with httpx.Client(verify=verify_ssl, timeout=timeout_sec, trust_env=False) as client:
             resp = client.post(endpoint, params=params, headers=headers, auth=auth, content=data)
             # If Bearer token was rejected with 401, retry with basic auth if password available
             if resp.status_code == 401 and splunk_pass and headers.get("Authorization"):
@@ -117,6 +229,9 @@ def forward_events_to_splunk(
                     content=data,
                 )
             resp.raise_for_status()
+            if hec_url and resp.json().get("code") != 0:
+                log.warning("HEC rejected telemetry; no receiver/password fallback was attempted")
+                return 0
             log.info("Successfully forwarded %d event(s) to Splunk index '%s'", len(events), index)
             return len(events)
     except Exception as exc:

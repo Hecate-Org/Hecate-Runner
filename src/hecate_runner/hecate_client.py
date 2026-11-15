@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,10 @@ from typing import Any
 from hecate_runner.metrics import LLMUsage
 
 log = logging.getLogger(__name__)
+
+#: Process-lifetime ATT&CK technique metadata (avoids N+1 STIX lookups per draft).
+_TECHNIQUE_META_CACHE: dict[str, TechniqueMetadata] = {}
+_TECHNIQUE_META_LOCK = threading.Lock()
 
 
 #: Hecate's research writes this as skill 3's only finding when it judges the
@@ -160,6 +165,45 @@ class HecateClient:
             usage = LLMUsage.from_metadata(metadata) if isinstance(metadata, dict) else None
             raise HecateError(f"Hecate API error: {exc}", usage=usage) from exc
 
+    def _resolve_timeout(self, timeout_sec: int | float | None) -> float | None:
+        """Effective stage deadline; ``None``/``<=0`` disables enforcement."""
+        if timeout_sec is None:
+            timeout_sec = self.default_timeout_sec
+        try:
+            value = float(timeout_sec)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _with_deadline(
+        self,
+        timeout_sec: int | float | None,
+        func: Callable[..., Any],
+        *args: Any,
+        stage: str = "hecate",
+        **kwargs: Any,
+    ) -> Any:
+        """Run an in-process Hecate API call under a wall-clock deadline.
+
+        Uses a worker thread so the orchestrator cycle can fail closed when a
+        provider hangs past ``timeout_sec``. The underlying call may continue
+        until the provider's own HTTP timeout; the cycle no longer waits on it.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FuturesTimeout
+
+        deadline = self._resolve_timeout(timeout_sec)
+        if deadline is None:
+            return self._with_context(func, *args, **kwargs)
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"hecate-{stage}") as pool:
+            future = pool.submit(self._with_context, func, *args, **kwargs)
+            try:
+                return future.result(timeout=deadline)
+            except FuturesTimeout as exc:
+                future.cancel()
+                raise TimeoutError(f"{stage} timed out after {deadline:g} seconds") from exc
+
     def source_evidence(self, url: str) -> Any:
         """Verified artifacts from the report at ``url`` (hecate_agent.core.source_evidence).
 
@@ -244,13 +288,15 @@ class HecateClient:
         # researches from the topic alone rather than failing the cycle.
         if source_context and "source_context" in inspect.signature(generate_research).parameters:
             kwargs["source_context"] = source_context
-        output, _ = self._with_context(
+        output, _ = self._with_deadline(
+            timeout_sec,
             generate_research,
             topic=topic,
             technique=technique,
             depth=depth,
             web_search_enabled=web_search_enabled,
             workspace=self.workspace,
+            stage="research",
             **kwargs,
         )
         related_hunts = []
@@ -303,11 +349,15 @@ class HecateClient:
             "workspace": self.workspace,
         }
         if generate_with_metrics is not None:
-            output, metadata = self._with_context(generate_with_metrics, **kwargs)
+            output, metadata = self._with_deadline(
+                timeout_sec, generate_with_metrics, stage="hypothesis", **kwargs
+            )
             usage = LLMUsage.from_metadata(metadata)
             fallback = bool(metadata.get("fallback", False))
         else:  # older Core releases still get wall latency from the Runner
-            output = self._with_context(api.generate_hypothesis, **kwargs)
+            output = self._with_deadline(
+                timeout_sec, api.generate_hypothesis, stage="hypothesis", **kwargs
+            )
             usage = None
             fallback = False
         return HypothesisResult(
@@ -353,8 +403,10 @@ class HecateClient:
             }
             if "workspace" in inspect.signature(generate_with_metrics).parameters:
                 kwargs["workspace"] = self.workspace
-            output, files, metadata = self._with_context(
+            output, files, metadata = self._with_deadline(
+                timeout_sec,
                 generate_with_metrics,
+                stage="sigma",
                 **kwargs,
             )
             usage = LLMUsage.from_metadata(metadata)
@@ -406,7 +458,7 @@ class HecateClient:
                     rejected=[r for r in reasons.group(1).split("; ") if r],
                 )
 
-        generated = self._with_context(generate)
+        generated = self._with_deadline(timeout_sec, generate, stage="sigma")
         if isinstance(generated, SigmaResult):
             return generated
         output, files = generated
@@ -432,11 +484,24 @@ class HecateClient:
             rules=rules,
         )
 
+    @classmethod
+    def clear_technique_cache(cls) -> None:
+        """Drop process-lifetime technique metadata (tests / STIX refresh)."""
+        with _TECHNIQUE_META_LOCK:
+            _TECHNIQUE_META_CACHE.clear()
+
     def lookup_technique(
         self,
         technique_id: str,
         timeout_sec: int | None = None,
     ) -> TechniqueMetadata:
+        key = (technique_id or "").strip().upper()
+        if key:
+            with _TECHNIQUE_META_LOCK:
+                cached = _TECHNIQUE_META_CACHE.get(key)
+            if cached is not None:
+                return cached
+
         from hecate_agent.api import lookup_technique
 
         try:
@@ -445,8 +510,8 @@ class HecateClient:
             if "stix_unavailable" in str(exc):
                 return TechniqueMetadata()
             raise HecateError(f"lookup failed: {exc}") from exc
-        resolved_id = data.get("technique_id", "")
-        return TechniqueMetadata(
+        resolved_id = str(data.get("technique_id", "") or "")
+        meta = TechniqueMetadata(
             technique_id=resolved_id,
             tactics=data.get("tactics", []),
             platforms=data.get("platforms", []),
@@ -455,6 +520,12 @@ class HecateClient:
             name=data.get("name", ""),
             parent_name=self._parent_name(resolved_id),
         )
+        if key:
+            with _TECHNIQUE_META_LOCK:
+                _TECHNIQUE_META_CACHE[key] = meta
+                if resolved_id and resolved_id.upper() != key:
+                    _TECHNIQUE_META_CACHE[resolved_id.upper()] = meta
+        return meta
 
     def candidate_techniques(self, text: str) -> list[tuple[str, str]]:
         """(ID, name) for ATT&CK techniques the text names as a phrase.
@@ -477,19 +548,38 @@ class HecateClient:
     def _parent_name(self, technique_id: str) -> str:
         """The parent technique's name, or "" for a top-level or unresolvable ID.
 
-        An in-process lookup, not a subprocess, so a second call per
-        sub-technique costs nothing worth caching. A failure only costs the
-        grounding audit one name to match on, so it is not worth raising.
+        Reuses the process-lifetime technique cache so sub-technique batches
+        do not re-walk STIX for the same parent.
         """
         if "." not in technique_id:
             return ""
+        parent_id = technique_id.split(".", 1)[0]
+        parent_key = parent_id.strip().upper()
+        with _TECHNIQUE_META_LOCK:
+            cached = _TECHNIQUE_META_CACHE.get(parent_key)
+        if cached is not None:
+            return cached.name if cached.found else ""
+
         from hecate_agent.api import lookup_technique
 
         try:
-            data = self._with_context(lookup_technique, technique_id=technique_id.split(".")[0])
+            data = self._with_context(lookup_technique, technique_id=parent_id)
         except RuntimeError:
             return ""
-        return str(data.get("name", "")) if data.get("found") else ""
+        parent = TechniqueMetadata(
+            technique_id=str(data.get("technique_id", "") or parent_id),
+            tactics=data.get("tactics", []),
+            platforms=data.get("platforms", []),
+            found=bool(data.get("found", False)),
+            superseded_from=data.get("superseded_from", ""),
+            name=str(data.get("name", "") or ""),
+            parent_name="",
+        )
+        with _TECHNIQUE_META_LOCK:
+            _TECHNIQUE_META_CACHE[parent_key] = parent
+            if parent.technique_id and parent.technique_id.upper() != parent_key:
+                _TECHNIQUE_META_CACHE[parent.technique_id.upper()] = parent
+        return parent.name if parent.found else ""
 
     def link_research_to_hunt(
         self, research_id: str, hunt_id: str, timeout_sec: int | None = None

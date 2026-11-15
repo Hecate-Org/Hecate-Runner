@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 #: Regular expressions for entity extraction
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 _IPV4_RE = re.compile(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b")
+_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 _DOMAIN_RE = re.compile(
     r"\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+\b"
 )
@@ -286,7 +287,8 @@ class HuntEntityProfile:
     file_hashes: set[str] = field(default_factory=set)
     techniques: set[str] = field(default_factory=set)
     inventory: dict[str, int] = field(default_factory=dict)
-    text: str = ""
+    #: URLs referenced in the hunt (replaces storing the full body in memory).
+    source_refs: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -369,6 +371,7 @@ class ThreatEntityCorrelator:
                             techniques.add(clean_t)
 
                 inv = parse_indicator_inventory(text)
+                source_refs = {m.group(0).rstrip(").,];'\"") for m in _URL_RE.finditer(text)}
 
                 prof = HuntEntityProfile(
                     hunt_id=hunt_id,
@@ -380,7 +383,7 @@ class ThreatEntityCorrelator:
                     file_hashes=file_hashes,
                     techniques=techniques,
                     inventory=inv,
-                    text=text,
+                    source_refs=source_refs,
                 )
                 with _HUNT_CACHE_LOCK:
                     _HUNT_PROFILE_CACHE[key] = (mtime_ns, prof)
@@ -418,11 +421,14 @@ class ThreatEntityCorrelator:
             matched_types: list[str] = []
             matched_items: list[str] = []
 
-            # 0. Direct Source URL match
-            if item.source_url and item.source_url.strip() in prof.text:
+            # 0. Direct Source URL match (against extracted refs, not full body)
+            url = (item.source_url or "").strip()
+            if url and (
+                url in prof.source_refs or any(url in ref or ref in url for ref in prof.source_refs)
+            ):
                 score += 1.0
                 matched_types.append("source_url")
-                matched_items.append(item.source_url.strip())
+                matched_items.append(url)
 
             # 1. CVE overlap
             shared_cves = item_cves & prof.cves
@@ -485,6 +491,55 @@ class EnrichmentResult:
     details: str
 
 
+def _platforms_from_hunt_text(text: str) -> set[str]:
+    """Parse platform labels from hunt frontmatter (list or scalar)."""
+    platforms: set[str] = set()
+    m = re.search(r"(?m)^platforms?:\s*\n((?:[ \t]*-[ \t]*.+\n)+)", text)
+    if m:
+        for line in m.group(1).splitlines():
+            item = line.strip().lstrip("-").strip().strip("\"'")
+            if item:
+                platforms.add(item.lower())
+        return platforms
+    m = re.search(r"(?m)^platforms?:\s*\[([^\]]*)\]", text)
+    if m:
+        for part in m.group(1).split(","):
+            item = part.strip().strip("\"'")
+            if item:
+                platforms.add(item.lower())
+        return platforms
+    m = re.search(r"(?m)^platforms?:\s*([^\n#]+)", text)
+    if m:
+        item = m.group(1).strip().strip("\"'")
+        if item:
+            platforms.add(item.lower())
+    return platforms
+
+
+def _primary_sigma_product(platforms: set[str] | None) -> str:
+    """Pick a Sigma product from hunt platforms; avoid forcing Windows on Linux hunts."""
+    plats = {p.lower() for p in (platforms or set())}
+    if plats & {"windows", "win", "windows_server"}:
+        if not (plats & {"linux", "macos", "mac", "unix"}):
+            return "windows"
+        # Mixed: prefer windows for DNS field compatibility only when windows is listed.
+        return "windows"
+    if plats & {"macos", "mac"}:
+        return "macos"
+    if plats & {"linux", "unix"}:
+        return "linux"
+    return "linux"
+
+
+def _rule_markdown_link(rule_path: Path, workspace: Path) -> str:
+    """Link a rule with a workspace-relative path (never absolute file:// URLs)."""
+    try:
+        rel = rule_path.resolve().relative_to(workspace.resolve()).as_posix()
+    except ValueError:
+        rel = rule_path.name
+    return f"- Linked rule: [`{rule_path.name}`]({rel})"
+
+
 class IncrementalEnricher:
     """Enriches an existing hunt dossier with incremental indicators, rules, and notes."""
 
@@ -495,6 +550,7 @@ class IncrementalEnricher:
         indicator_type: str,
         values: list[str],
         out_dir: Path,
+        platforms: set[str] | None = None,
     ) -> Path | None:
         """Generate a deterministic, validated incremental Sigma rule variant."""
         if not values:
@@ -504,22 +560,25 @@ class IncrementalEnricher:
         timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         slug = f"{category}__incremental_{indicator_type}_{timestamp}"
         rule_path = out_dir / f"{slug}.yml"
+        product = _primary_sigma_product(platforms)
+        value = values if len(values) > 1 else values[0]
 
         if indicator_type in ("domain", "hostname"):
-            selection = {"QueryName": values if len(values) > 1 else values[0]}
-            product = "windows"
-            cat = "dns_query"
+            if product == "windows":
+                selection = {"QueryName": value}
+                cat = "dns_query"
+            else:
+                # Linux/macOS DNS QueryName is not portable; use network hostname.
+                selection = {"DestinationHostname": value}
+                cat = "network_connection"
         elif indicator_type in ("ip-dst", "ipv4", "ip"):
-            selection = {"DestinationIp": values if len(values) > 1 else values[0]}
-            product = "linux"
+            selection = {"DestinationIp": value}
             cat = "network_connection"
         elif indicator_type in ("sha256", "filehash-sha256", "hash"):
-            selection = {"Hashes|contains": values if len(values) > 1 else values[0]}
-            product = "linux"
+            selection = {"Hashes|contains": value}
             cat = "process_creation"
         else:
-            selection = {"CommandLine|contains": values if len(values) > 1 else values[0]}
-            product = "linux"
+            selection = {"CommandLine|contains": value}
             cat = "process_creation"
 
         import yaml
@@ -602,22 +661,32 @@ class IncrementalEnricher:
         # 2. Generate Incremental Sigma Rules
         out_dir = workspace / "queries" / match.hunt_id
         generated_rules: list[Path] = []
+        platforms = _platforms_from_hunt_text(text)
 
         if new_net:
             domains = [n for n in new_net if not _IPV4_RE.match(n)]
             ips = [n for n in new_net if _IPV4_RE.match(n)]
             if domains:
-                r1 = cls.generate_incremental_rule(match.hunt_id, "dns", "domain", domains, out_dir)
+                r1 = cls.generate_incremental_rule(
+                    match.hunt_id, "dns", "domain", domains, out_dir, platforms=platforms
+                )
                 if r1:
                     generated_rules.append(r1)
             if ips:
-                r2 = cls.generate_incremental_rule(match.hunt_id, "network", "ipv4", ips, out_dir)
+                r2 = cls.generate_incremental_rule(
+                    match.hunt_id, "network", "ipv4", ips, out_dir, platforms=platforms
+                )
                 if r2:
                     generated_rules.append(r2)
 
         if new_hashes:
             r3 = cls.generate_incremental_rule(
-                match.hunt_id, "process", "sha256", new_hashes, out_dir
+                match.hunt_id,
+                "process",
+                "sha256",
+                new_hashes,
+                out_dir,
+                platforms=platforms,
             )
             if r3:
                 generated_rules.append(r3)
@@ -672,7 +741,7 @@ class IncrementalEnricher:
         )
 
         rule_links = (
-            "\n".join(f"- Linked rule: [`{r.name}`](file://{r.resolve()})" for r in generated_rules)
+            "\n".join(_rule_markdown_link(r, workspace) for r in generated_rules)
             if generated_rules
             else "_No new rule variants generated._"
         )

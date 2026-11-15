@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from hecate_agent.core.splunk_credentials import splunk_token as splunk_role_token
+
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.approved import confirms_technique, resolve_fidelity_scope
 from hecate_runner.bas.base import DetonationResult
@@ -50,6 +52,7 @@ class SiemAlertVerificationResult:
     alert_evidence: dict[str, Any] = field(default_factory=dict)
     sample_events: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    tuning_suggestion: dict[str, Any] | None = None
     verified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -184,11 +187,19 @@ class SiemAlertVerifier:
         can_simulate = bool(resolved_yaml) and (
             not candidate_query or candidate_query == disk_query
         )
+        if not query_text and technique_id:
+            from hecate_runner.bas.approved import APPROVED_PROCEDURES
+
+            proc = APPROVED_PROCEDURES.get(technique_id)
+            if proc and proc.argv:
+                query_source = "approved_procedure"
+                cmd_escaped = proc.command.replace('"', '\\"')
+                query_text = f'CommandLine="*{cmd_escaped}*" OR Image="*{proc.argv[0]}*"'
         notes.append(f"Candidate query from {query_source}: {query_text}")
 
         # 3. Handle Mock / Offline Mode
         splunk_host = env.get("SPLUNK_HOST") or env.get("SPLUNK_URL")
-        splunk_token = env.get("SPLUNK_TOKEN") or env.get("SPLUNK_PASSWORD")
+        splunk_token = splunk_role_token("read", env) or env.get("SPLUNK_PASSWORD")
         is_mock = siem_target.lower() == "mock" or detonation.provider == "mock"
 
         if not is_mock and not (splunk_host and splunk_token):
@@ -224,9 +235,16 @@ class SiemAlertVerifier:
                 try:
                     from hecate_agent.core.sigma_evaluator import SigmaEvaluator
 
-                    for ev in telemetry_events:
-                        if SigmaEvaluator.evaluate_rule(resolved_yaml, [ev], []).true_positives > 0:
-                            matched_events.append(ev)
+                    # Batch-evaluate once; prefer triggering_events over per-event re-eval.
+                    report = SigmaEvaluator.evaluate_rule(resolved_yaml, telemetry_events, [])
+                    matched_events = list(getattr(report, "triggering_events", None) or [])
+                    if not matched_events and report.true_positives > 0:
+                        matched_events = [
+                            ev
+                            for ev in telemetry_events
+                            if SigmaEvaluator.evaluate_rule(resolved_yaml, [ev], []).true_positives
+                            > 0
+                        ]
                 except Exception as eval_exc:
                     notes.append(f"Sigma AST evaluation warning in mock mode: {eval_exc}")
 
@@ -248,6 +266,25 @@ class SiemAlertVerifier:
                 f"matched={matched} (AST logic probe, not live SIEM alert)."
             )
 
+            tuning_suggestion = None
+            if status == "detection_miss" and telemetry_events and hunt_id:
+                try:
+                    from hecate_runner.rule_tuner import RuleTuner
+
+                    tuner = RuleTuner(self.workspace)
+                    suggestion_res = tuner.auto_tune_from_miss(
+                        hunt_id, telemetry_events, apply=False
+                    )
+                    if suggestion_res.ok:
+                        tuning_suggestion = {
+                            "action_summary": suggestion_res.action_summary,
+                            "diff": suggestion_res.diff,
+                            "new_rule_yaml": suggestion_res.new_rule_yaml,
+                        }
+                        notes.append(f"Auto-tuning suggestion: {suggestion_res.action_summary}")
+                except Exception as tune_exc:
+                    log.debug("Auto-tuning suggestion generation failed: %s", tune_exc)
+
             result = SiemAlertVerificationResult(
                 hunt_id=hunt_id,
                 technique_id=technique_id,
@@ -267,6 +304,7 @@ class SiemAlertVerifier:
                 search_job_id="",
                 sample_events=matched_events[:1] if matched_events else telemetry_events[:1],
                 notes=notes,
+                tuning_suggestion=tuning_suggestion,
             )
             self._persist_result(result)
             return result
@@ -320,7 +358,7 @@ class SiemAlertVerifier:
         try:
             client = SplunkClient(
                 host=splunk_host,
-                token=env.get("SPLUNK_TOKEN"),
+                token=splunk_role_token("read", env),
                 username=env.get("SPLUNK_USERNAME"),
                 password=env.get("SPLUNK_PASSWORD"),
                 verify_ssl=env.get("SPLUNK_VERIFY_SSL", "true").strip().lower()
@@ -392,7 +430,7 @@ class SiemAlertVerifier:
             ended = datetime.fromisoformat(detonation.end_time_utc.replace("Z", "+00:00"))
             if ended.tzinfo is None:
                 ended = ended.replace(tzinfo=UTC)
-            earliest_time = (started - timedelta(seconds=30)).isoformat()
+            earliest_time = str(int((started - timedelta(seconds=60)).timestamp()))
         except (ValueError, TypeError):
             notes.append("Invalid detonation wall-clock timestamp; using the last two minutes.")
 
@@ -430,7 +468,8 @@ class SiemAlertVerifier:
                                     "this is not proof of alert firing."
                                 )
                                 break
-                            # Job is done but 0 results found: break job poll to re-dispatch if time remains
+                            # Job is done but 0 results found: allow 1s for index commit before re-dispatching
+                            time.sleep(1.0)
                             break
 
                         time.sleep(self.poll_interval_sec)
@@ -493,6 +532,23 @@ class SiemAlertVerifier:
                 "Smoke check evidence does not validate the attack technique, even if a SIEM alert fired."
             )
 
+        tuning_suggestion = None
+        if status == "detection_miss" and telemetry_events and hunt_id:
+            try:
+                from hecate_runner.rule_tuner import RuleTuner
+
+                tuner = RuleTuner(self.workspace)
+                suggestion_res = tuner.auto_tune_from_miss(hunt_id, telemetry_events, apply=False)
+                if suggestion_res.ok:
+                    tuning_suggestion = {
+                        "action_summary": suggestion_res.action_summary,
+                        "diff": suggestion_res.diff,
+                        "new_rule_yaml": suggestion_res.new_rule_yaml,
+                    }
+                    notes.append(f"Auto-tuning suggestion: {suggestion_res.action_summary}")
+            except Exception as tune_exc:
+                log.debug("Auto-tuning suggestion generation failed: %s", tune_exc)
+
         result = SiemAlertVerificationResult(
             hunt_id=hunt_id,
             technique_id=technique_id,
@@ -523,6 +579,7 @@ class SiemAlertVerifier:
             search_job_id=job_sid,
             sample_events=matched_results[:3],
             notes=notes,
+            tuning_suggestion=tuning_suggestion,
         )
         self._persist_result(result)
         return result

@@ -111,3 +111,20 @@ def test_older_core_writer_fallback_preserves_unchanged_files(tmp_path, monkeypa
     before = path.stat()
     assert not write_query_if_changed(path, "index=test\n")
     assert (path.stat().st_ino, path.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_deploy_reuses_cached_transpile_without_reconversion(tmp_path, monkeypatch, conversions):
+    rule_path = tmp_path / "rule.yml"
+    cached = transpile_and_write_native(rule_path, RULE)
+    before = dict(conversions)
+    deploy = Mock(return_value={"target": "test", "status": "dry_run"})
+    monkeypatch.setattr(api, "deploy_transpiled_query", deploy)
+    engine = SimpleNamespace(settings=SimpleNamespace(siem_deploy_dry_run=True), trail=Mock())
+    req = SimpleNamespace(hunt_id="H-0001")
+    Orchestrator._deploy_native_queries(
+        engine, req, [{"rule_yaml": RULE, "_transpile": cached}], tmp_path
+    )
+    assert deploy.call_count == len(
+        [r for r in cached.values() if getattr(r, "success", False) and getattr(r, "query", None)]
+    )
+    assert conversions == before

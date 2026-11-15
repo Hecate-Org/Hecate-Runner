@@ -192,8 +192,14 @@ def doctor(
     if settings.query_provider == "splunk":
         check(
             _env_key_available(settings, "SPLUNK_HOST")
-            and _env_key_available(settings, "SPLUNK_TOKEN"),
-            "SPLUNK_HOST / SPLUNK_TOKEN set (required for HECATE_RUNNER_QUERY_PROVIDER=splunk)",
+            and (
+                _env_key_available(settings, "SPLUNK_READ_TOKEN")
+                or (
+                    os.getenv("HECATE_STRICT_CREDENTIAL_ROLES") != "1"
+                    and _env_key_available(settings, "SPLUNK_TOKEN")
+                )
+            ),
+            "SPLUNK_HOST / SPLUNK_READ_TOKEN set (legacy SPLUNK_TOKEN supported outside strict mode)",
             "Set both in the Hecate workspace .env — see `hecate-agent splunk test` to verify connectivity "
             "before running `hecate-runner approve` against it.",
         )
@@ -265,7 +271,7 @@ def _workspace_env_value(settings: Settings, key_name: str) -> str:
     if os.getenv(key_name):
         return os.environ[key_name]
     workspace_env = settings.hecate_workspace / ".env"
-    if workspace_env.exists():
+    if workspace_env.exists() and os.getenv("HECATE_SERVICE_ISOLATED") != "1":
         return dotenv_values(workspace_env).get(key_name) or ""
     return ""
 
@@ -275,7 +281,7 @@ def _env_key_available(settings: Settings, key_name: str) -> bool:
     if os.getenv(key_name):
         return True
     workspace_env = settings.hecate_workspace / ".env"
-    if workspace_env.exists():
+    if workspace_env.exists() and os.getenv("HECATE_SERVICE_ISOLATED") != "1":
         return bool(dotenv_values(workspace_env).get(key_name))
     return False
 

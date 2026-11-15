@@ -23,8 +23,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.cti.base import ATTACK_TECHNIQUE_LINE, CTIItem, CTIProvider
 
@@ -315,7 +313,14 @@ class GitHubPocProvider(CTIProvider):
         url = f"https://api.github.com/search/repositories?q={query}&sort=updated&order=desc&per_page=15"
 
         try:
-            resp = httpx.get(url, headers=self._headers(), timeout=self.request_timeout_sec)
+            from hecate_runner.http_pool import pooled_get
+
+            resp = pooled_get(
+                url,
+                pool_name="cti:github_poc",
+                headers=self._headers(),
+                timeout=float(self.request_timeout_sec),
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get("items") or []
@@ -355,8 +360,13 @@ class GitHubPocProvider(CTIProvider):
         """Fallback to raw nomi-sec/PoC-in-GitHub README feed (zero rate limit)."""
         url = "https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/README.md"
         try:
-            resp = httpx.get(
-                url, headers={"User-Agent": "Hecate-Runner/1.0"}, timeout=self.request_timeout_sec
+            from hecate_runner.http_pool import pooled_get
+
+            resp = pooled_get(
+                url,
+                pool_name="cti:github_poc",
+                headers={"User-Agent": "Hecate-Runner/1.0"},
+                timeout=float(self.request_timeout_sec),
             )
             if resp.status_code != 200:
                 log.warning("Curated PoC feed returned HTTP %s", resp.status_code)
@@ -401,10 +411,17 @@ class GitHubPocProvider(CTIProvider):
 
     def _fetch_readme_text(self, repo_full_name: str) -> str:
         """Fetch README content via GitHub API or raw githubusercontent."""
+        from hecate_runner.http_pool import pooled_get
+
         # Try GitHub API first
         api_url = f"https://api.github.com/repos/{repo_full_name}/readme"
         try:
-            resp = httpx.get(api_url, headers=self._headers(), timeout=self.request_timeout_sec)
+            resp = pooled_get(
+                api_url,
+                pool_name="cti:github_poc",
+                headers=self._headers(),
+                timeout=float(self.request_timeout_sec),
+            )
             if resp.status_code == 200:
                 content_b64 = resp.json().get("content")
                 if content_b64:
@@ -416,13 +433,14 @@ class GitHubPocProvider(CTIProvider):
         for branch in ("main", "master"):
             raw_url = f"https://raw.githubusercontent.com/{repo_full_name}/{branch}/README.md"
             try:
-                resp = httpx.get(
+                resp = pooled_get(
                     raw_url,
+                    pool_name="cti:github_poc",
                     headers={"User-Agent": "Hecate-Runner/1.0"},
-                    timeout=self.request_timeout_sec,
+                    timeout=float(self.request_timeout_sec),
                 )
                 if resp.status_code == 200:
-                    return resp.text
+                    return str(resp.text)
             except Exception:
                 pass
         return ""

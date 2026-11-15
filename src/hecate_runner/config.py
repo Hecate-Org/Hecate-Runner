@@ -6,6 +6,7 @@ Uses pydantic-settings so config is typed, validated, and self-documenting.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -33,6 +34,13 @@ def _discover_env_files(workspace: Path | None = None) -> tuple[str, ...]:
 class Settings(BaseSettings):
     """Runtime configuration for the hecate-runner orchestrator."""
 
+    def __init__(self, **values: Any) -> None:
+        if os.environ.get("HECATE_SERVICE_ISOLATED") == "1":
+            # BaseSettings constructs DotEnvSettingsSource before calling
+            # settings_customise_sources. Disable its eager filesystem read.
+            values["_env_file"] = None
+        super().__init__(**values)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -49,6 +57,8 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        if os.environ.get("HECATE_SERVICE_ISOLATED") == "1":
+            return (init_settings, env_settings, file_secret_settings)
         # If env_file is defaulted to ".env" (no custom _env_file passed to constructor),
         # dynamically resolve workspace .env and local .env at instantiation time.
         if getattr(dotenv_settings, "env_file", None) == ".env":
@@ -555,6 +565,17 @@ class Settings(BaseSettings):
             "The unsupported 'subprocess' and 'bwrap' values are rejected. "
             "Reviewed live execution is configured separately through BAS."
         ),
+    )
+    purple_team_continuous_replay_interval_sec: int = Field(
+        default=7200,
+        ge=0,
+        alias="HECATE_PURPLE_TEAM_CONTINUOUS_REPLAY_INTERVAL_SEC",
+        description="Interval in seconds between background Purple Team replay verification sweeps across active hunts (0 to disable).",
+    )
+    purple_team_auto_tune_on_miss: bool = Field(
+        default=True,
+        alias="HECATE_PURPLE_TEAM_AUTO_TUNE_ON_MISS",
+        description="Automatically generate rule tuning suggestions when continuous replay or live BAS detects a missed alert.",
     )
     sigma_timeout_sec: int = Field(
         default=1800,

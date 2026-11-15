@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -15,6 +16,15 @@ from hecate_runner.notifications import (
     notify_threat_intake,
 )
 from hecate_runner.orchestrator import RunResult
+
+
+@pytest.fixture(autouse=True)
+def notification_transport(monkeypatch):
+    """Inject a client so HTTP stubs exercise the notification boundary."""
+    monkeypatch.setattr(
+        "hecate_runner.http_pool.get_shared_client",
+        lambda **kwargs: SimpleNamespace(post=lambda *args, **kw: httpx.post(*args, **kw)),
+    )
 
 
 def test_noop_when_webhook_not_configured(

@@ -270,9 +270,14 @@ def test_scheduler_stage_and_execute(mock_workspace: Path, monkeypatch) -> None:
     scheduler = HuntExecutionScheduler(settings=settings, provider=mock_provider)
 
     # Discover active hunts
+    HuntExecutionScheduler.clear_frontmatter_cache()
     active = scheduler.discover_active_hunts()
     assert len(active) == 1
     assert active[0]["hunt_id"] == "H-0021"
+    # Second discovery reuses mtime-cached frontmatter.
+    active2 = scheduler.discover_active_hunts()
+    assert active2[0]["hunt_id"] == "H-0021"
+    assert active2[0]["frontmatter"] is active[0]["frontmatter"]
 
     # Stage sweep
     staged_list = scheduler.stage_sweeps(hunt_id="H-0021", force=True)

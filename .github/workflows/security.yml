@@ -1,0 +1,64 @@
+name: Security
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # PRs/pushes block regressions; scheduled/manual runs report all advisories.
+      BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+    steps:
+      - name: Checkout source for scanning
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up isolated scan tooling
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install CI-only scanners
+        run: |
+          python -m pip install --only-binary=:all: bandit==1.9.4 detect-secrets==1.5.0 pip-audit==2.10.1
+
+      - name: Verify security check failure handling
+        run: python -I -m unittest discover -s .github/tests -v
+
+      - name: Scan tracked files for secrets
+        run: python -I .github/scripts/security_checks.py secrets --base-ref "$BASE_SHA"
+
+      - name: Scan application for high severity code issues
+        if: ${{ !cancelled() }}
+        run: bandit -r src/hecate_runner --severity-level high
+
+      - name: Audit every locked registry package version
+        if: ${{ !cancelled() }}
+        run: python -I .github/scripts/security_checks.py dependencies --base-ref "$BASE_SHA"
+
+      - name: Retain dependency findings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-audit
+          path: dependency-audit.json
+          if-no-files-found: ignore
+          retention-days: 14

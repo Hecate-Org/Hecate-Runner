@@ -64,6 +64,7 @@ class Provider:
 
 from hecate_agent.core import llm_router
 llm_router.create_router = lambda: Provider()
+source_evidence.assert_safe_fetch_url = lambda url: url
 source_evidence.fetch_page_text = lambda url: "The malware launches cmd.exe."
 """)
     calls = tmp_path / "calls.txt"

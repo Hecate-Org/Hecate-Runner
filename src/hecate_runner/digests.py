@@ -35,17 +35,18 @@ def collect_detection_engineering_metrics(settings: Settings, hours: int = 24) -
     """Collects metrics for the Daily Detection Engineering Digest."""
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
-    # 1. Total Sigma Rules in workspace
-    all_sigma_files = list(settings.hecate_workspace.rglob("*.yml"))
+    # 1. Total Sigma Rules — scope to queries/ (never whole-workspace rglob)
+    queries_root = settings.hecate_workspace / "queries"
+    all_sigma_files = list(queries_root.rglob("*.yml")) if queries_root.exists() else []
     valid_sigma = [
         p
         for p in all_sigma_files
         if p.is_file()
         and any(k in p.name.lower() for k in ("rule", "query", "audit", "connection", "dns"))
     ]
-    # Fallback to general yml if specific pattern didn't match
+    # Fallback to all query YAML if specific pattern didn't match
     if not valid_sigma:
-        valid_sigma = [p for p in all_sigma_files if p.is_file() and "queries" in str(p)]
+        valid_sigma = [p for p in all_sigma_files if p.is_file()]
 
     # 2. Recent Hunts & Purple Team Outcomes
     all_hunts = list(settings.hunts_root.rglob("H-*.md"))
@@ -85,11 +86,10 @@ def collect_detection_engineering_metrics(settings: Settings, hours: int = 24) -
 
     # 3. Recent Validated Rules Sample
     recent_rule_samples: list[dict[str, str]] = []
-    queries_root = settings.hecate_workspace / "queries"
     if queries_root.exists():
         rule_candidates = sorted(
-            queries_root.rglob("*.yml"),
-            key=lambda p: p.stat().st_mtime,
+            all_sigma_files if all_sigma_files else queries_root.rglob("*.yml"),
+            key=lambda p: p.stat().st_mtime if p.is_file() else 0,
             reverse=True,
         )
         for r in rule_candidates[:5]:
