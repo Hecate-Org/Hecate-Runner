@@ -49,6 +49,14 @@ CANONICAL_FIELDS: dict[str, str] = {
     "filepath": "Image",
     "directory": "Image",
     "folder": "Image",
+    "targetobject": "TargetObject",
+    "details": "Details",
+    "pipename": "PipeName",
+    "imageloaded": "ImageLoaded",
+    "eventsource": "eventSource",
+    "eventname": "eventName",
+    "operationname": "operationName",
+    "resource": "resource",
 }
 
 
@@ -558,6 +566,59 @@ class RuleTuner:
                             derived_instruction = f"Expand CommandLine to include {target_token}"
                             break
 
+                    # Check TargetObject constraint (Windows Registry)
+                    if field_base.lower() in ("targetobject", "registry_key", "key"):
+                        observed_targets = [
+                            str(ev.get("TargetObject") or ev.get("targetobject") or "")
+                            for ev in missed_events
+                            if (ev.get("TargetObject") or ev.get("targetobject"))
+                        ]
+                        if observed_targets:
+                            target_sample = observed_targets[0]
+                            val_str = str(val).lower()
+                            if target_sample.lower() not in val_str:
+                                derived_instruction = (
+                                    f"Expand TargetObject to include {target_sample}"
+                                )
+                                break
+
+                    # Check PipeName constraint (Named Pipes)
+                    if field_base.lower() in ("pipename", "pipe"):
+                        observed_pipes = [
+                            str(ev.get("PipeName") or ev.get("pipename") or "")
+                            for ev in missed_events
+                            if (ev.get("PipeName") or ev.get("pipename"))
+                        ]
+                        if observed_pipes:
+                            pipe_sample = observed_pipes[0]
+                            val_str = str(val).lower()
+                            if pipe_sample.lower() not in val_str:
+                                derived_instruction = f"Expand PipeName to include {pipe_sample}"
+                                break
+
+                    # Check eventName constraint (Cloud Audit)
+                    if field_base.lower() in ("eventname", "methodname", "operationname"):
+                        observed_events = [
+                            str(
+                                ev.get("eventName")
+                                or ev.get("methodName")
+                                or ev.get("operationName")
+                                or ""
+                            )
+                            for ev in missed_events
+                            if (
+                                ev.get("eventName")
+                                or ev.get("methodName")
+                                or ev.get("operationName")
+                            )
+                        ]
+                        if observed_events:
+                            ev_sample = observed_events[0]
+                            val_str = str(val).lower()
+                            if ev_sample.lower() not in val_str:
+                                derived_instruction = f"Expand eventName to include {ev_sample}"
+                                break
+
                 if derived_instruction:
                     break
 
@@ -568,6 +629,12 @@ class RuleTuner:
                     derived_instruction = f"Expand CommandLine to include {ev0['CommandLine']}"
                 elif ev0.get("Image"):
                     derived_instruction = f"Expand Image to include {Path(str(ev0['Image'])).name}"
+                elif ev0.get("TargetObject"):
+                    derived_instruction = f"Expand TargetObject to include {ev0['TargetObject']}"
+                elif ev0.get("PipeName"):
+                    derived_instruction = f"Expand PipeName to include {ev0['PipeName']}"
+                elif ev0.get("eventName"):
+                    derived_instruction = f"Expand eventName to include {ev0['eventName']}"
                 else:
                     return RuleTuningResult(
                         ok=False,

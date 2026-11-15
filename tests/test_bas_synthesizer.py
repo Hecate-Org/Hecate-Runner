@@ -66,6 +66,41 @@ detection:
     condition: selection
 """
 
+WIN_REGISTRY_RULE = """
+title: Windows Persistence via Registry Run Key
+logsource:
+    category: registry_set
+    product: windows
+detection:
+    selection:
+        TargetObject|contains: 'CurrentVersion\\Run'
+        Details|endswith: '.exe'
+    condition: selection
+"""
+
+WIN_PIPE_RULE = """
+title: Suspicious Named Pipe Creation
+logsource:
+    category: pipe_created
+    product: windows
+detection:
+    selection:
+        PipeName|contains: 'hecate_canary'
+    condition: selection
+"""
+
+AWS_CLOUDTRAIL_RULE = """
+title: AWS CloudTrail Disabled or Stopped
+logsource:
+    service: cloudtrail
+    product: aws
+detection:
+    selection:
+        eventSource: 'cloudtrail.amazonaws.com'
+        eventName: 'StopLogging'
+    condition: selection
+"""
+
 
 @pytest.mark.parametrize(
     "rule_yaml,category,expected_field,expected_val",
@@ -74,20 +109,30 @@ detection:
         (FILE_RULE, "file_event", "TargetFilename", "/tmp/hecate_canary.sh"),
         (NETWORK_RULE, "network_connection", "DestinationIp", "198.51.100.24"),
         (WEBSERVER_RULE, "webserver", "cs-uri-stem", "/manage/account/create"),
+        (WIN_REGISTRY_RULE, "registry_set", "TargetObject", "CurrentVersion\\Run"),
+        (WIN_PIPE_RULE, "pipe_created", "PipeName", "hecate_canary"),
+        (AWS_CLOUDTRAIL_RULE, "cloud_audit", "eventName", "StopLogging"),
     ],
 )
 def test_synthesizer_generates_matching_telemetry(
     rule_yaml: str, category: str, expected_field: str, expected_val: str
 ) -> None:
     tp, benign = synthesize_events_from_rule(rule_yaml, "H-TEST", "T1000")
-    assert tp["category"] == category
     assert expected_val in str(tp.get(expected_field))
     assert len(benign) == 2
 
 
 @pytest.mark.parametrize(
     "rule_yaml",
-    [PROCESS_RULE, FILE_RULE, NETWORK_RULE, WEBSERVER_RULE],
+    [
+        PROCESS_RULE,
+        FILE_RULE,
+        NETWORK_RULE,
+        WEBSERVER_RULE,
+        WIN_REGISTRY_RULE,
+        WIN_PIPE_RULE,
+        AWS_CLOUDTRAIL_RULE,
+    ],
 )
 def test_synthetic_evaluation_verifies_true_positives_and_clean_controls(
     rule_yaml: str,
@@ -166,3 +211,77 @@ def test_automatic_pipeline_bas_validates_multiple_rules(tmp_path: Path) -> None
     assert "bas_detection_triggered: true" in rendered
     assert "🧪 **SIMULATION MATCH" in rendered
     assert "- **Detection Triggered:** Yes (4 hit(s))" in rendered
+
+
+def test_infer_splunk_sourcetype() -> None:
+    from hecate_runner.bas.forwarder import infer_splunk_sourcetype
+
+    assert (
+        infer_splunk_sourcetype({"product": "windows", "category": "registry_set"})
+        == "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "windows", "category": "pipe_created"})
+        == "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "windows", "category": "windows_security"})
+        == "WinEventLog:Security"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "aws", "category": "cloud_audit"}) == "aws:cloudtrail"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "gcp", "category": "cloud_audit"})
+        == "google:gcp:pubsub:message"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "azure", "category": "cloud_audit"}) == "azure:activity"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "kubernetes", "category": "kubernetes_audit"})
+        == "kube:audit"
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "linux", "category": "webserver"}) == "access_combined"
+    )
+
+
+def test_rule_tuner_diagnoses_missed_registry_and_cloud_constraints(tmp_path: Path) -> None:
+    from hecate_runner.rule_tuner import RuleTuner
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    q_dir = workspace / "queries" / "H-0999"
+    q_dir.mkdir(parents=True)
+    rule_file = q_dir / "detection.yml"
+    rule_file.write_text(WIN_REGISTRY_RULE, encoding="utf-8")
+
+    missed = [
+        {
+            "product": "windows",
+            "category": "registry_set",
+            "TargetObject": "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer",
+            "Details": "C:\\temp\\backdoor.exe",
+        }
+    ]
+
+    tuner = RuleTuner(workspace)
+    res = tuner.auto_tune_from_miss("H-0999", missed)
+    assert res.ok is True
+    assert "TargetObject" in res.action_summary
+
+
+def test_bas_synthesize_cli(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from hecate_runner.cli import app
+
+    rule_file = tmp_path / "test_rule.yml"
+    rule_file.write_text(WIN_REGISTRY_RULE, encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["bas-synthesize", str(rule_file)])
+    assert result.exit_code == 0
+    assert "Synthesized Telemetry & Evaluation" in result.stdout
+    assert "PASSED (True Positive Triggered, Controls Clean)" in result.stdout

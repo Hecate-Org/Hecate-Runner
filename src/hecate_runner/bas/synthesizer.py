@@ -147,11 +147,45 @@ def synthesize_events_from_rule(
         tp_event.setdefault("SourceIp", "10.0.0.15")
         tp_event.setdefault("SourcePort", 51234)
         tp_event.setdefault("Protocol", "tcp")
+    elif category in ("registry_set", "registry_event", "registry_add", "registry_delete"):
+        tp_event.setdefault(
+            "TargetObject",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\hecate_service\\ImagePath",
+        )
+        tp_event.setdefault("Details", "C:\\temp\\hecate_payload.exe")
+        tp_event.setdefault("Image", "C:\\Windows\\System32\\reg.exe")
+    elif category in ("pipe_created", "named_pipe"):
+        tp_event.setdefault("PipeName", "\\hecate_canary_pipe")
+        tp_event.setdefault("Image", "C:\\Windows\\System32\\cmd.exe")
+    elif category == "driver_load":
+        tp_event.setdefault("ImageLoaded", "C:\\Windows\\System32\\drivers\\hecate_canary.sys")
+        tp_event.setdefault("Signed", "false")
+        tp_event.setdefault("SignatureStatus", "unsigned")
+    elif category == "dns_query":
+        tp_event.setdefault("QueryName", "c2.example.com")
+        tp_event.setdefault(
+            "Image",
+            "C:\\Windows\\System32\\powershell.exe" if product == "windows" else "/usr/bin/curl",
+        )
     elif category == "webserver":
         tp_event.setdefault("cs-method", "POST")
         tp_event.setdefault("cs-uri-stem", "/api/v1/resource")
         tp_event.setdefault("sc-status", 200)
         tp_event.setdefault("c-ip", "192.0.2.10")
+    elif category in ("cloud_audit", "identity_audit") or product in ("aws", "cloud"):
+        tp_event.setdefault("eventSource", "iam.amazonaws.com")
+        tp_event.setdefault("eventName", "CreateUser")
+        tp_event.setdefault("awsRegion", "us-east-1")
+        tp_event.setdefault("sourceIPAddress", "198.51.100.55")
+        tp_event.setdefault("userAgent", "aws-cli/2.15.0")
+        tp_event.setdefault(
+            "userIdentity",
+            {"type": "IAMUser", "arn": "arn:aws:iam::123456789012:user/admin", "userName": "admin"},
+        )
+    elif category == "kubernetes_audit" or product in ("kubernetes", "k8s"):
+        tp_event.setdefault("verb", "create")
+        tp_event.setdefault("resource", "pods")
+        tp_event.setdefault("namespace", "kube-system")
 
     # Negative baseline control events
     benign_1: dict[str, Any] = {
@@ -212,6 +246,90 @@ def synthesize_events_from_rule(
     elif category == "network_connection":
         benign_1.update({"DestinationIp": "127.0.0.1", "DestinationPort": 53, "Protocol": "udp"})
         benign_2.update({"DestinationIp": "10.0.0.1", "DestinationPort": 443, "Protocol": "tcp"})
+    elif category in ("registry_set", "registry_event", "registry_add", "registry_delete"):
+        benign_1.update(
+            {
+                "TargetObject": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Hostname",
+                "Details": "localhost",
+                "Image": "C:\\Windows\\System32\\svchost.exe",
+            }
+        )
+        benign_2.update(
+            {
+                "TargetObject": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters\\NtpServer",
+                "Details": "time.windows.com",
+                "Image": "C:\\Windows\\System32\\svchost.exe",
+            }
+        )
+    elif category in ("pipe_created", "named_pipe"):
+        benign_1.update({"PipeName": "\\spoolss", "Image": "C:\\Windows\\System32\\spoolsv.exe"})
+        benign_2.update({"PipeName": "\\lsass", "Image": "C:\\Windows\\System32\\lsass.exe"})
+    elif category == "driver_load":
+        benign_1.update(
+            {
+                "ImageLoaded": "C:\\Windows\\System32\\drivers\\ntfs.sys",
+                "Signed": "true",
+                "SignatureStatus": "Valid",
+            }
+        )
+        benign_2.update(
+            {
+                "ImageLoaded": "C:\\Windows\\System32\\drivers\\tcpip.sys",
+                "Signed": "true",
+                "SignatureStatus": "Valid",
+            }
+        )
+    elif category == "dns_query":
+        benign_1.update(
+            {
+                "QueryName": "ntp.ubuntu.com",
+                "Image": "C:\\Windows\\System32\\svchost.exe"
+                if product == "windows"
+                else "/usr/lib/systemd/systemd-timesyncd",
+            }
+        )
+        benign_2.update(
+            {
+                "QueryName": "time.windows.com",
+                "Image": "C:\\Windows\\System32\\svchost.exe",
+            }
+        )
+    elif category in ("cloud_audit", "identity_audit") or product in ("aws", "cloud"):
+        benign_1.update(
+            {
+                "eventSource": "ec2.amazonaws.com",
+                "eventName": "DescribeInstances",
+                "awsRegion": "us-east-1",
+                "sourceIPAddress": "10.0.1.20",
+                "userAgent": "aws-sdk-go/v1.44.0",
+            }
+        )
+        benign_2.update(
+            {
+                "eventSource": "s3.amazonaws.com",
+                "eventName": "ListBuckets",
+                "awsRegion": "us-east-1",
+                "sourceIPAddress": "10.0.1.20",
+                "userAgent": "console.amazonaws.com",
+            }
+        )
+    elif category == "kubernetes_audit" or product in ("kubernetes", "k8s"):
+        benign_1.update(
+            {
+                "verb": "get",
+                "resource": "pods",
+                "namespace": "kube-system",
+                "user": {"username": "system:node:worker-1"},
+            }
+        )
+        benign_2.update(
+            {
+                "verb": "list",
+                "resource": "services",
+                "namespace": "default",
+                "user": {"username": "system:serviceaccount:default:ingress-nginx"},
+            }
+        )
     elif category == "webserver":
         benign_1.update({"cs-method": "GET", "cs-uri-stem": "/robots.txt", "sc-status": 200})
         benign_2.update({"cs-method": "GET", "cs-uri-stem": "/favicon.ico", "sc-status": 200})
