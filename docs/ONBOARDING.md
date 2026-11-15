@@ -119,8 +119,10 @@ feeds with configuration or `sources` commands, not a nonexistent `run --source`
   procedures; it is not a diagnostic-only command.
 - [Community releases](COMMUNITY_RELEASES.md) explains public snapshot review,
   permissions and separate release approval. Supply an explicit publication repo.
-- [Operating recipes](HOW_TO.md#services) distinguishes system daemon/maintenance
-  units from user Slack/agent units. Edit the host-specific templates first.
+- [Background services](SERVICES.md) explains the dedicated systemd services
+  (`hecate-runner-daemon`, `hecate-runner-maintenance`, `hecate-slack-bot`, `hecate-bas-broker`),
+  dedicated service accounts, and streamlined setup via `scripts/setup-services.sh`.
+- [Operating recipes](HOW_TO.md#services) provides quick command recipes and troubleshooting.
 - `hecate-agent monitor` reads the same selected workspace. Reopen an existing
   monitor after updating Core; a running Python process does not reload code.
 

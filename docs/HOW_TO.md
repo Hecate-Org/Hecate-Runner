@@ -93,40 +93,30 @@ Foreground processes can run independently in shells using the same environment:
 | `hecate-runner slack-bot` | Slack Socket Mode interactions |
 | `hecate-agent monitor` | Interactive terminal dashboard |
 
-Linux templates in `systemd/` contain host-specific usernames, working directories,
-uv executable paths, environment files, log paths and optional Ollama dependencies.
-Review and edit them for your installation before running any installer. A hosted
-model does not require an Ollama service; remove that dependency in your unit.
-Service environments need absolute paths and do not inherit your interactive shell.
-Do not run duplicate system and user copies against the same workspace.
+Hecate background workers can run as dedicated, security-isolated systemd services.
+For a complete guide on each service role, required credentials, and operational
+procedures, refer to [`docs/SERVICES.md`](SERVICES.md).
+
+### Quickstart Setup
+
+Run the guided setup script from `Hecate-Runner`:
 
 ```bash
-# From Hecate-Runner, after adapting the templates; installs SYSTEM units
-sudo ./scripts/install-systemd.sh
-sudo systemctl enable --now hecate-runner-maintenance.service
-sudo systemctl enable --now hecate-runner-daemon.service
-sudo systemctl status hecate-runner-daemon.service hecate-runner-maintenance.service
+./scripts/setup-services.sh
 ```
 
-The installer invokes legacy-service retirement and does not install Slack or
-Sandcat. The current generation path is the resident daemon, not a legacy
-orchestrator timer. Inspect each unit's `StandardOutput`/`StandardError`: templates
-can append to files, so `journalctl` may not contain application logs.
+This installs and starts the isolated system units:
+* `hecate-runner-daemon.service` (CTI intake, hunt generation, continuous Purple Team replay)
+* `hecate-runner-maintenance.service` (queue maintenance, retries, artifact retention)
+* `hecate-slack-bot.service` (Slack bot notifications and approvals)
+* `hecate-bas-broker.service` (isolated Docker socket broker for BAS simulation)
 
-Install the adapted Slack USER unit separately:
+To inspect service health and live logs:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/hecate-slack-bot.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now hecate-slack-bot.service
-systemctl --user status hecate-slack-bot.service
+systemctl status hecate-runner-daemon.service hecate-runner-maintenance.service hecate-slack-bot.service hecate-bas-broker.service
+journalctl -u hecate-runner-daemon.service -f
 ```
-
-The optional `caldera-sandcat.service` is a user unit supervising the prepared
-agent container; it does not install CALDERA or establish isolation by itself.
-Restart the corresponding system/user services after environment or code updates,
-and reopen existing monitor sessions.
 
 ## Slack and publication
 
