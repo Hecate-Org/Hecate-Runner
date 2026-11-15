@@ -46,7 +46,7 @@ def forward_events_to_splunk(
     timeout_sec: float = 15.0,
     workspace: Path | None = None,
 ) -> int:
-    """Ingest a list of telemetry events into Splunk via Simple Receiver REST API.
+    """Ingest events through index-scoped HEC, or the legacy receiver outside strict mode.
 
     Args:
         events: List of telemetry event dictionaries.
@@ -75,16 +75,34 @@ def forward_events_to_splunk(
     if not splunk_host.startswith(("http://", "https://")):
         splunk_host = f"https://{splunk_host}"
 
+    strict = env.get("HECATE_STRICT_CREDENTIAL_ROLES", "").lower() in {"1", "true", "yes"}
+    hec_url = setting("SPLUNK_HEC_URL").rstrip("/")
     splunk_token = token or setting("SPLUNK_INGEST_TOKEN")
-    if not splunk_token and env.get("HECATE_STRICT_CREDENTIAL_ROLES", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
+    if strict and (not hec_url or not splunk_token):
+        log.warning("Isolated ingestion requires SPLUNK_HEC_URL and an index-scoped HEC token")
+        return 0
+    if hec_url:
+        try:
+            url = httpx.URL(hec_url)
+            if (
+                url.scheme != "https"
+                or not url.host
+                or url.userinfo
+                or url.path not in {"", "/"}
+                or url.query
+                or url.fragment
+            ):
+                raise ValueError("Invalid HEC base URL")
+        except (ValueError, httpx.InvalidURL):
+            log.warning("HEC requires an HTTPS base URL without credentials, query or path")
+            return 0
+        if not splunk_token:
+            return 0
+    if not splunk_token and not strict:
         splunk_token = setting("SPLUNK_TOKEN")
     splunk_user = username or setting("SPLUNK_USERNAME") or "admin"
     splunk_pass = password or setting("SPLUNK_PASSWORD")
-    if env.get("HECATE_STRICT_CREDENTIAL_ROLES", "").lower() in {"1", "true", "yes"}:
+    if strict or hec_url:
         splunk_pass = ""
 
     if verify_ssl is None:
@@ -94,27 +112,37 @@ def forward_events_to_splunk(
             "no",
         )
 
-    endpoint = f"{splunk_host}/services/receivers/simple"
-    params = {"index": index, "sourcetype": sourcetype}
+    endpoint = (
+        f"{hec_url}/services/collector/event"
+        if hec_url
+        else f"{splunk_host}/services/receivers/simple"
+    )
+    params = {} if hec_url else {"index": index, "sourcetype": sourcetype}
 
-    # Format events as newline-delimited JSON
-    payload_lines = [json.dumps(ev) for ev in events]
+    payload_lines = [
+        json.dumps({"index": index, "sourcetype": sourcetype, "event": ev} if hec_url else ev)
+        for ev in events
+    ]
     data = "\n".join(payload_lines)
 
     headers = {"Content-Type": "application/json"}
     auth: tuple[str, str] | httpx._client.UseClientDefault = httpx.USE_CLIENT_DEFAULT
     if splunk_token:
         auth_val = (
-            splunk_token
-            if splunk_token.startswith(("Bearer ", "Basic ", "Splunk "))
-            else f"Bearer {splunk_token}"
+            "Splunk " + splunk_token
+            if hec_url
+            else (
+                splunk_token
+                if splunk_token.startswith(("Bearer ", "Basic ", "Splunk "))
+                else f"Bearer {splunk_token}"
+            )
         )
         headers["Authorization"] = auth_val
     elif splunk_pass:
         auth = (splunk_user, splunk_pass)
 
     try:
-        with httpx.Client(verify=verify_ssl, timeout=timeout_sec) as client:
+        with httpx.Client(verify=verify_ssl, timeout=timeout_sec, trust_env=False) as client:
             resp = client.post(endpoint, params=params, headers=headers, auth=auth, content=data)
             # If Bearer token was rejected with 401, retry with basic auth if password available
             if resp.status_code == 401 and splunk_pass and headers.get("Authorization"):
@@ -127,6 +155,9 @@ def forward_events_to_splunk(
                     content=data,
                 )
             resp.raise_for_status()
+            if hec_url and resp.json().get("code") != 0:
+                log.warning("HEC rejected telemetry; no receiver/password fallback was attempted")
+                return 0
             log.info("Successfully forwarded %d event(s) to Splunk index '%s'", len(events), index)
             return len(events)
     except Exception as exc:
