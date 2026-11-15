@@ -33,12 +33,6 @@ try:
 except ImportError:
     _fcntl = None
 
-_fcntl: ModuleType | None
-try:
-    _fcntl = import_module("fcntl")
-except ImportError:
-    _fcntl = None
-
 log = logging.getLogger(__name__)
 
 DEFAULT_LEASE_PATH = Path("/tmp/hecate-bas-lab.lease")
