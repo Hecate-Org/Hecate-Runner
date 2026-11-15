@@ -18,6 +18,10 @@ def test_invalid_hunt_ids_are_rejected(value, tmp_path):
         wp.query_directory(tmp_path, value)
     with pytest.raises(ValueError):
         find_hunt_path(tmp_path, value)
+    from hecate_runner.rule_tuner import RuleTuner
+
+    with pytest.raises(ValueError):
+        RuleTuner(tmp_path).auto_tune_from_miss(value, [])
 
 
 @pytest.mark.parametrize(
@@ -113,3 +117,18 @@ def test_size_limit_and_valid_hunt_lookup(tmp_path, monkeypatch):
         wp.read_artifact(hunt, tmp_path)
     with pytest.raises(ValueError, match="byte limit"):
         wp.write_artifact(hunt, "large", tmp_path)
+
+
+def test_continuous_replay_refuses_a_symlinked_suggestion_directory(tmp_path):
+    from hecate_runner.config import Settings
+    from hecate_runner.purple_team import run_continuous_replay_sweep
+
+    workspace = tmp_path / "workspace"
+    (workspace / "queries/H-0001").mkdir(parents=True)
+    (workspace / ".hecate").mkdir()
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (workspace / ".hecate/tuning_suggestions").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        run_continuous_replay_sweep(Settings(hecate_workspace=workspace))
+    assert not list(outside.iterdir())

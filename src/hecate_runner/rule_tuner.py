@@ -447,8 +447,8 @@ class RuleTuner:
         apply: bool = False,
     ) -> RuleTuningResult:
         """Derive an expansion or repair instruction from missed attack telemetry and optionally mutate the rule."""
-        norm_hunt_id = hunt_id.strip().upper()
-        query_dir = self.workspace / "queries" / norm_hunt_id
+        norm_hunt_id = normalize_hunt_id(hunt_id)
+        query_dir = query_directory(self.workspace, norm_hunt_id)
         if not query_dir.exists():
             return RuleTuningResult(
                 ok=False,
@@ -467,7 +467,7 @@ class RuleTuner:
             )
 
         rule_file = sigma_files[0]
-        original_yaml = rule_file.read_text(encoding="utf-8")
+        original_yaml = read_artifact(rule_file, self.workspace)
 
         if not instruction:
             if not missed_events:
@@ -617,7 +617,7 @@ class RuleTuner:
         drift_entry: dict[str, Any],
     ) -> RuleTuningResult:
         """Suggest reconciliation or rule tuning based on SIEM query drift."""
-        norm_hunt_id = hunt_id.strip().upper()
+        norm_hunt_id = normalize_hunt_id(hunt_id)
         target = str(drift_entry.get("target") or "siem").lower()
         file_name = str(drift_entry.get("file_name") or "")
         drift_type = str(drift_entry.get("drift_type") or drift_entry.get("status") or "drifted")

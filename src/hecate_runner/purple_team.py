@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hecate_runner.atomic_write import atomic_write_text
+from hecate_runner.workspace_paths import read_artifact, workspace_path, write_artifact
 
 log = logging.getLogger(__name__)
 
@@ -782,7 +782,7 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
     from hecate_runner.slack_bot import replay_hunt_purple_team
 
     workspace = Path(settings.hecate_workspace)
-    queries_dir = workspace / "queries"
+    queries_dir = workspace_path(workspace, "queries")
     if not queries_dir.exists():
         return []
 
@@ -795,7 +795,7 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
     )
     outcomes: list[dict[str, Any]] = []
     tuner = RuleTuner(workspace)
-    suggestions_dir = workspace / ".hecate" / "tuning_suggestions"
+    suggestions_dir = workspace_path(workspace, ".hecate", "tuning_suggestions")
     suggestions_dir.mkdir(parents=True, exist_ok=True)
 
     for hunt_id in hunt_ids:
@@ -816,7 +816,7 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
                 hunt_path = find_hunt_path(workspace, hunt_id)
                 if hunt_path and hunt_path.is_file():
                     try:
-                        fm, body, _ = parse_hunt_frontmatter(hunt_path.read_text(encoding="utf-8"))
+                        fm, body, _ = parse_hunt_frontmatter(read_artifact(hunt_path, workspace))
                         techs = list(fm.get("techniques") or [])
                         ev_by_cat = replay_events(
                             records=[],
@@ -845,7 +845,9 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
                             "generated_at": datetime.now(UTC).isoformat(),
                         }
                         sugg_file = suggestions_dir / f"{hunt_id}.json"
-                        atomic_write_text(sugg_file, json.dumps(tuning_suggestion, indent=2))
+                        write_artifact(
+                            sugg_file, json.dumps(tuning_suggestion, indent=2), workspace
+                        )
                         log.info(
                             "Continuous verification generated tuning suggestion for %s: %s",
                             hunt_id,
