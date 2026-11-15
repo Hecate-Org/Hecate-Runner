@@ -80,8 +80,11 @@ already exposes content, so exact-snapshot privacy/redistribution review precede
 upload. Promotion/content checks do not deploy a production alert. MISP's private,
 unpublished outbox path is independent of feed intake. See [community releases](COMMUNITY_RELEASES.md).
 
-The daemon/maintenance templates are system services; Slack and the prepared
-Sandcat supervisor use user services. Adapt deployment-specific templates first.
-Application logs may be file-backed rather than in the journal. Secrets, private
-run JSON, traces and local databases remain outside public Git. Restart services
-and reopen monitors after updating their code or environment.
+All background workers (`daemon`, `maintenance`, `slack-bot`, `bas-broker`)
+run as security-isolated system units under dedicated unprivileged accounts
+(`hecate-reader`, `hecate-writer`, `hecate-slack`, `hecate-bas`), configured via
+`/etc/hecate/` and supervised by systemd with journal logging. Automated setup is
+provided via `scripts/setup-services.sh`. Secrets, private run JSON, traces and
+local databases remain outside public Git. See [services](SERVICES.md) and
+[service isolation](SERVICE_ISOLATION.md). Restart services and reopen monitors
+after updating their code or environment.

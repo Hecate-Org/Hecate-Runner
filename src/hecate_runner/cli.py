@@ -2148,7 +2148,7 @@ def watch(
 ) -> None:
     """Follow what the orchestrator is doing, one line per decision.
 
-    Reads the orchestrator log, so it shows cycles started by the systemd timer
+    Reads the orchestrator log, so it shows cycles started by the background daemon
     as well as ones run by hand. Ctrl-C to stop.
     """
     import time

@@ -47,5 +47,5 @@ separate test credentials; do not remove isolation guards to make a suite green.
 
 Core and Runner share an interpreter for in-process calls. Update/test compatible
 source revisions together, restart relevant application services and reopen
-monitors. Generic installers do not adapt hardcoded deployment unit paths or
-install all external service prerequisites automatically.
+monitors. Use `scripts/setup-services.sh` for guided service installation and path
+detection, and `scripts/update-service-runtime.py` for transactional runtime upgrades.

@@ -132,11 +132,11 @@ Do not infer Windows/cloud validation from a working Linux lab.
 | `hecate-runner slack-bot` | Interactive Slack Socket Mode actions |
 | `hecate-agent monitor` | Foreground terminal dashboard for the selected workspace |
 
-The Linux installer installs system units for the daemon and maintenance. Slack
-and the optional isolated agent have separate user-unit templates. Templates
-contain deployment-specific users, paths and service dependencies; edit them
-before installation. They do not configure a fresh host automatically. See
-[service installation](docs/HOW_TO.md#services).
+Background workers can run as dedicated, security-isolated systemd services
+(`hecate-runner-daemon`, `hecate-runner-maintenance`, `hecate-slack-bot`,
+`hecate-bas-broker`) under unprivileged system accounts with separated credential
+roles. Automated setup is provided via `./scripts/setup-services.sh`. See
+[background services](docs/SERVICES.md) and [service isolation](docs/SERVICE_ISOLATION.md).
 
 ## Tests
 
@@ -155,6 +155,8 @@ Test fixture IDs such as `H-9999` must never reach Slack or external webhooks.
 
 - [Onboarding](docs/ONBOARDING.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Background services](docs/SERVICES.md)
+- [Service isolation architecture](docs/SERVICE_ISOLATION.md)
 - [Feature boundaries](docs/FEATURES.md)
 - [Operating and developer recipes](docs/HOW_TO.md)
 - [BAS automation](docs/BAS_AUTOMATION.md)

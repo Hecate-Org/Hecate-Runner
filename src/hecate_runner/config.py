@@ -596,7 +596,7 @@ class Settings(BaseSettings):
             "basic (~5 min) or advanced (~15-20 min, full 5-skill methodology "
             "-- Hecate's own documented default). advanced is the default here "
             "too, on the condition that llm_timeout_sec (this file) and the "
-            "systemd unit's TimeoutStartSec (systemd/hecate-runner-orchestrator."
+            "systemd unit's TimeoutStartSec (systemd/hecate-runner-daemon."
             "service) are both raised to comfortably exceed it -- both have "
             "been. Drop to basic only for time-sensitive/urgent drafting, or "
             "if either of those two ceilings is ever lowered back down."

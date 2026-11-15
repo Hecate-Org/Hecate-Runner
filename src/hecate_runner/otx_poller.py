@@ -1,7 +1,6 @@
 """OTX -> CTI queue poller.
 
-Runs on its own, more frequent systemd timer, independent of the main
-orchestrator cycle. Pulls at most one high-signal OTX pulse per invocation
+Runs as a dedicated polling task, independent of the main orchestrator cycle. Pulls at most one high-signal OTX pulse per invocation
 and routes it into the file-queue CTI intake (``cti_queue/next.txt``) so the
 existing orchestrator picks it up on its normal cadence — this decouples OTX
 polling frequency from hypothesis-generation frequency and the daily draft

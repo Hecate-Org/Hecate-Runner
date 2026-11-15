@@ -74,7 +74,9 @@ Validate inputs without changing the host:
 
 ## Apply with administrator access
 
-Install the host's acl package if setfacl/getfacl are unavailable. Then:
+For a guided setup with automatic path detection, use `./scripts/setup-services.sh`.
+
+Alternatively, install the host's acl package if setfacl/getfacl are unavailable, then run:
 
     sudo scripts/install-systemd.sh \
       --runtime-stage /path/to/runtime-stage \
@@ -83,9 +85,8 @@ Install the host's acl package if setfacl/getfacl are unavailable. Then:
       --docker-socket /path/to/docker.sock \
       --operator YOUR_DESKTOP_ACCOUNT
 
-For this host Docker Desktop uses
-/home/chemch/.docker/desktop/docker.sock. Native Docker usually uses
-/var/run/docker.sock. Use the socket for the existing reviewed lab, not a
+Docker Desktop typically uses `/home/<operator>/.docker/desktop/docker.sock` while native Docker uses
+`/var/run/docker.sock` or `/run/docker.sock`. Use the socket for the existing reviewed lab, not a
 different Docker context. The CLI defaults to /usr/bin/docker; supply --docker
 if its administrator-owned executable is elsewhere.
 
