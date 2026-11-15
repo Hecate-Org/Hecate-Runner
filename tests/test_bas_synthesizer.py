@@ -101,6 +101,17 @@ detection:
     condition: selection
 """
 
+GCP_AUDIT_RULE = """
+title: GCP Logging Sink Deleted
+logsource:
+    product: gcp
+    category: cloud_audit
+detection:
+    selection:
+        protoPayload.methodName: 'google.logging.v2.ConfigServiceV2.DeleteSink'
+    condition: selection
+"""
+
 
 @pytest.mark.parametrize(
     "rule_yaml,category,expected_field,expected_val",
@@ -112,14 +123,42 @@ detection:
         (WIN_REGISTRY_RULE, "registry_set", "TargetObject", "CurrentVersion\\Run"),
         (WIN_PIPE_RULE, "pipe_created", "PipeName", "hecate_canary"),
         (AWS_CLOUDTRAIL_RULE, "cloud_audit", "eventName", "StopLogging"),
+        (
+            GCP_AUDIT_RULE,
+            "cloud_audit",
+            "protoPayload.methodName",
+            "google.logging.v2.ConfigServiceV2.DeleteSink",
+        ),
     ],
 )
 def test_synthesizer_generates_matching_telemetry(
     rule_yaml: str, category: str, expected_field: str, expected_val: str
 ) -> None:
     tp, benign = synthesize_events_from_rule(rule_yaml, "H-TEST", "T1000")
+    assert tp.get("category") == category
     assert expected_val in str(tp.get(expected_field))
     assert len(benign) == 2
+    assert tp.get("_hecate_synthetic") is True
+
+
+def test_aws_without_category_does_not_get_linux_process_defaults() -> None:
+    tp, benign = synthesize_events_from_rule(AWS_CLOUDTRAIL_RULE, "H-TEST")
+    assert tp["category"] == "cloud_audit"
+    assert tp["eventName"] == "StopLogging"
+    assert "Image" not in tp
+    assert "CommandLine" not in tp
+    assert all("eventName" in b or "eventSource" in b for b in benign)
+    assert all("Image" not in b for b in benign)
+
+
+def test_gcp_cloud_audit_does_not_mix_aws_fields() -> None:
+    tp, benign = synthesize_events_from_rule(GCP_AUDIT_RULE, "H-TEST")
+    assert tp["category"] == "cloud_audit"
+    assert "eventSource" not in tp
+    assert "eventName" not in tp
+    assert "awsRegion" not in tp
+    assert all("eventSource" not in b for b in benign)
+    assert all("protoPayload.methodName" in b for b in benign)
 
 
 @pytest.mark.parametrize(
@@ -132,6 +171,7 @@ def test_synthesizer_generates_matching_telemetry(
         WIN_REGISTRY_RULE,
         WIN_PIPE_RULE,
         AWS_CLOUDTRAIL_RULE,
+        GCP_AUDIT_RULE,
     ],
 )
 def test_synthetic_evaluation_verifies_true_positives_and_clean_controls(
@@ -214,37 +254,146 @@ def test_automatic_pipeline_bas_validates_multiple_rules(tmp_path: Path) -> None
 
 
 def test_infer_splunk_sourcetype() -> None:
-    from hecate_runner.bas.forwarder import infer_splunk_sourcetype
+    from hecate_runner.bas.forwarder import (
+        SYNTHETIC_SPLUNK_SOURCETYPE,
+        infer_splunk_sourcetype,
+        synthetic_splunk_index,
+    )
 
+    # Vendor sourcetypes only for native-schema / explicit non-synthetic mapping
     assert (
-        infer_splunk_sourcetype({"product": "windows", "category": "registry_set"})
+        infer_splunk_sourcetype({"product": "windows", "category": "registry_set"}, synthetic=False)
         == "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
     )
     assert (
-        infer_splunk_sourcetype({"product": "windows", "category": "pipe_created"})
+        infer_splunk_sourcetype({"product": "windows", "category": "pipe_created"}, synthetic=False)
         == "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
     )
     assert (
-        infer_splunk_sourcetype({"product": "windows", "category": "windows_security"})
+        infer_splunk_sourcetype(
+            {"product": "windows", "category": "windows_security"}, synthetic=False
+        )
         == "WinEventLog:Security"
     )
     assert (
-        infer_splunk_sourcetype({"product": "aws", "category": "cloud_audit"}) == "aws:cloudtrail"
+        infer_splunk_sourcetype({"product": "aws", "category": "cloud_audit"}, synthetic=False)
+        == "aws:cloudtrail"
     )
     assert (
-        infer_splunk_sourcetype({"product": "gcp", "category": "cloud_audit"})
+        infer_splunk_sourcetype({"product": "gcp", "category": "cloud_audit"}, synthetic=False)
         == "google:gcp:pubsub:message"
     )
     assert (
-        infer_splunk_sourcetype({"product": "azure", "category": "cloud_audit"}) == "azure:activity"
+        infer_splunk_sourcetype({"product": "azure", "category": "cloud_audit"}, synthetic=False)
+        == "azure:activity"
     )
     assert (
-        infer_splunk_sourcetype({"product": "kubernetes", "category": "kubernetes_audit"})
+        infer_splunk_sourcetype(
+            {"product": "kubernetes", "category": "kubernetes_audit"}, synthetic=False
+        )
         == "kube:audit"
     )
     assert (
-        infer_splunk_sourcetype({"product": "linux", "category": "webserver"}) == "access_combined"
+        infer_splunk_sourcetype({"product": "linux", "category": "webserver"}, synthetic=False)
+        == "access_combined"
     )
+
+    # Predicate-synthesized JSON must never claim vendor XML/CloudTrail sourcetypes
+    assert (
+        infer_splunk_sourcetype(
+            {"product": "windows", "category": "registry_set", "_hecate_synthetic": True}
+        )
+        == SYNTHETIC_SPLUNK_SOURCETYPE
+    )
+    assert (
+        infer_splunk_sourcetype({"product": "aws", "category": "cloud_audit"}, synthetic=True)
+        == SYNTHETIC_SPLUNK_SOURCETYPE
+    )
+    assert synthetic_splunk_index() == "hecate_synthetic"
+
+
+def test_bas_synthesize_prefers_query_yaml_over_markdown(tmp_path: Path) -> None:
+    from hecate_runner.commands.bas import (
+        _load_sigma_from_hunt_markdown,
+        _load_sigma_from_query_dirs,
+    )
+
+    root = tmp_path / "ws"
+    q = root / "queries" / "H-0032"
+    q.mkdir(parents=True)
+    (q / "dns__incremental_domain_1.yml").write_text(
+        """
+title: H-0032 Incremental Campaign Detection (domain)
+logsource:
+  product: windows
+  category: dns_query
+detection:
+  selection:
+    QueryName: junk.example
+  condition: selection
+""",
+        encoding="utf-8",
+    )
+    (q / "process_creation__command_the_source_shows_being_run_python3.yml").write_text(
+        """
+title: 'Command the source shows being run: python3 tooling/checker'
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|endswith: /python3
+    CommandLine|contains: tooling/checker
+  condition: selection
+level: low
+""",
+        encoding="utf-8",
+    )
+    (q / "process_creation__php_shell.yml").write_text(
+        """
+title: PHP Web Server Spawning Shell
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_parent:
+    ParentImage|contains: /php-fpm
+  selection_child:
+    Image|endswith: /bin/sh
+  condition: selection_parent and selection_child
+level: high
+""",
+        encoding="utf-8",
+    )
+    hunts = root / "hunts" / "2026" / "Q4"
+    hunts.mkdir(parents=True)
+    (hunts / "H-0032.md").write_text(
+        "---\nhunt_id: H-0032\n---\n```yaml\n" + PROCESS_RULE + "\n```\n",
+        encoding="utf-8",
+    )
+    loaded = _load_sigma_from_query_dirs([root], "H-0032")
+    assert "php-fpm" in loaded
+    assert "QueryName" not in loaded
+    md = _load_sigma_from_hunt_markdown([root], "H-0032")
+    assert "/curl" in md
+
+
+def test_endswith_absolute_path_suffix_is_not_double_prefixed() -> None:
+    rule = """
+title: Shell child
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  selection:
+    Image|endswith: /bin/sh
+    ParentImage|contains: /php-fpm
+  condition: selection
+"""
+    tp, _ = synthesize_events_from_rule(rule, "H-0032")
+    assert tp["Image"] == "/bin/sh"
+    assert "/usr/bin/bin/sh" not in str(tp["Image"])
+    assert "/php-fpm" in str(tp["ParentImage"])
 
 
 def test_rule_tuner_diagnoses_missed_registry_and_cloud_constraints(tmp_path: Path) -> None:

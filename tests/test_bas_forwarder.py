@@ -58,8 +58,17 @@ def test_forward_events_basic_auth_fallback(monkeypatch):
 
 def test_tls_verification_defaults_on_and_allows_explicit_override(monkeypatch, tmp_path):
     monkeypatch.delenv("SPLUNK_VERIFY_SSL", raising=False)
+    monkeypatch.delenv("SPLUNK_HEC_URL", raising=False)
     with mock.patch("httpx.Client") as client:
+        # Default host is localhost → skip verify (self-signed lab certs).
         assert forward_events_to_splunk([{"event": "test"}], workspace=tmp_path) == 1
+        assert client.call_args.kwargs["verify"] is False
+        # Non-loopback host verifies TLS by default.
+        forward_events_to_splunk(
+            [{"event": "test"}],
+            workspace=tmp_path,
+            host="https://splunk.example:8089",
+        )
         assert client.call_args.kwargs["verify"] is True
         forward_events_to_splunk([{"event": "test"}], workspace=tmp_path, verify_ssl=False)
         assert client.call_args.kwargs["verify"] is False

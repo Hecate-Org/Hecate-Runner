@@ -16,6 +16,42 @@ from hecate_agent.core.sigma_evaluator import SigmaEvaluator, base_field, extrac
 
 log = logging.getLogger(__name__)
 
+_AWS_PRODUCTS = frozenset({"aws", "cloudtrail", "cloud"})
+_GCP_PRODUCTS = frozenset({"gcp", "google_cloud", "google"})
+_AZURE_PRODUCTS = frozenset({"azure", "azure_ad", "entra_id", "microsoft365"})
+_K8S_PRODUCTS = frozenset({"kubernetes", "k8s"})
+_CLOUD_AUDIT_SERVICES = frozenset(
+    {"cloudtrail", "cloud_audit", "gcp", "azure", "activitylogs", "activity_log"}
+)
+
+
+def _infer_category(product: str, category: str | None, service: str) -> str:
+    """Resolve Sigma category, including cloud products that omit category."""
+    explicit = (category or "").strip().lower()
+    if explicit:
+        return explicit
+    if product in _AWS_PRODUCTS or product in _GCP_PRODUCTS or product in _AZURE_PRODUCTS:
+        return "cloud_audit"
+    if product in _K8S_PRODUCTS:
+        return "kubernetes_audit"
+    if service in _CLOUD_AUDIT_SERVICES or service == "cloudtrail":
+        return "cloud_audit"
+    if service in {"sysmon", "security", "powershell"}:
+        return "process_creation"
+    return "process_creation"
+
+
+def _is_aws_cloud(product: str, service: str) -> bool:
+    return product in _AWS_PRODUCTS or service == "cloudtrail"
+
+
+def _is_gcp_cloud(product: str, service: str) -> bool:
+    return product in _GCP_PRODUCTS or service in {"gcp", "google_cloud"}
+
+
+def _is_azure_cloud(product: str, service: str) -> bool:
+    return product in _AZURE_PRODUCTS or service in {"azure", "activitylogs", "activity_log"}
+
 
 def synthesize_events_from_rule(
     rule_yaml: str, hunt_id: str = "", technique_id: str = ""
@@ -26,9 +62,14 @@ def synthesize_events_from_rule(
         return {}, []
 
     logsource = parsed.get("logsource") or {}
-    product = str(logsource.get("product", "linux")).lower()
-    category = str(logsource.get("category", "process_creation")).lower()
-    service = str(logsource.get("service", "")).lower()
+    product = str(logsource.get("product") or "linux").lower()
+    service = str(logsource.get("service") or "").lower()
+    raw_category = logsource.get("category")
+    category = _infer_category(
+        product,
+        str(raw_category) if raw_category is not None else None,
+        service,
+    )
     detection = parsed.get("detection") or {}
 
     now_iso = datetime.now(UTC).isoformat()
@@ -40,6 +81,7 @@ def synthesize_events_from_rule(
         "hunt_id": hunt_id,
         "timestamp_utc": now_iso,
         "TimeCreated": now_iso,
+        "_hecate_synthetic": True,
     }
     if service:
         tp_event["service"] = service
@@ -86,10 +128,19 @@ def synthesize_events_from_rule(
                         if product == "windows"
                         else f"/tmp/hecate_canary{suffix}"
                     )
-                elif suffix.startswith("/") or suffix.startswith("\\"):
-                    constructed = (
-                        "C:\\Windows\\System32" if product == "windows" else "/usr/bin"
-                    ) + suffix
+                elif suffix.startswith("/"):
+                    # endswith '/curl' → /usr/bin/curl; endswith '/bin/sh' → /bin/sh
+                    # (never /usr/bin + /bin/sh → /usr/bin/bin/sh).
+                    parts = [p for p in suffix.split("/") if p]
+                    constructed = f"/usr/bin/{parts[0]}" if len(parts) == 1 else suffix
+                elif suffix.startswith("\\"):
+                    parts = [p for p in suffix.replace("/", "\\").split("\\") if p]
+                    if product == "windows" and len(parts) == 1:
+                        constructed = f"C:\\Windows\\System32\\{parts[0]}"
+                    elif product == "windows":
+                        constructed = "C:\\Windows\\System32" + suffix
+                    else:
+                        constructed = "/" + "/".join(parts)
                 else:
                     constructed = (
                         "C:\\Windows\\System32\\" if product == "windows" else "/usr/bin/"
@@ -172,17 +223,40 @@ def synthesize_events_from_rule(
         tp_event.setdefault("cs-uri-stem", "/api/v1/resource")
         tp_event.setdefault("sc-status", 200)
         tp_event.setdefault("c-ip", "192.0.2.10")
-    elif category in ("cloud_audit", "identity_audit") or product in ("aws", "cloud"):
-        tp_event.setdefault("eventSource", "iam.amazonaws.com")
-        tp_event.setdefault("eventName", "CreateUser")
-        tp_event.setdefault("awsRegion", "us-east-1")
-        tp_event.setdefault("sourceIPAddress", "198.51.100.55")
-        tp_event.setdefault("userAgent", "aws-cli/2.15.0")
-        tp_event.setdefault(
-            "userIdentity",
-            {"type": "IAMUser", "arn": "arn:aws:iam::123456789012:user/admin", "userName": "admin"},
-        )
-    elif category == "kubernetes_audit" or product in ("kubernetes", "k8s"):
+    elif category in ("cloud_audit", "identity_audit") or _is_gcp_cloud(product, service):
+        if _is_gcp_cloud(product, service) or (
+            category in ("cloud_audit", "identity_audit") and product in _GCP_PRODUCTS
+        ):
+            tp_event.setdefault("protoPayload.serviceName", "iam.googleapis.com")
+            tp_event.setdefault(
+                "protoPayload.methodName",
+                "google.iam.admin.v1.CreateServiceAccountKey",
+            )
+            tp_event.setdefault(
+                "protoPayload.authenticationInfo.principalEmail",
+                "admin@example.com",
+            )
+        elif _is_azure_cloud(product, service):
+            tp_event.setdefault("operationName", "Microsoft.Authorization/roleAssignments/write")
+            tp_event.setdefault("resultType", "Success")
+            tp_event.setdefault("caller", "admin@contoso.com")
+            tp_event.setdefault("Level", "Informational")
+        else:
+            # AWS CloudTrail / generic cloud_audit default
+            tp_event.setdefault("eventSource", "iam.amazonaws.com")
+            tp_event.setdefault("eventName", "CreateUser")
+            tp_event.setdefault("awsRegion", "us-east-1")
+            tp_event.setdefault("sourceIPAddress", "198.51.100.55")
+            tp_event.setdefault("userAgent", "aws-cli/2.15.0")
+            tp_event.setdefault(
+                "userIdentity",
+                {
+                    "type": "IAMUser",
+                    "arn": "arn:aws:iam::123456789012:user/admin",
+                    "userName": "admin",
+                },
+            )
+    elif category == "kubernetes_audit" or product in _K8S_PRODUCTS:
         tp_event.setdefault("verb", "create")
         tp_event.setdefault("resource", "pods")
         tp_event.setdefault("namespace", "kube-system")
@@ -193,12 +267,14 @@ def synthesize_events_from_rule(
         "category": category,
         "data_source": category,
         "timestamp_utc": now_iso,
+        "_hecate_synthetic": True,
     }
     benign_2: dict[str, Any] = {
         "product": product,
         "category": category,
         "data_source": category,
         "timestamp_utc": now_iso,
+        "_hecate_synthetic": True,
     }
 
     if category == "process_creation":
@@ -294,26 +370,57 @@ def synthesize_events_from_rule(
                 "Image": "C:\\Windows\\System32\\svchost.exe",
             }
         )
-    elif category in ("cloud_audit", "identity_audit") or product in ("aws", "cloud"):
-        benign_1.update(
-            {
-                "eventSource": "ec2.amazonaws.com",
-                "eventName": "DescribeInstances",
-                "awsRegion": "us-east-1",
-                "sourceIPAddress": "10.0.1.20",
-                "userAgent": "aws-sdk-go/v1.44.0",
-            }
-        )
-        benign_2.update(
-            {
-                "eventSource": "s3.amazonaws.com",
-                "eventName": "ListBuckets",
-                "awsRegion": "us-east-1",
-                "sourceIPAddress": "10.0.1.20",
-                "userAgent": "console.amazonaws.com",
-            }
-        )
-    elif category == "kubernetes_audit" or product in ("kubernetes", "k8s"):
+    elif category in ("cloud_audit", "identity_audit") or _is_gcp_cloud(product, service):
+        if _is_gcp_cloud(product, service) or product in _GCP_PRODUCTS:
+            benign_1.update(
+                {
+                    "protoPayload.serviceName": "compute.googleapis.com",
+                    "protoPayload.methodName": "v1.compute.instances.get",
+                    "protoPayload.authenticationInfo.principalEmail": "viewer@example.com",
+                }
+            )
+            benign_2.update(
+                {
+                    "protoPayload.serviceName": "storage.googleapis.com",
+                    "protoPayload.methodName": "storage.buckets.list",
+                    "protoPayload.authenticationInfo.principalEmail": "viewer@example.com",
+                }
+            )
+        elif _is_azure_cloud(product, service):
+            benign_1.update(
+                {
+                    "operationName": "Microsoft.Resources/subscriptions/resourceGroups/read",
+                    "resultType": "Success",
+                    "caller": "reader@contoso.com",
+                }
+            )
+            benign_2.update(
+                {
+                    "operationName": "Microsoft.Storage/storageAccounts/listKeys/action",
+                    "resultType": "Success",
+                    "caller": "reader@contoso.com",
+                }
+            )
+        else:
+            benign_1.update(
+                {
+                    "eventSource": "ec2.amazonaws.com",
+                    "eventName": "DescribeInstances",
+                    "awsRegion": "us-east-1",
+                    "sourceIPAddress": "10.0.1.20",
+                    "userAgent": "aws-sdk-go/v1.44.0",
+                }
+            )
+            benign_2.update(
+                {
+                    "eventSource": "s3.amazonaws.com",
+                    "eventName": "ListBuckets",
+                    "awsRegion": "us-east-1",
+                    "sourceIPAddress": "10.0.1.20",
+                    "userAgent": "console.amazonaws.com",
+                }
+            )
+    elif category == "kubernetes_audit" or product in _K8S_PRODUCTS:
         benign_1.update(
             {
                 "verb": "get",

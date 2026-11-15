@@ -34,8 +34,33 @@ def splunk_settings(workspace: Path | None = None) -> dict[str, str]:
     return {**{key: value for key, value in values.items() if value is not None}, **os.environ}
 
 
-def infer_splunk_sourcetype(event: dict[str, Any]) -> str:
-    """Infer the optimal Splunk sourcetype based on event platform, category, and service."""
+SYNTHETIC_SPLUNK_SOURCETYPE = "hecate:telemetry"
+DEFAULT_SYNTHETIC_SPLUNK_INDEX = "hecate_synthetic"
+
+
+def synthetic_splunk_index(workspace: Path | None = None) -> str:
+    """Index for predicate-synthesized events (never silently use ``main``)."""
+    env = splunk_settings(workspace)
+    return (env.get("SPLUNK_SYNTHETIC_INDEX") or DEFAULT_SYNTHETIC_SPLUNK_INDEX).strip() or (
+        DEFAULT_SYNTHETIC_SPLUNK_INDEX
+    )
+
+
+def infer_splunk_sourcetype(event: dict[str, Any], *, synthetic: bool | None = None) -> str:
+    """Infer a Splunk sourcetype for an event.
+
+    Synthetic Hecate JSON (flat dicts from the predicate synthesizer) must use
+    ``hecate:telemetry``. Vendor sourcetypes (Sysmon XML, CloudTrail, …) are only
+    returned when ``synthetic=False``, or when the event sets
+    ``_hecate_native_schema`` / lacks ``_hecate_synthetic``.
+    """
+    if synthetic is None:
+        synthetic = bool(event.get("_hecate_synthetic")) and not bool(
+            event.get("_hecate_native_schema")
+        )
+    if synthetic:
+        return SYNTHETIC_SPLUNK_SOURCETYPE
+
     product = str(event.get("product") or "").lower()
     category = str(event.get("category") or event.get("data_source") or "").lower()
     service = str(event.get("service") or "").lower()
@@ -61,21 +86,21 @@ def infer_splunk_sourcetype(event: dict[str, Any]) -> str:
             return "WinEventLog:Security"
         return "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
 
-    if product in ("gcp", "google_cloud"):
+    if product in ("gcp", "google_cloud", "google"):
         return "google:gcp:pubsub:message"
     if product in ("azure", "azure_ad", "entra_id"):
         return "azure:activity"
     if product in ("kubernetes", "k8s") or category == "kubernetes_audit":
         return "kube:audit"
     if (
-        product in ("aws", "cloud")
+        product in ("aws", "cloud", "cloudtrail")
         or category in ("cloud_audit", "identity_audit")
         or service == "cloudtrail"
     ):
         return "aws:cloudtrail"
     if category == "webserver":
         return "access_combined"
-    return "hecate:telemetry"
+    return SYNTHETIC_SPLUNK_SOURCETYPE
 
 
 def forward_events_to_splunk(
@@ -150,11 +175,16 @@ def forward_events_to_splunk(
         splunk_pass = ""
 
     if verify_ssl is None:
-        verify_ssl = setting("SPLUNK_VERIFY_SSL", "true").strip().lower() not in (
-            "false",
-            "0",
-            "no",
-        )
+        configured = setting("SPLUNK_VERIFY_SSL", "").strip().lower()
+        if configured in ("false", "0", "no"):
+            verify_ssl = False
+        elif configured in ("true", "1", "yes"):
+            verify_ssl = True
+        else:
+            # Dev containers often present a self-signed cert on localhost.
+            ssl_host_src = hec_url or splunk_host
+            host_only = (httpx.URL(ssl_host_src).host or "").lower()
+            verify_ssl = host_only not in {"localhost", "127.0.0.1", "::1"}
 
     endpoint = (
         f"{hec_url}/services/collector/event"
