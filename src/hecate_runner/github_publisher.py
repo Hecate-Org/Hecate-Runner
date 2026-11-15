@@ -134,6 +134,10 @@ def snapshot_hunt_artifacts(settings: Settings, hunt_id: str) -> tuple[dict[str,
                 ".eql",
             }:
                 continue
+            # Correlator IOC stubs (and their transpiles) are local enrichment
+            # noise — never include them in public promotion digests.
+            if "incremental" in path.name.lower():
+                continue
             if path.is_dir():
                 raise PublisherError("Nested query directories are not publishable")
             rel, content = _relative_file(workspace, path, allowed_root="queries")

@@ -2,12 +2,13 @@
 
 Correlates incoming CTI against existing hunts in Hecate-Workspace using
 extracted CVE IDs, threat actor aliases, and shared C2/IOC infrastructure,
-evolving existing dossiers incrementally instead of creating duplicate drafts.
+evolving existing dossiers with net-new IOCs/techniques instead of duplicate
+drafts. Empty correlations leave dossiers untouched; IOC stubs are not written
+under ``queries/``.
 """
 
 from __future__ import annotations
 
-import contextlib
 import ipaddress
 import logging
 import re
@@ -489,138 +490,11 @@ class EnrichmentResult:
     added_techniques: list[str]
     rule_paths: list[str]
     details: str
-
-
-def _platforms_from_hunt_text(text: str) -> set[str]:
-    """Parse platform labels from hunt frontmatter (list or scalar)."""
-    platforms: set[str] = set()
-    m = re.search(r"(?m)^platforms?:\s*\n((?:[ \t]*-[ \t]*.+\n)+)", text)
-    if m:
-        for line in m.group(1).splitlines():
-            item = line.strip().lstrip("-").strip().strip("\"'")
-            if item:
-                platforms.add(item.lower())
-        return platforms
-    m = re.search(r"(?m)^platforms?:\s*\[([^\]]*)\]", text)
-    if m:
-        for part in m.group(1).split(","):
-            item = part.strip().strip("\"'")
-            if item:
-                platforms.add(item.lower())
-        return platforms
-    m = re.search(r"(?m)^platforms?:\s*([^\n#]+)", text)
-    if m:
-        item = m.group(1).strip().strip("\"'")
-        if item:
-            platforms.add(item.lower())
-    return platforms
-
-
-def _primary_sigma_product(platforms: set[str] | None) -> str:
-    """Pick a Sigma product from hunt platforms; avoid forcing Windows on Linux hunts."""
-    plats = {p.lower() for p in (platforms or set())}
-    if plats & {"windows", "win", "windows_server"}:
-        if not (plats & {"linux", "macos", "mac", "unix"}):
-            return "windows"
-        # Mixed: prefer windows for DNS field compatibility only when windows is listed.
-        return "windows"
-    if plats & {"macos", "mac"}:
-        return "macos"
-    if plats & {"linux", "unix"}:
-        return "linux"
-    return "linux"
-
-
-def _rule_markdown_link(rule_path: Path, workspace: Path) -> str:
-    """Link a rule with a workspace-relative path (never absolute file:// URLs)."""
-    try:
-        rel = rule_path.resolve().relative_to(workspace.resolve()).as_posix()
-    except ValueError:
-        rel = rule_path.name
-    return f"- Linked rule: [`{rule_path.name}`]({rel})"
+    changed: bool = True
 
 
 class IncrementalEnricher:
-    """Enriches an existing hunt dossier with incremental indicators, rules, and notes."""
-
-    @staticmethod
-    def generate_incremental_rule(
-        hunt_id: str,
-        category: str,
-        indicator_type: str,
-        values: list[str],
-        out_dir: Path,
-        platforms: set[str] | None = None,
-    ) -> Path | None:
-        """Generate a deterministic, validated incremental Sigma rule variant."""
-        if not values:
-            return None
-
-        out_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        slug = f"{category}__incremental_{indicator_type}_{timestamp}"
-        rule_path = out_dir / f"{slug}.yml"
-        product = _primary_sigma_product(platforms)
-        value = values if len(values) > 1 else values[0]
-
-        if indicator_type in ("domain", "hostname"):
-            if product == "windows":
-                selection = {"QueryName": value}
-                cat = "dns_query"
-            else:
-                # Linux/macOS DNS QueryName is not portable; use network hostname.
-                selection = {"DestinationHostname": value}
-                cat = "network_connection"
-        elif indicator_type in ("ip-dst", "ipv4", "ip"):
-            selection = {"DestinationIp": value}
-            cat = "network_connection"
-        elif indicator_type in ("sha256", "filehash-sha256", "hash"):
-            selection = {"Hashes|contains": value}
-            cat = "process_creation"
-        else:
-            selection = {"CommandLine|contains": value}
-            cat = "process_creation"
-
-        import yaml
-
-        rule_dict = {
-            "title": f"{hunt_id} Incremental Campaign Detection ({indicator_type})",
-            "id": f"inc-{hunt_id.lower()}-{timestamp}",
-            "status": "experimental",
-            "description": f"Incremental rule variant generated from correlated campaign intelligence for {hunt_id}.",
-            "author": "hecate-runner correlation-engine",
-            "date": datetime.now(UTC).strftime("%Y/%m/%d"),
-            "logsource": {
-                "product": product,
-                "category": cat,
-            },
-            "detection": {
-                "selection": selection,
-                "condition": "selection",
-            },
-            "falsepositives": [
-                "Legitimate administration or research scanning",
-            ],
-            "level": "medium",
-            "tags": [
-                f"attack.campaign.{hunt_id.lower()}",
-            ],
-        }
-
-        yaml_text = yaml.safe_dump(rule_dict, sort_keys=False)
-        atomic_write_text(rule_path, yaml_text)
-
-        # Transpile to native queries if API is available
-        with contextlib.suppress(Exception):
-            from hecate_agent.api import transpile_sigma_rule
-
-            trans = transpile_sigma_rule(yaml_text)
-            for t in trans.values():
-                if getattr(t, "success", False) and getattr(t, "query", None):
-                    q_file = rule_path.with_suffix(t.file_extension)
-                    q_file.write_text(t.query.strip() + "\n", encoding="utf-8")
-
-        return rule_path
+    """Enriches an existing hunt dossier with net-new indicators and techniques."""
 
     @classmethod
     def enrich(
@@ -629,11 +503,18 @@ class IncrementalEnricher:
         match: CorrelationMatch,
         workspace: Path,
     ) -> EnrichmentResult:
-        """Enrich existing hunt with net-new indicators, rules, and timeline update."""
+        """Enrich an existing hunt with net-new indicators/techniques only.
+
+        Correlated CTI that adds nothing leaves the dossier untouched so
+        publication digests and review queues are not churned. New IOCs are
+        recorded in the hunt markdown; correlator no longer emits
+        ``*__incremental_*`` Sigma stubs (those were noise for BAS/synth and
+        public promotion).
+        """
         hunt_path = match.hunt_path
         text = hunt_path.read_text(encoding="utf-8")
 
-        # 1. Discover net-new indicators
+        # 1. Discover net-new indicators / techniques
         item_cves = ThreatEntityExtractor.extract_cves(item.content, item.metadata)
         item_net = ThreatEntityExtractor.extract_network_iocs(item.content, item.metadata)
         item_hashes = ThreatEntityExtractor.extract_file_hashes(item.content, item.metadata)
@@ -647,7 +528,6 @@ class IncrementalEnricher:
         new_net = [n for n in item_net if n not in text]
         new_hashes = [h for h in item_hashes if h not in text]
 
-        # Extract existing techniques
         existing_techniques: set[str] = set()
         m_tech = re.search(r"techniques:\s*\[(.*?)\]", text)
         if m_tech:
@@ -657,43 +537,24 @@ class IncrementalEnricher:
                 if t.strip().strip("'\"")
             }
         added_techniques = sorted(item_techniques - existing_techniques)
-
-        # 2. Generate Incremental Sigma Rules
-        out_dir = workspace / "queries" / match.hunt_id
-        generated_rules: list[Path] = []
-        platforms = _platforms_from_hunt_text(text)
-
-        if new_net:
-            domains = [n for n in new_net if not _IPV4_RE.match(n)]
-            ips = [n for n in new_net if _IPV4_RE.match(n)]
-            if domains:
-                r1 = cls.generate_incremental_rule(
-                    match.hunt_id, "dns", "domain", domains, out_dir, platforms=platforms
-                )
-                if r1:
-                    generated_rules.append(r1)
-            if ips:
-                r2 = cls.generate_incremental_rule(
-                    match.hunt_id, "network", "ipv4", ips, out_dir, platforms=platforms
-                )
-                if r2:
-                    generated_rules.append(r2)
-
-        if new_hashes:
-            r3 = cls.generate_incremental_rule(
-                match.hunt_id,
-                "process",
-                "sha256",
-                new_hashes,
-                out_dir,
-                platforms=platforms,
-            )
-            if r3:
-                generated_rules.append(r3)
-
         total_new_indicators = len(new_cves) + len(new_net) + len(new_hashes)
 
-        # 3. Update Indicator Inventory line if present
+        if total_new_indicators == 0 and not added_techniques:
+            return EnrichmentResult(
+                hunt_id=match.hunt_id,
+                hunt_path=hunt_path,
+                new_indicators_count=0,
+                new_rules_count=0,
+                added_techniques=[],
+                rule_paths=[],
+                details=(
+                    f"Correlated {match.hunt_id} but found no net-new indicators "
+                    "or techniques; left dossier unchanged."
+                ),
+                changed=False,
+            )
+
+        # 2. Update Indicator Inventory line if present
         existing_inv = parse_indicator_inventory(text)
         new_inv = parse_indicator_inventory(item.content)
         if existing_inv and new_inv:
@@ -710,20 +571,19 @@ class IncrementalEnricher:
                 flags=re.MULTILINE,
             )
 
-        # 4. Update Frontmatter
+        # 3. Update Frontmatter
         now_iso = datetime.now(UTC).isoformat()
         if added_techniques:
             all_tech = sorted(existing_techniques | set(added_techniques))
             tech_yaml = "[" + ", ".join(f'"{t}"' for t in all_tech) + "]"
             text = re.sub(r"techniques:\s*\[.*?\]", f"techniques: {tech_yaml}", text)
 
-        # Increment revision count or add last_enriched_at in frontmatter
         if "last_enriched_at:" in text:
             text = re.sub(r"last_enriched_at:\s*.*", f"last_enriched_at: {now_iso}", text)
         else:
             text = re.sub(r"^---\n", f"---\nlast_enriched_at: {now_iso}\n", text)
 
-        # 5. Append Chronological Campaign Update Dossier Entry
+        # 4. Append chronological campaign update (IOCs in dossier only — no stub rules)
         indicator_rows = []
         for c in new_cves:
             indicator_rows.append(f"| CVE | `{c}` | {now_iso[:10]} |")
@@ -740,12 +600,6 @@ class IncrementalEnricher:
             else "_No net-new unique indicators in this update._"
         )
 
-        rule_links = (
-            "\n".join(_rule_markdown_link(r, workspace) for r in generated_rules)
-            if generated_rules
-            else "_No new rule variants generated._"
-        )
-
         update_block = f"""
 
 ---
@@ -759,19 +613,22 @@ class IncrementalEnricher:
 ### Newly Added Campaign Indicators
 {table_text}
 
-### Incremental Detection Rules
-{rule_links}
+### Detection Notes
+_IOCs recorded in this dossier only. Behavioral Sigma under ``queries/{match.hunt_id}/`` is not auto-extended with incremental IOC stubs._
 """
         text += update_block
         atomic_write_text(hunt_path, text)
 
-        rule_paths_str = [str(r) for r in generated_rules]
         return EnrichmentResult(
             hunt_id=match.hunt_id,
             hunt_path=hunt_path,
             new_indicators_count=total_new_indicators,
-            new_rules_count=len(generated_rules),
+            new_rules_count=0,
             added_techniques=added_techniques,
-            rule_paths=rule_paths_str,
-            details=f"Enriched {match.hunt_id} with {total_new_indicators} new indicator(s) and {len(generated_rules)} rule variant(s).",
+            rule_paths=[],
+            details=(
+                f"Enriched {match.hunt_id} with {total_new_indicators} new indicator(s) "
+                f"and {len(added_techniques)} technique(s); no incremental rule stubs written."
+            ),
+            changed=True,
         )

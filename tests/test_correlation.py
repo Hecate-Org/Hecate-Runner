@@ -13,6 +13,7 @@ from hecate_runner.correlation import (
     ThreatEntityExtractor,
 )
 from hecate_runner.cti.base import CTIItem
+from hecate_runner.github_publisher import snapshot_hunt_artifacts
 from hecate_runner.orchestrator import Orchestrator
 from hecate_runner.state import OrchestratorState
 
@@ -213,7 +214,7 @@ SUNBURST backdoor.
     assert match is None
 
 
-def test_incremental_enricher_appends_indicators_and_rules(tmp_path: Path) -> None:
+def test_incremental_enricher_appends_indicators_without_rule_stubs(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     hunts_dir = workspace / "hunts" / "2026"
     hunts_dir.mkdir(parents=True)
@@ -258,32 +259,57 @@ Placeholder for queries.
 
     result = IncrementalEnricher.enrich(item, match, workspace)
     assert result.hunt_id == "H-0001"
+    assert result.changed is True
     assert result.new_indicators_count >= 2
+    assert result.new_rules_count == 0
     assert "T1071.001" in result.added_techniques
 
-    # Check updated markdown file
     updated_text = hunt_file.read_text(encoding="utf-8")
     assert "last_enriched_at:" in updated_text
     assert 'techniques: ["T1071.001", "T1190"]' in updated_text
     assert "## Incremental Threat Intel Update" in updated_text
     assert "new-c2-beacon.org" in updated_text
     assert "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" in updated_text
-
-    # Check rule file created in queries/H-0001/
-    queries_dir = workspace / "queries" / "H-0001"
-    assert queries_dir.exists()
-    rule_files = list(queries_dir.glob("*.yml"))
-    assert len(rule_files) >= 1
-    # Links must be workspace-relative, not absolute file:// machine paths
     assert "file://" not in updated_text
-    assert "queries/H-0001/" in updated_text
-    # Linux hunts must not get Windows-only DNS QueryName rules
-    domain_rules = [p for p in rule_files if "domain" in p.name]
-    assert domain_rules
-    domain_yaml = domain_rules[0].read_text(encoding="utf-8")
-    assert "product: linux" in domain_yaml
-    assert "DestinationHostname" in domain_yaml
-    assert "QueryName" not in domain_yaml
+    # No correlator IOC stub rules under queries/
+    queries_dir = workspace / "queries" / "H-0001"
+    assert not queries_dir.exists() or not list(queries_dir.glob("*incremental*"))
+
+
+def test_incremental_enricher_skips_noop_when_no_net_new_iocs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    hunts_dir = workspace / "hunts" / "2026"
+    hunts_dir.mkdir(parents=True)
+    hunt_file = hunts_dir / "H-0001.md"
+    original = """---
+hunt_id: H-0001
+title: "Adversaries exploiting CVE-2026-9000"
+techniques: ["T1190"]
+---
+# H-0001
+CVE-2026-9000 already tracked. Domain evil-known.org already listed.
+"""
+    hunt_file.write_text(original, encoding="utf-8")
+
+    correlator = ThreatEntityCorrelator(hunts_dir)
+    item = CTIItem(
+        source="misp",
+        identifier="misp-noop",
+        title="Duplicate intel for CVE-2026-9000",
+        content="Still seeing CVE-2026-9000 and evil-known.org",
+        metadata={
+            "indicators": {"cve": ["CVE-2026-9000"], "domain": ["evil-known.org"]},
+            "techniques": ["T1190"],
+        },
+    )
+    match = correlator.correlate(item)
+    assert match is not None
+
+    result = IncrementalEnricher.enrich(item, match, workspace)
+    assert result.changed is False
+    assert result.new_indicators_count == 0
+    assert hunt_file.read_text(encoding="utf-8") == original
+    assert "last_enriched_at:" not in hunt_file.read_text(encoding="utf-8")
 
 
 def test_incremental_enricher_updates_indicator_sweep_inventory(tmp_path: Path) -> None:
@@ -392,6 +418,79 @@ Initial hunt.
     updated = hunt_file.read_text(encoding="utf-8")
     assert "novel-c2-beacon.org" in updated
     assert "## Incremental Threat Intel Update" in updated
+
+
+def test_publication_snapshot_excludes_incremental_query_stubs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    hunts = workspace / "hunts" / "2026" / "Q4"
+    hunts.mkdir(parents=True)
+    queries = workspace / "queries" / "H-0001"
+    queries.mkdir(parents=True)
+    (hunts / "H-0001.md").write_text(
+        "---\nhunt_id: H-0001\ntitle: Test\nstatus: planning\n---\n# H-0001\n",
+        encoding="utf-8",
+    )
+    (queries / "process_creation__core.yml").write_text("title: Core\n", encoding="utf-8")
+    (queries / "dns__incremental_domain_20261114133602.yml").write_text(
+        "title: Stub\n", encoding="utf-8"
+    )
+    (queries / "dns__incremental_domain_20261114133602.spl").write_text(
+        'QueryName="evil"\n', encoding="utf-8"
+    )
+    settings = Settings(_env_file=None, hecate_workspace=workspace)  # type: ignore[call-arg]
+    files, _ = snapshot_hunt_artifacts(settings, "H-0001")
+    assert "queries/H-0001/process_creation__core.yml" in files
+    assert not any("incremental" in path for path in files)
+
+
+def test_orchestrator_skips_publish_on_correlation_noop(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "workspace"
+    hunts_dir = workspace / "hunts" / "2026"
+    hunts_dir.mkdir(parents=True)
+    (hunts_dir / "H-0001.md").write_text(
+        """---
+hunt_id: H-0001
+title: "Exploitation of CVE-2026-7777"
+techniques: ["T1190"]
+---
+# H-0001
+CVE-2026-7777 and known-c2.org already present.
+""",
+        encoding="utf-8",
+    )
+
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        hecate_workspace=workspace,
+        hunts_dir=workspace / "hunts",
+        campaign_clustering_enabled=True,
+        github_publishing_enabled=True,
+        cti_provider="file",
+    )
+    matching_item = CTIItem(
+        source="rss",
+        identifier="rss-noop",
+        title="Repeat sighting of CVE-2026-7777",
+        content="CVE-2026-7777 known-c2.org",
+        metadata={
+            "indicators": {"cve": ["CVE-2026-7777"], "domain": ["known-c2.org"]},
+        },
+    )
+    mock_cti = MagicMock()
+    mock_cti.next_item.side_effect = [matching_item, None]
+    orch = Orchestrator(settings, MagicMock(), mock_cti)
+    publish_calls: list[str] = []
+    monkeypatch.setattr(orch, "_publish_github", lambda hid: publish_calls.append(hid))
+    monkeypatch.setattr(orch, "_publish_misp", lambda hid: publish_calls.append(f"misp:{hid}"))
+    monkeypatch.setattr(orch, "_notify_cycle", lambda result: publish_calls.append("notify"))
+
+    result = orch._run_body(OrchestratorState(), dry_run=False)
+    assert result.outcome == "correlation_noop"
+    assert result.ok is True
+    assert publish_calls == []
+    mock_cti.acknowledge.assert_called_once_with(matching_item)
 
 
 def test_correlator_matches_source_url_via_refs_not_full_text(tmp_path: Path) -> None:
