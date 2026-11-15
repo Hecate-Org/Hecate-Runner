@@ -283,7 +283,11 @@ class _HTTPQueryProvider(QueryProvider):
     def _environment(self) -> dict[str, str]:
         from dotenv import dotenv_values
 
-        values = dotenv_values(self.workspace / ".env", interpolate=False) if self.workspace else {}
+        values = (
+            dotenv_values(self.workspace / ".env", interpolate=False)
+            if self.workspace and os.environ.get("HECATE_SERVICE_ISOLATED") != "1"
+            else {}
+        )
         env: dict[str, str] = {}
         for layer in (
             {k: v for k, v in values.items() if v is not None},

@@ -25,11 +25,9 @@ log = logging.getLogger(__name__)
 
 def check_integrations(settings: Settings, *, client: httpx.Client | None = None) -> dict[str, Any]:
     protect_request_logs()
-    env = {
-        **dotenv_values(settings.hecate_workspace / ".env"),
-        **dotenv_values(".env"),
-        **os.environ,
-    }
+    env: dict[str, str | None] = dict(os.environ)
+    if os.environ.get("HECATE_SERVICE_ISOLATED") != "1":
+        env = {**dotenv_values(settings.hecate_workspace / ".env"), **dotenv_values(".env"), **env}
     active = set(
         settings.cti_multi_provider_names
         if settings.cti_provider == "multi"

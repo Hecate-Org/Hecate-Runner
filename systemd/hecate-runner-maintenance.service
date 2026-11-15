@@ -1,27 +1,57 @@
 [Unit]
-Description=hecate-runner - Independent publication and SIEM maintenance workers
-After=network-online.target
-Wants=network-online.target
+Description=Hecate isolated publication and SIEM maintenance
+After=network-online.target hecate-bas-broker.service
+Wants=network-online.target hecate-bas-broker.service
 
 [Service]
-Type=simple
-User=chemch
-Group=chemch
-WorkingDirectory=/home/chemch/betas/Hecate-Runner
-EnvironmentFile=-/home/chemch/betas/Hecate-Workspace/.env
-EnvironmentFile=-/home/chemch/betas/Hecate-Runner/.env
-ExecStart=/home/chemch/.local/bin/uv run hecate-runner maintenance
-Restart=always
-RestartSec=10s
-TimeoutStopSec=20s
-KillMode=control-group
+Type=exec
+User=hecate-writer
+Group=hecate-writer
+SupplementaryGroups=hecate-data
+WorkingDirectory=/opt/hecate/runtime
+EnvironmentFile=/etc/hecate/writer.env
+ExecStart=/opt/hecate/runtime/venv/bin/python -I -m hecate_runner maintenance
+NoNewPrivileges=true
+UMask=0007
+LimitCORE=0
+MemoryMax=4G
+TasksMax=256
+CPUQuota=200%
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/run/lxd -/var/snap/lxd -/var/lib/lxd -/run/docker.sock -/var/run/docker.sock
+ReadOnlyPaths=/opt/hecate
+ReadWritePaths=/var/lib/hecate/workspace /var/lib/hecate/homes/writer
+NoExecPaths=/var/lib/hecate/workspace
+Environment=HECATE_SERVICE_ISOLATED=1
+Environment=PYTHON_DOTENV_DISABLED=1
+Environment=HECATE_STRICT_CREDENTIAL_ROLES=1
+Environment=HECATE_ALLOW_UNSANDBOXED_EMULATION=0
+Environment=HECATE_WORKSPACE=/var/lib/hecate/workspace
+Environment=HECATE_BAS_BROKER_SOCKET=/run/hecate-bas/broker.sock
+Environment=HECATE_BIN=/opt/hecate/runtime/venv/bin/hecate-agent
+Environment=PATH=/opt/hecate/runtime/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/var/lib/hecate/homes/writer
 StandardOutput=journal
 StandardError=journal
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/home/chemch/betas/Hecate-Core /home/chemch/betas/Hecate-Runner /home/chemch/betas/Hecate-Workspace
-ReadWritePaths=-/home/chemch/betas/Hecate-Public
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

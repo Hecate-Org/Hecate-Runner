@@ -25,6 +25,7 @@ from typing import Any
 
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.base import SafetyViolationError
+from hecate_runner.bas.docker_access import run_docker
 
 _fcntl: ModuleType | None
 try:
@@ -179,9 +180,8 @@ class LabLease:
 def audit_container_tmpfs(container_name: str = "hecate-bas-agent") -> list[str]:
     """Return non-baseline files/directories present in /tmp inside the container."""
     try:
-        proc = subprocess.run(
+        proc = run_docker(
             [
-                "docker",
                 "exec",
                 container_name,
                 "find",
@@ -195,8 +195,6 @@ def audit_container_tmpfs(container_name: str = "hecate-bas-agent") -> list[str]
                 "-path",
                 "/tmp",
             ],
-            capture_output=True,
-            text=True,
             timeout=10,
             check=False,
         )
@@ -218,10 +216,8 @@ def clean_container_tmpfs(
         if not path.startswith("/tmp/") or path == "/tmp/hecate-exec.trace" or ".." in path:
             continue
         try:
-            res = subprocess.run(
-                ["docker", "exec", container_name, "rm", "-rf", path],
-                capture_output=True,
-                text=True,
+            res = run_docker(
+                ["exec", container_name, "rm", "-rf", path],
                 timeout=10,
                 check=False,
             )
@@ -263,18 +259,14 @@ def reset_lab(
         }
         try:
             try:
-                proc = subprocess.run(
-                    ["docker", "top", container_name, "-eo", "args"],
-                    capture_output=True,
-                    text=True,
+                proc = run_docker(
+                    ["top", container_name, "-eo", "args"],
                     timeout=10,
                     check=True,
                 )
             except subprocess.CalledProcessError:
-                proc = subprocess.run(
-                    ["docker", "top", container_name, "-eo", "pid,args"],
-                    capture_output=True,
-                    text=True,
+                proc = run_docker(
+                    ["top", container_name, "-eo", "pid,args"],
                     timeout=10,
                     check=True,
                 )

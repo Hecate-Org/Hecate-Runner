@@ -1,35 +1,57 @@
 [Unit]
-Description=hecate-runner - Hecate resident autonomous daemon
-Documentation=https://github.com/Hecate-Org/Hecate-Runner
-After=network-online.target ollama.service
-Wants=network-online.target hecate-runner-maintenance.service
-Requires=ollama.service
+Description=Hecate isolated draft and search worker
+After=network-online.target hecate-bas-broker.service
+Wants=network-online.target hecate-bas-broker.service
 
 [Service]
-Type=simple
-User=chemch
-Group=chemch
-WorkingDirectory=/home/chemch/betas/Hecate-Runner
-
-# Read env from the workspace .env (single canonical source of truth), with optional runner-local override.
-EnvironmentFile=-/home/chemch/betas/Hecate-Workspace/.env
-EnvironmentFile=-/home/chemch/betas/Hecate-Public/.env
-EnvironmentFile=-/home/chemch/betas/Hecate-Runner/.env
-
-# Run via uv so we always execute inside the project venv.
-ExecStart=/home/chemch/.local/bin/uv run hecate-runner daemon
-Restart=always
-RestartSec=10s
-
-StandardOutput=append:/home/chemch/betas/Hecate-Core/logs/orchestrator.log
-StandardError=append:/home/chemch/betas/Hecate-Core/logs/orchestrator.log
-
-# Hardening
+Type=exec
+User=hecate-reader
+Group=hecate-reader
+SupplementaryGroups=hecate-data
+WorkingDirectory=/opt/hecate/runtime
+EnvironmentFile=/etc/hecate/reader.env
+ExecStart=/opt/hecate/runtime/venv/bin/python -I -m hecate_runner daemon
 NoNewPrivileges=true
+UMask=0007
+LimitCORE=0
+MemoryMax=4G
+TasksMax=256
+CPUQuota=200%
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
-ReadWritePaths=/home/chemch/betas/Hecate-Core /home/chemch/betas/Hecate-Runner /home/chemch/betas/Hecate-Workspace
-ReadWritePaths=-/home/chemch/betas/Hecate-Public
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/run/lxd -/var/snap/lxd -/var/lib/lxd -/run/docker.sock -/var/run/docker.sock
+ReadOnlyPaths=/opt/hecate
+ReadWritePaths=/var/lib/hecate/workspace /var/lib/hecate/homes/reader
+NoExecPaths=/var/lib/hecate/workspace
+Environment=HECATE_SERVICE_ISOLATED=1
+Environment=PYTHON_DOTENV_DISABLED=1
+Environment=HECATE_STRICT_CREDENTIAL_ROLES=1
+Environment=HECATE_ALLOW_UNSANDBOXED_EMULATION=0
+Environment=HECATE_WORKSPACE=/var/lib/hecate/workspace
+Environment=HECATE_BAS_BROKER_SOCKET=/run/hecate-bas/broker.sock
+Environment=HECATE_BIN=/opt/hecate/runtime/venv/bin/hecate-agent
+Environment=PATH=/opt/hecate/runtime/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/var/lib/hecate/homes/reader
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

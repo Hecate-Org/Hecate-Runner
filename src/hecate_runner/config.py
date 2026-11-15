@@ -6,6 +6,7 @@ Uses pydantic-settings so config is typed, validated, and self-documenting.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -49,6 +50,8 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        if os.environ.get("HECATE_SERVICE_ISOLATED") == "1":
+            return (init_settings, env_settings, file_secret_settings)
         # If env_file is defaulted to ".env" (no custom _env_file passed to constructor),
         # dynamically resolve workspace .env and local .env at instantiation time.
         if getattr(dotenv_settings, "env_file", None) == ".env":

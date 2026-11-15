@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from hecate_agent.core.splunk_credentials import splunk_token as splunk_role_token
+
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.approved import confirms_technique, resolve_fidelity_scope
 from hecate_runner.bas.base import DetonationResult
@@ -197,7 +199,7 @@ class SiemAlertVerifier:
 
         # 3. Handle Mock / Offline Mode
         splunk_host = env.get("SPLUNK_HOST") or env.get("SPLUNK_URL")
-        splunk_token = env.get("SPLUNK_TOKEN") or env.get("SPLUNK_PASSWORD")
+        splunk_token = splunk_role_token("read", env) or env.get("SPLUNK_PASSWORD")
         is_mock = siem_target.lower() == "mock" or detonation.provider == "mock"
 
         if not is_mock and not (splunk_host and splunk_token):
@@ -356,7 +358,7 @@ class SiemAlertVerifier:
         try:
             client = SplunkClient(
                 host=splunk_host,
-                token=env.get("SPLUNK_TOKEN"),
+                token=splunk_role_token("read", env),
                 username=env.get("SPLUNK_USERNAME"),
                 password=env.get("SPLUNK_PASSWORD"),
                 verify_ssl=env.get("SPLUNK_VERIFY_SSL", "true").strip().lower()

@@ -76,6 +76,7 @@ dmypy.json
 .env.*
 *.env.*
 !.env.example
+!deploy/service-env/*.env.example
 
 # Runtime state (should live in the Hecate workspace, not the repo)
 .hecate/

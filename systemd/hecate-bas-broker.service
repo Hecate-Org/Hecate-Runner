@@ -1,0 +1,40 @@
+[Unit]
+Description=Restricted Hecate BAS Docker inspection broker
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hecate-bas
+Group=hecate-data
+WorkingDirectory=/opt/hecate/runtime
+RuntimeDirectory=hecate-bas
+RuntimeDirectoryMode=0750
+UMask=0007
+Environment=DOCKER_HOST=unix:///run/hecate-bas/docker.sock
+Environment=HECATE_BAS_DOCKER_BIN=/usr/bin/docker
+ExecStartPre=+/usr/bin/setfacl -m u:hecate-bas:rw /run/hecate-bas/docker.sock
+ExecStart=/opt/hecate/runtime/venv/bin/python -I -m hecate_runner.bas.docker_broker --socket /run/hecate-bas/broker.sock --allowed-user hecate-reader --allowed-user hecate-writer --allowed-user hecate-slack
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/opt/hecate
+MemoryMax=256M
+TasksMax=64
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
