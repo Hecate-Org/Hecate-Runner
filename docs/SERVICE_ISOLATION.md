@@ -163,3 +163,25 @@ directories even if a parent path is replaced during an operation.
 
 Service migration does not fix the existing dependency backlog, TLS settings
 of separately configured integrations, or Slack user/channel authorization.
+
+## Updating an installed runtime
+
+After building a new stage, use `sudo scripts/update-service-runtime.py
+--runtime-stage /path/to/stage`. It preserves installed identities, credential
+files, workspace permissions and unit profiles, validates the candidate, switches
+runtime releases atomically, and verifies local outbox access as the writer in
+its service mount namespace. It restores the previous runtime if activation or
+that access check fails. The check does not publish queued content remotely.
+
+GitHub and MISP outboxes use the private hecate-data group in isolated mode:
+setgid directories 2770 and regular files 0660. Existing correct modes are
+accepted without an ownership-changing chmod. Other groups and world access are
+not accepted. Manual installations retain owner-only data unless the operator
+uses a tree explicitly provisioned for the private shared group.
+
+Public release approvals remain separate from shared queue data. In a managed
+shared workspace, only the workspace owner can record approval. Approval files
+use 0640 with that owner's UID and the private data group, so the publisher can
+read but cannot create a trusted approval itself. Group-writable records and
+worker-owned records are rejected. Existing records widened during migration
+require fresh explicit operator review; they are not silently trusted again.

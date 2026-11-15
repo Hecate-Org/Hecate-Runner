@@ -28,6 +28,7 @@ import jwt
 
 from hecate_runner.config import Settings
 from hecate_runner.hunt_audit import parse_hunt_file
+from hecate_runner.private_data import prepare_directory, protect_file
 from hecate_runner.promotion_policy import _TLP_RE, evaluate_promotion, load_policy
 from hecate_runner.public_review import (
     PublicReviewRequiredError,
@@ -221,22 +222,14 @@ class PromotionOutbox:
 
     def __init__(self, database: Path) -> None:
         self.database = database
-        database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
-            database.parent.chmod(0o700)
+            prepare_directory(database.parent)
+            if database.exists() or database.is_symlink():
+                protect_file(database)
+            self._initialize()
+            protect_file(database)
         except OSError as exc:
-            if stat.S_IMODE(database.parent.stat().st_mode) & 0o077:
-                raise PublisherError(
-                    "Could not restrict GitHub outbox directory permissions"
-                ) from exc
-        self._initialize()
-        try:
-            database.chmod(0o600)
-        except OSError as exc:
-            if stat.S_IMODE(database.stat().st_mode) & 0o077:
-                raise PublisherError(
-                    "Could not restrict GitHub outbox database permissions"
-                ) from exc
+            raise PublisherError("Could not enforce GitHub outbox data permissions") from exc
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
