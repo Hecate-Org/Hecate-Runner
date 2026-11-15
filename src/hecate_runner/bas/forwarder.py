@@ -34,6 +34,50 @@ def splunk_settings(workspace: Path | None = None) -> dict[str, str]:
     return {**{key: value for key, value in values.items() if value is not None}, **os.environ}
 
 
+def infer_splunk_sourcetype(event: dict[str, Any]) -> str:
+    """Infer the optimal Splunk sourcetype based on event platform, category, and service."""
+    product = str(event.get("product") or "").lower()
+    category = str(event.get("category") or event.get("data_source") or "").lower()
+    service = str(event.get("service") or "").lower()
+
+    if product == "windows":
+        if (
+            category
+            in (
+                "registry_set",
+                "registry_event",
+                "registry_add",
+                "registry_delete",
+                "pipe_created",
+                "named_pipe",
+                "driver_load",
+                "create_remote_thread",
+                "process_access",
+            )
+            or service == "sysmon"
+        ):
+            return "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+        if category in ("windows_security", "security_event") or service == "security":
+            return "WinEventLog:Security"
+        return "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+
+    if product in ("gcp", "google_cloud"):
+        return "google:gcp:pubsub:message"
+    if product in ("azure", "azure_ad", "entra_id"):
+        return "azure:activity"
+    if product in ("kubernetes", "k8s") or category == "kubernetes_audit":
+        return "kube:audit"
+    if (
+        product in ("aws", "cloud")
+        or category in ("cloud_audit", "identity_audit")
+        or service == "cloudtrail"
+    ):
+        return "aws:cloudtrail"
+    if category == "webserver":
+        return "access_combined"
+    return "hecate:telemetry"
+
+
 def forward_events_to_splunk(
     events: list[dict[str, Any]],
     index: str = "main",

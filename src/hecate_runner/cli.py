@@ -44,6 +44,7 @@ from hecate_runner.commands.bas import (
     bas_detonate_cmd,
     bas_install_procedures_cmd,
     bas_reset_cmd,
+    bas_synthesize_cmd,
     bas_verify_cmd,
 )
 from hecate_runner.commands.doctor import (
@@ -1942,6 +1943,7 @@ app.command("bas-install-procedures")(bas_install_procedures_cmd)
 app.command("bas-reset")(bas_reset_cmd)
 app.command("bas-detonate")(bas_detonate_cmd)
 app.command("bas-verify")(bas_verify_cmd)
+app.command("bas-synthesize")(bas_synthesize_cmd)
 
 
 def _hunt_paths(settings: Settings, hunt_ids: list[str] | None) -> list[Path]:
