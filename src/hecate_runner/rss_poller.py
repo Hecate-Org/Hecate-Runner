@@ -1,7 +1,6 @@
 """RSS -> CTI queue poller.
 
-Runs on its own, more frequent systemd timer, independent of the main
-orchestrator cycle. Pulls at most one high-signal RSS/Atom entry (oldest
+Runs as a dedicated polling task, independent of the main orchestrator cycle. Pulls at most one high-signal RSS/Atom entry (oldest
 unrouted, across all configured feeds) per invocation and routes it into
 the file-queue CTI intake (``cti_queue/next.txt``) so the existing
 orchestrator picks it up on its normal cadence — this decouples RSS polling
