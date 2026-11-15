@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from hecate_runner.config import Settings
+from hecate_runner.execution.query_values import address, basename, entity, quoted, username
+from hecate_runner.execution.query_values import host as checked_host
 from hecate_runner.execution.safe_gate import SafeExecutionGate
 from hecate_runner.execution.watermark_store import WatermarkStore
 from hecate_runner.query_execution import ProposedQuery
@@ -87,7 +89,10 @@ def synthesize_pivot_queries(
     primary_proc = processes[0] if processes else ""
     primary_parent = parent_procs[0] if parent_procs else ""
     primary_user = users[0] if users else ""
-    primary_ip = ips[0] if ips else ""
+    primary_ip = address(ips[0]) if ips else ""
+    checked_host(primary_host)
+    for value in (primary_proc, primary_parent, primary_user):
+        entity(value)
 
     pivots: list[dict[str, str]] = []
 
@@ -144,109 +149,102 @@ def synthesize_pivot_queries(
 
 
 def _build_child_process_query(dialect: str, host: str, proc: str) -> str:
-    """Build a child process pivot query."""
-    clean_proc = proc.replace('"', '\\"').rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    clean_proc = basename(proc)
+    host_value = quoted(checked_host(host), dialect)
+    proc_value = quoted(clean_proc, dialect)
+    pattern = quoted(clean_proc, dialect, prefix="*")
     if dialect in ("splunk", "spl"):
-        host_filter = f'host="{host}" ' if host else ""
-        return (
-            f'index=* {host_filter}(parent_process_name="*{clean_proc}" OR '
-            f'parent_process="*{clean_proc}" OR ParentImage="*{clean_proc}") | head 50'
-        )
+        host_filter = f"host={host_value} " if host else ""
+        return f"index=* {host_filter}(parent_process_name={pattern} OR parent_process={pattern} OR ParentImage={pattern}) | head 50"
     if dialect in ("sentinel", "sentinel_kql", "kql"):
-        host_filter = f'| where DeviceName =~ "{host}" ' if host else ""
-        return (
-            f"DeviceProcessEvents {host_filter}"
-            f'| where InitiatingProcessFileName =~ "{clean_proc}" or InitiatingProcessCommandLine has "{clean_proc}" '
-            f"| take 50"
-        )
+        host_filter = f"| where DeviceName =~ {host_value} " if host else ""
+        return f"DeviceProcessEvents {host_filter}| where InitiatingProcessFileName =~ {proc_value} or InitiatingProcessCommandLine has {proc_value} | take 50"
     if dialect in ("elastic", "elastic_eql", "eql", "es_query"):
-        host_filter = f'host.name: "{host}" and ' if host else ""
-        return f'{host_filter}process.parent.name: "*{clean_proc}"'
-    if dialect in ("chronicle",):
-        host_filter = f'principal.hostname = "{host}" and ' if host else ""
-        return f'{host_filter}target.process.parent_process.file.full_path = "*{clean_proc}"'
+        host_filter = f"host.name: {host_value} and " if host else ""
+        return f"{host_filter}process.parent.name: {pattern}"
+    if dialect == "chronicle":
+        host_filter = f"principal.hostname = {host_value} and " if host else ""
+        return f"{host_filter}target.process.parent_process.file.full_path = {pattern}"
     if dialect in ("crowdstrike", "crowdstrike_cql", "cql", "logscale"):
-        host_filter = f'ComputerName="{host}" ' if host else ""
-        return f'#event_simpleName=ProcessRollup2 {host_filter}ParentBaseFileName="{clean_proc}" | limit(50)'
-    # Default ANSI SQL / Snowflake
-    host_filter = f"host = '{host}' AND " if host else ""
-    return f"SELECT * FROM edr_events WHERE {host_filter}parent_process ILIKE '%{clean_proc}%' LIMIT 50"
+        host_filter = f"ComputerName={host_value} " if host else ""
+        return f"#event_simpleName=ProcessRollup2 {host_filter}ParentBaseFileName={proc_value} | limit(50)"
+    host_filter = f"host = {quoted(host, 'sql')} AND " if host else ""
+    return f"SELECT * FROM edr_events WHERE {host_filter}POSITION(LOWER({quoted(clean_proc, 'sql')}) IN LOWER(parent_process)) > 0 LIMIT 50"
 
 
 def _build_network_egress_query(dialect: str, host: str, proc: str, ip: str) -> str:
-    """Build a network egress pivot query."""
-    clean_proc = proc.replace('"', '\\"').rsplit("/", 1)[-1].rsplit("\\", 1)[-1] if proc else ""
+    clean_proc = basename(proc)
+    ip = address(ip)
+    host_value = quoted(checked_host(host), dialect)
+    proc_value = quoted(clean_proc, dialect)
+    pattern = quoted(clean_proc, dialect, prefix="*")
+    ip_value = quoted(ip, dialect)
     if dialect in ("splunk", "spl"):
         if ip:
-            return f'index=* (dest_ip="{ip}" OR dst="{ip}" OR destination_ip="{ip}") | head 50'
-        host_filter = f'host="{host}" ' if host else ""
-        return f'index=* {host_filter}(process_name="*{clean_proc}" OR Image="*{clean_proc}") (dest_ip=* OR dst=*) | head 50'
+            return f"index=* (dest_ip={ip_value} OR dst={ip_value} OR destination_ip={ip_value}) | head 50"
+        host_filter = f"host={host_value} " if host else ""
+        return f"index=* {host_filter}(process_name={pattern} OR Image={pattern}) (dest_ip=* OR dst=*) | head 50"
     if dialect in ("sentinel", "sentinel_kql", "kql"):
         if ip:
-            return f'DeviceNetworkEvents | where RemoteIP == "{ip}" | take 50'
-        host_filter = f'| where DeviceName =~ "{host}" ' if host else ""
-        return (
-            f"DeviceNetworkEvents {host_filter}"
-            f'| where InitiatingProcessFileName =~ "{clean_proc}" | take 50'
-        )
+            return f"DeviceNetworkEvents | where RemoteIP == {ip_value} | take 50"
+        host_filter = f"| where DeviceName =~ {host_value} " if host else ""
+        return f"DeviceNetworkEvents {host_filter}| where InitiatingProcessFileName =~ {proc_value} | take 50"
     if dialect in ("elastic", "elastic_eql", "eql", "es_query"):
         if ip:
-            return f'destination.ip: "{ip}"'
-        host_filter = f'host.name: "{host}" and ' if host else ""
-        return f'{host_filter}process.name: "*{clean_proc}" and destination.ip: *'
-    if dialect in ("chronicle",):
+            return f"destination.ip: {ip_value}"
+        host_filter = f"host.name: {host_value} and " if host else ""
+        return f"{host_filter}process.name: {pattern} and destination.ip: *"
+    if dialect == "chronicle":
         if ip:
-            return f'target.ip = "{ip}"'
-        host_filter = f'principal.hostname = "{host}" and ' if host else ""
-        return (
-            f'{host_filter}principal.process.file.full_path = "*{clean_proc}" and target.ip != ""'
-        )
+            return f"target.ip = {ip_value}"
+        host_filter = f"principal.hostname = {host_value} and " if host else ""
+        return f'{host_filter}principal.process.file.full_path = {pattern} and target.ip != ""'
     if dialect in ("crowdstrike", "crowdstrike_cql", "cql", "logscale"):
         if ip:
-            return f'#event_simpleName=NetworkConnectIP4 RemoteAddressIP4="{ip}" | limit(50)'
-        host_filter = f'ComputerName="{host}" ' if host else ""
-        return f'#event_simpleName=NetworkConnectIP4 {host_filter}ImageFileName="*{clean_proc}" | limit(50)'
-    # Default SQL
+            return f"#event_simpleName=NetworkConnectIP4 RemoteAddressIP4={ip_value} | limit(50)"
+        host_filter = f"ComputerName={host_value} " if host else ""
+        return (
+            f"#event_simpleName=NetworkConnectIP4 {host_filter}ImageFileName={pattern} | limit(50)"
+        )
     if ip:
-        return f"SELECT * FROM network_events WHERE destination_ip = '{ip}' LIMIT 50"
-    host_filter = f"host = '{host}' AND " if host else ""
-    return f"SELECT * FROM network_events WHERE {host_filter}process_name ILIKE '%{clean_proc}%' LIMIT 50"
+        return f"SELECT * FROM network_events WHERE destination_ip = {quoted(ip, 'sql')} LIMIT 50"
+    host_filter = f"host = {quoted(host, 'sql')} AND " if host else ""
+    return f"SELECT * FROM network_events WHERE {host_filter}POSITION(LOWER({quoted(clean_proc, 'sql')}) IN LOWER(process_name)) > 0 LIMIT 50"
 
 
 def _build_user_auth_query(dialect: str, user: str, host: str) -> str:
-    """Build a user authentication audit query."""
-    clean_user = user.replace('"', '\\"').split("@")[0].split("\\")[-1]
+    clean_user = username(user)
+    checked_host(host)
+    value = quoted(clean_user, dialect)
+    pattern = quoted(clean_user, dialect, prefix="*", suffix="*")
     if dialect in ("splunk", "spl"):
-        return f'index=* (EventCode=4624 OR action="success") (user="*{clean_user}*" OR User="*{clean_user}*") | head 50'
+        return f'index=* (EventCode=4624 OR action="success") (user={pattern} OR User={pattern}) | head 50'
     if dialect in ("sentinel", "sentinel_kql", "kql"):
-        return (
-            f'SecurityEvent | where EventID == 4624 and TargetUserName =~ "{clean_user}" | take 50'
-        )
+        return f"SecurityEvent | where EventID == 4624 and TargetUserName =~ {value} | take 50"
     if dialect in ("elastic", "elastic_eql", "eql", "es_query"):
-        return f'event.code: "4624" and user.name: "*{clean_user}*"'
-    if dialect in ("chronicle",):
-        return f'metadata.event_type = "USER_LOGIN" and target.user.userid = "{clean_user}"'
+        return f'event.code: "4624" and user.name: {pattern}'
+    if dialect == "chronicle":
+        return f'metadata.event_type = "USER_LOGIN" and target.user.userid = {value}'
     if dialect in ("crowdstrike", "crowdstrike_cql", "cql", "logscale"):
-        return f'#event_simpleName=UserLogon UserName="*{clean_user}*" | limit(50)'
-    return f"SELECT * FROM auth_events WHERE user_name ILIKE '%{clean_user}%' AND event_type = 'LOGIN_SUCCESS' LIMIT 50"
+        return f"#event_simpleName=UserLogon UserName={pattern} | limit(50)"
+    return f"SELECT * FROM auth_events WHERE POSITION(LOWER({quoted(clean_user, 'sql')}) IN LOWER(user_name)) > 0 AND event_type = 'LOGIN_SUCCESS' LIMIT 50"
 
 
 def _build_parent_scope_query(dialect: str, parent: str) -> str:
-    """Build an environment-wide parent process scope query."""
-    clean_parent = parent.replace('"', '\\"').rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    clean_parent = basename(parent)
+    value = quoted(clean_parent, dialect)
+    pattern = quoted(clean_parent, dialect, prefix="*")
     if dialect in ("splunk", "spl"):
-        return f'index=* (parent_process_name="*{clean_parent}" OR parent_process="*{clean_parent}") | head 50'
+        return f"index=* (parent_process_name={pattern} OR parent_process={pattern}) | head 50"
     if dialect in ("sentinel", "sentinel_kql", "kql"):
-        return (
-            f'DeviceProcessEvents | where InitiatingProcessFileName =~ "{clean_parent}" | take 50'
-        )
+        return f"DeviceProcessEvents | where InitiatingProcessFileName =~ {value} | take 50"
     if dialect in ("elastic", "elastic_eql", "eql", "es_query"):
-        return f'process.parent.name: "*{clean_parent}"'
-    if dialect in ("chronicle",):
-        return f'target.process.parent_process.file.full_path = "*{clean_parent}"'
+        return f"process.parent.name: {pattern}"
+    if dialect == "chronicle":
+        return f"target.process.parent_process.file.full_path = {pattern}"
     if dialect in ("crowdstrike", "crowdstrike_cql", "cql", "logscale"):
-        return f'#event_simpleName=ProcessRollup2 ParentBaseFileName="{clean_parent}" | limit(50)'
-    return f"SELECT * FROM edr_events WHERE parent_process ILIKE '%{clean_parent}%' LIMIT 50"
+        return f"#event_simpleName=ProcessRollup2 ParentBaseFileName={value} | limit(50)"
+    return f"SELECT * FROM edr_events WHERE POSITION(LOWER({quoted(clean_parent, 'sql')}) IN LOWER(parent_process)) > 0 LIMIT 50"
 
 
 class PivotExecutionEngine:
@@ -278,12 +276,16 @@ class PivotExecutionEngine:
             if max_pivots is not None
             else int(getattr(self.settings, "auto_hunt_max_pivots", 3))
         )
-        specs = synthesize_pivot_queries(
-            target_siem=target_siem,
-            entities=entities,
-            techniques=techniques,
-            max_pivots=limit,
-        )
+        try:
+            specs = synthesize_pivot_queries(
+                target_siem=target_siem,
+                entities=entities,
+                techniques=techniques,
+                max_pivots=limit,
+            )
+        except ValueError:
+            log.warning("Refusing automatic pivots with invalid telemetry entities")
+            return []
 
         results: list[PivotExecutionResult] = []
         for spec in specs:

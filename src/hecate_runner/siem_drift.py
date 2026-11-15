@@ -19,6 +19,7 @@ from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.lifecycle import get_hunt_lifecycle, set_hunt_lifecycle
 from hecate_runner.slack_bot import sync_queries_for_hunt, undeploy_queries_for_hunt
 from hecate_runner.sqlite_utils import connect_sqlite, connect_sqlite_ro
+from hecate_runner.workspace_paths import query_directory, read_artifact
 
 log = logging.getLogger(__name__)
 
@@ -311,7 +312,7 @@ def reconcile_hunt_queries(
     """
     from hecate_agent.api import deploy_transpiled_query, sync_transpiled_query
 
-    query_dir = workspace / "queries" / hunt_id
+    query_dir = query_directory(workspace, hunt_id)
     if not query_dir.exists():
         log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
         return []
@@ -352,7 +353,7 @@ def reconcile_hunt_queries(
         if not force and prev_status in {"in_sync", "dry_run", "decommissioned"}:
             continue
 
-        q_text = q_file.read_text(encoding="utf-8").strip()
+        q_text = read_artifact(q_file, workspace).strip()
         title = q_file.stem.replace("__", " - ").replace("_", " ").title()
 
         # Deploy git-authoritative query

@@ -27,7 +27,9 @@ def splunk_settings(workspace: Path | None = None) -> dict[str, str]:
     from dotenv import dotenv_values
 
     values = (
-        dotenv_values(Path(workspace) / ".env", interpolate=False) if workspace is not None else {}
+        dotenv_values(Path(workspace) / ".env", interpolate=False)
+        if workspace is not None and os.environ.get("HECATE_SERVICE_ISOLATED") != "1"
+        else {}
     )
     return {**{key: value for key, value in values.items() if value is not None}, **os.environ}
 
@@ -73,9 +75,17 @@ def forward_events_to_splunk(
     if not splunk_host.startswith(("http://", "https://")):
         splunk_host = f"https://{splunk_host}"
 
-    splunk_token = token or setting("SPLUNK_TOKEN")
+    splunk_token = token or setting("SPLUNK_INGEST_TOKEN")
+    if not splunk_token and env.get("HECATE_STRICT_CREDENTIAL_ROLES", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        splunk_token = setting("SPLUNK_TOKEN")
     splunk_user = username or setting("SPLUNK_USERNAME") or "admin"
     splunk_pass = password or setting("SPLUNK_PASSWORD")
+    if env.get("HECATE_STRICT_CREDENTIAL_ROLES", "").lower() in {"1", "true", "yes"}:
+        splunk_pass = ""
 
     if verify_ssl is None:
         verify_ssl = setting("SPLUNK_VERIFY_SSL", "true").strip().lower() not in (

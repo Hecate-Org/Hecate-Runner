@@ -11,12 +11,12 @@ import ast
 import json
 import re
 import shlex
-import subprocess
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
 from hecate_runner.bas.base import DetonationResult, SafetyViolationError
+from hecate_runner.bas.docker_access import run_docker
 
 TRACE_PATH = "/tmp/hecate-exec.trace"
 APPROVED_AGENT_IMAGES = {
@@ -359,9 +359,7 @@ class LabFileDeltaSensor:
 
     @staticmethod
     def _docker(*args: str) -> str:
-        result = subprocess.run(
-            ["docker", *args], capture_output=True, text=True, timeout=10, check=True
-        )
+        result = run_docker(list(args), timeout=10, check=True)
         return result.stdout
 
     def compute_file_sha256(self, container_path: str) -> str:
@@ -515,9 +513,7 @@ class LabProcessSensor:
 
     @staticmethod
     def _docker(*args: str) -> str:
-        result = subprocess.run(
-            ["docker", *args], capture_output=True, text=True, timeout=10, check=True
-        )
+        result = run_docker(list(args), timeout=10, check=True)
         return result.stdout
 
     def preflight(self) -> None:

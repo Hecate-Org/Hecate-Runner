@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.config import Settings
 from hecate_runner.slack_blocks import (
     build_approve_hunt_modal,
@@ -24,6 +23,12 @@ from hecate_runner.slack_blocks import (
     build_reject_hunt_modal,
     build_runner_status_card,
     build_slash_help_card,
+)
+from hecate_runner.workspace_paths import (
+    query_directory,
+    read_artifact,
+    workspace_path,
+    write_artifact,
 )
 
 log = logging.getLogger(__name__)
@@ -44,7 +49,7 @@ def deploy_queries_for_hunt(
     except ImportError:
         pass
 
-    query_dir = workspace / "queries" / hunt_id
+    query_dir = query_directory(Path(workspace), hunt_id)
     if not query_dir.exists():
         log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
         return []
@@ -68,7 +73,7 @@ def deploy_queries_for_hunt(
         if target and target.lower() != tgt.lower():
             continue
 
-        q_text = q_file.read_text(encoding="utf-8").strip()
+        q_text = read_artifact(q_file, workspace).strip()
         title = q_file.stem.replace("__", " - ").replace("_", " ").title()
         res = deploy_transpiled_query(
             target=tgt,
@@ -107,7 +112,7 @@ def undeploy_queries_for_hunt(
     except ImportError:
         pass
 
-    query_dir = workspace / "queries" / hunt_id
+    query_dir = query_directory(Path(workspace), hunt_id)
     if not query_dir.exists():
         log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
         return []
@@ -131,7 +136,7 @@ def undeploy_queries_for_hunt(
         if target and target.lower() != tgt.lower():
             continue
 
-        q_text = q_file.read_text(encoding="utf-8").strip()
+        q_text = read_artifact(q_file, workspace).strip()
         title = q_file.stem.replace("__", " - ").replace("_", " ").title()
         res = undeploy_transpiled_query(
             target=tgt,
@@ -170,7 +175,7 @@ def sync_queries_for_hunt(
     except ImportError:
         pass
 
-    query_dir = workspace / "queries" / hunt_id
+    query_dir = query_directory(Path(workspace), hunt_id)
     if not query_dir.exists():
         log.warning("Query directory not found for %s at %s", hunt_id, query_dir)
         return []
@@ -194,7 +199,7 @@ def sync_queries_for_hunt(
         if target and target.lower() != tgt.lower():
             continue
 
-        q_text = q_file.read_text(encoding="utf-8").strip()
+        q_text = read_artifact(q_file, workspace).strip()
         title = q_file.stem.replace("__", " - ").replace("_", " ").title()
         res = sync_transpiled_query(
             target=tgt,
@@ -223,12 +228,13 @@ def sync_queries_for_hunt(
 
 def promote_hunt(workspace: Path, hunt_id: str) -> dict[str, Any]:
     """Promote a planning hunt to active status in the workspace."""
-    matches = sorted((workspace / "hunts").glob(f"**/{hunt_id}.md"))
-    if not matches:
+    from hecate_runner.lifecycle import find_hunt_path
+
+    hunt_path = find_hunt_path(workspace, hunt_id)
+    if not hunt_path:
         return {"ok": False, "hunt_id": hunt_id, "error": f"Hunt file not found for {hunt_id}"}
 
-    hunt_path = matches[0]
-    content = hunt_path.read_text(encoding="utf-8")
+    content = read_artifact(hunt_path, workspace)
 
     if re.search(r"^status:\s*(active|promoted|completed)\s*$", content, re.MULTILINE):
         return {
@@ -253,7 +259,7 @@ def promote_hunt(workspace: Path, hunt_id: str) -> dict[str, Any]:
             flags=re.MULTILINE,
         )
 
-    atomic_write_text(hunt_path, updated_content)
+    write_artifact(hunt_path, updated_content, workspace)
     log.info("Hunt %s promoted to active in %s", hunt_id, hunt_path)
     return {
         "ok": True,
@@ -268,17 +274,18 @@ def park_hunt(
     workspace: Path, hunt_id: str, reason: str = "Analyst suppressed via Slack"
 ) -> dict[str, Any]:
     """Mark a hunt bundle as suppressed / parked in the workspace."""
-    matches = sorted((workspace / "hunts").glob(f"**/{hunt_id}.md"))
-    if not matches:
+    from hecate_runner.lifecycle import find_hunt_path
+
+    hunt_path = find_hunt_path(workspace, hunt_id)
+    if not hunt_path:
         return {"ok": False, "hunt_id": hunt_id, "error": f"Hunt file not found for {hunt_id}"}
 
-    hunt_path = matches[0]
-    content = hunt_path.read_text(encoding="utf-8")
+    content = read_artifact(hunt_path, workspace)
 
     updated_content = _update_frontmatter(content, {"status": "suppressed"})
     if updated_content is None:
         return {"ok": False, "hunt_id": hunt_id, "error": f"No frontmatter in {hunt_path}"}
-    atomic_write_text(hunt_path, updated_content)
+    write_artifact(hunt_path, updated_content, workspace)
     log.info("Hunt %s suppressed in %s", hunt_id, hunt_path)
     return {
         "ok": True,
@@ -345,10 +352,10 @@ def list_pending_hunts(workspace: Path) -> list[dict[str, Any]]:
     from hecate_runner.lifecycle import parse_hunt_frontmatter
 
     pending = []
-    for path in sorted((workspace / "hunts").glob("**/H-*.md")):
+    for path in sorted(workspace_path(workspace, "hunts").glob("**/H-*.md")):
         try:
-            fm, _, _ = parse_hunt_frontmatter(path.read_text(encoding="utf-8"))
-        except OSError as exc:
+            fm, _, _ = parse_hunt_frontmatter(read_artifact(path, workspace))
+        except (OSError, ValueError) as exc:
             log.warning("Could not read hunt %s: %s", path, exc)
             continue
         if str(fm.get("status") or "").strip().lower() != "planning":
@@ -423,7 +430,7 @@ def review_hunt(
     if hunt_path is None:
         return {"ok": False, "hunt_id": hunt_id, "error": f"Hunt file not found for {hunt_id}"}
 
-    content = hunt_path.read_text(encoding="utf-8")
+    content = read_artifact(hunt_path, workspace)
     fm, _, _ = parse_hunt_frontmatter(content)
     current = str(fm.get("status") or "").strip()
     if current.lower() != "planning":
@@ -472,7 +479,7 @@ def review_hunt(
         updated = _finalize_approved_body(updated, hunt_id, title, reviewer, reviewed_at)
     if updated is None:
         return {"ok": False, "hunt_id": hunt_id, "error": f"No frontmatter in {hunt_path}"}
-    atomic_write_text(hunt_path, updated)
+    write_artifact(hunt_path, updated, workspace)
     log.info("Hunt %s %s via Slack by %s", hunt_id, status, reviewer)
     return {"ok": True, "hunt_id": hunt_id, "status": status, "path": str(hunt_path)}
 
@@ -513,7 +520,7 @@ def publish_reviewed_hunt(
 def replay_hunt_purple_team(workspace: Path | str, hunt_id: str) -> dict[str, Any]:
     """Replay Sigma rules for a hunt against synthetic adversary telemetry."""
     workspace = Path(workspace)
-    query_dir = workspace / "queries" / hunt_id
+    query_dir = query_directory(Path(workspace), hunt_id)
     sigma_files = (
         sorted(list(query_dir.glob("*.yml")) + list(query_dir.glob("*.yaml")))
         if query_dir.exists()
@@ -543,15 +550,17 @@ def replay_hunt_purple_team(workspace: Path | str, hunt_id: str) -> dict[str, An
 
     if hunt_path and hunt_path.is_file():
         try:
-            fm, body, _ = parse_hunt_frontmatter(hunt_path.read_text(encoding="utf-8"))
+            fm, body, _ = parse_hunt_frontmatter(read_artifact(hunt_path, workspace))
             techniques = list(fm.get("techniques") or [])
             platforms = list(fm.get("platform") or [])
             cti_text = body or ""
             spawned = str(fm.get("spawned_from") or "").strip()
             if spawned:
-                res_file = workspace / "research" / f"{spawned}.md"
+                if not re.fullmatch(r"R-[0-9]{1,12}", spawned):
+                    raise ValueError("Invalid linked research ID")
+                res_file = workspace_path(workspace, "research", f"{spawned}.md")
                 if res_file.is_file():
-                    cti_text += "\n" + res_file.read_text(encoding="utf-8")
+                    cti_text += "\n" + read_artifact(res_file, workspace)
         except Exception as exc:
             log.warning("Could not parse hunt metadata for purple team replay %s: %s", hunt_id, exc)
 
@@ -570,7 +579,7 @@ def replay_hunt_purple_team(workspace: Path | str, hunt_id: str) -> dict[str, An
     holdout_scored = holdout_passed = holdout_failed = 0
 
     for s_file in sigma_files:
-        rule_yaml = s_file.read_text(encoding="utf-8")
+        rule_yaml = read_artifact(s_file, workspace)
         cat = ""
         try:
             data = yaml.safe_load(rule_yaml)
@@ -972,7 +981,7 @@ class SlackBotService:
             findings: list[dict[str, Any]] = []
             lab_probe: dict[str, Any] | None = None
             if hunt_path is not None:
-                content = hunt_path.read_text(encoding="utf-8")
+                content = read_artifact(hunt_path, self.settings.hecate_workspace)
                 report = evaluate_saved_hunt(
                     self.settings.hecate_workspace,
                     hunt_id,
