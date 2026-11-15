@@ -89,6 +89,43 @@ def test_runtime_relocation_does_not_retain_operator_home_paths(tmp_path, monkey
     assert str(release) in (release / "venv/pyvenv.cfg").read_text()
 
 
+@pytest.mark.parametrize("alias_first", [True, False])
+def test_runtime_link_chains_are_relocated_before_validation(tmp_path, monkeypatch, alias_first):
+    stage = tmp_path / "stage"
+    interpreter = stage / "python/bin/python3.13"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("bundled interpreter fixture")
+    binary = stage / "venv/bin"
+    binary.mkdir(parents=True)
+    try:
+        if alias_first:
+            (binary / "python3").symlink_to("python")
+        (binary / "python").symlink_to(interpreter)
+        if not alias_first:
+            (binary / "python3").symlink_to("python")
+    except OSError:
+        pytest.skip("Symlinks unavailable")
+    monkeypatch.setattr(installer.os, "chown", lambda *args, **kwargs: None)
+    # Reproduce the ordering that failed on the real staged runtime explicitly.
+    original = Path.rglob
+
+    def ordered_paths(path, pattern):
+        paths = list(original(path, pattern))
+        if path == tmp_path / "installed":
+            paths.sort(
+                key=lambda item: (
+                    (item.name != "python3") if alias_first else (item.name != "python")
+                )
+            )
+        return iter(paths)
+
+    monkeypatch.setattr(Path, "rglob", ordered_paths)
+    release = tmp_path / "installed"
+    installer.prepare_runtime(stage, release)
+    assert (release / "venv/bin/python3").resolve() == release / "python/bin/python3.13"
+    assert (release / "venv/bin/python").resolve() == release / "python/bin/python3.13"
+
+
 def test_runtime_cannot_link_back_to_private_operator_files(tmp_path, monkeypatch):
     stage = tmp_path / "stage"
     stage.mkdir()
