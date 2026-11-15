@@ -125,6 +125,7 @@ class RunResult:
         return self.outcome in {
             "draft_created",
             "incremental_enrichment",
+            "correlation_noop",
             "dry_run",
             "no_cti",
             "no_actionable_cti",
@@ -370,25 +371,36 @@ class Orchestrator(
                     match.confidence,
                 )
                 enrichment = IncrementalEnricher.enrich(item, match, self.settings.hecate_workspace)
-                self.trail.step(
-                    "enrichment",
-                    "enriched %s: +%d indicator(s), +%d rule(s)",
-                    match.hunt_id,
-                    enrichment.new_indicators_count,
-                    enrichment.new_rules_count,
-                )
+                if enrichment.changed:
+                    self.trail.step(
+                        "enrichment",
+                        "enriched %s: +%d indicator(s), +%d technique(s)",
+                        match.hunt_id,
+                        enrichment.new_indicators_count,
+                        len(enrichment.added_techniques),
+                    )
+                else:
+                    self.trail.step(
+                        "enrichment",
+                        "correlated %s with no net-new indicators/techniques; skipped rewrite",
+                        match.hunt_id,
+                    )
                 clear_retry(self.settings.cti_queue_dir_resolved, item)
                 self._advance_past(item)
                 result = RunResult(
-                    outcome="incremental_enrichment",
+                    outcome=(
+                        "incremental_enrichment" if enrichment.changed else "correlation_noop"
+                    ),
                     hunt_id=match.hunt_id,
                     draft_path=match.hunt_path,
                     detail=enrichment.details,
                     parked_count=parked_count,
                 )
-                self._publish_github(match.hunt_id)
-                self._publish_misp(match.hunt_id)
-                self._notify_cycle(result)
+                # Only re-queue public/MISP publication when the dossier actually changed.
+                if enrichment.changed:
+                    self._publish_github(match.hunt_id)
+                    self._publish_misp(match.hunt_id)
+                    self._notify_cycle(result)
                 return result
 
         is_sweep = item.metadata.get("processing_track") != "deep" and (
