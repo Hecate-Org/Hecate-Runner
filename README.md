@@ -21,7 +21,7 @@ automatically. See [onboarding](docs/ONBOARDING.md).
 
 ## Source installation and offline first run
 
-Use Python 3.11+, Git, Bash on Linux/macOS or WSL, and uv. No credentials or live
+Use Python 3.11.5+, Git, Bash on Linux/macOS or WSL, and uv. No credentials or live
 services are needed for the bundled demo or for listing existing hunts.
 
 ```bash
@@ -47,6 +47,11 @@ for model-assisted generation, not for installing the packages or browsing hunts
 For a fresh shell, reactivate `hecate-dev/.venv` and export the same absolute
 workspace and binary paths. Use the installed commands from that environment;
 `uv run --directory` can select a different project's environment.
+
+For installations using the reviewed dependency lock, run `uv sync --locked --dev`
+from the Runner checkout with Core as a sibling. See the
+[dependency security notes](docs/DEPENDENCY_SECURITY.md) for the remaining upstream
+advisory and installed-runtime update requirements.
 
 ## Configure only the features you need
 
