@@ -809,3 +809,133 @@ def bas_verify_cmd(
         )
     if not det_result.success or not det_result.cleanup_success or res.status.value == "error":
         raise typer.Exit(code=1)
+
+
+def bas_synthesize_cmd(
+    target: Annotated[
+        str,
+        typer.Argument(help="Hunt ID (e.g. H-0032) or path to a Sigma rule YAML file."),
+    ],
+    forward_siem: Annotated[
+        bool,
+        typer.Option(
+            "--forward-siem", help="Forward synthesized telemetry to Splunk SIEM via HEC."
+        ),
+    ] = False,
+) -> None:
+    """Synthesize cross-platform telemetry from rule predicates and evaluate true-positive / baseline controls."""
+    from hecate_runner.bas.forwarder import forward_events_to_splunk, infer_splunk_sourcetype
+    from hecate_runner.bas.synthesizer import (
+        evaluate_rule_synthetically,
+        synthesize_events_from_rule,
+    )
+
+    settings = _get_settings()
+    workspace = Path(
+        getattr(settings, "hecate_workspace", None) or getattr(settings, "workspace", None) or "."
+    )
+    hunt_id = ""
+    rule_yaml = ""
+
+    target_path = Path(target)
+    if target_path.exists() and target_path.is_file():
+        rule_yaml = target_path.read_text(encoding="utf-8")
+        hunt_id = target_path.stem
+    else:
+        # Search for hunt file
+        clean_target = target.upper()
+        if not clean_target.startswith("H-"):
+            clean_target = f"H-{clean_target.zfill(4)}"
+        hunt_id = clean_target
+
+        pub_path = getattr(settings, "public_repo_path", None)
+        pub_repo = Path(pub_path) if pub_path else (workspace.parent / "Hecate-Public")
+        candidates = list(workspace.glob(f"**/{hunt_id}.md"))
+        if not candidates and pub_repo.exists():
+            candidates = list(pub_repo.glob(f"**/{hunt_id}.md"))
+
+        if candidates:
+            content = candidates[0].read_text(encoding="utf-8")
+            import re
+
+            m = re.search(r"```yaml\s*\n(title:.*?)\n```", content, re.DOTALL)
+            if m:
+                rule_yaml = m.group(1)
+        else:
+            rule_candidates = list(workspace.glob(f"**/*{hunt_id}*.yml"))
+            if not rule_candidates and pub_repo.exists():
+                rule_candidates = list(pub_repo.glob(f"**/*{hunt_id}*.yml"))
+            if rule_candidates:
+                rule_yaml = rule_candidates[0].read_text(encoding="utf-8")
+
+    if not rule_yaml:
+        console.print(f"[red]Could not locate a Sigma rule for target:[/red] {target}")
+        raise typer.Exit(code=1)
+
+    tp_event, benign_events = synthesize_events_from_rule(rule_yaml, hunt_id=hunt_id)
+    eval_res = evaluate_rule_synthetically(rule_yaml, hunt_id=hunt_id)
+
+    table = Table(title=f"Synthesized Telemetry & Evaluation for {hunt_id}")
+    table.add_column("Type", style="bold cyan")
+    table.add_column("Product", style="green")
+    table.add_column("Category", style="yellow")
+    table.add_column("Key Telemetry Attributes", style="white")
+
+    tp_attrs = ", ".join(
+        f"{k}={v}"
+        for k, v in tp_event.items()
+        if k
+        not in (
+            "product",
+            "category",
+            "data_source",
+            "timestamp_utc",
+            "TimeCreated",
+            "hunt_id",
+            "technique_id",
+        )
+    )
+    table.add_row(
+        "True Positive",
+        str(tp_event.get("product")),
+        str(tp_event.get("category")),
+        tp_attrs[:120] + ("..." if len(tp_attrs) > 120 else ""),
+    )
+
+    for idx, b in enumerate(benign_events, 1):
+        b_attrs = ", ".join(
+            f"{k}={v}"
+            for k, v in b.items()
+            if k not in ("product", "category", "data_source", "timestamp_utc")
+        )
+        table.add_row(
+            f"Benign Baseline #{idx}",
+            str(b.get("product")),
+            str(b.get("category")),
+            b_attrs[:120] + ("..." if len(b_attrs) > 120 else ""),
+        )
+
+    console.print(table)
+
+    is_ok = bool(eval_res.get("is_clean") and eval_res.get("rule_triggered"))
+    status_str = (
+        "[bold green]PASSED (True Positive Triggered, Controls Clean)[/bold green]"
+        if is_ok
+        else "[bold red]FAILED (Missed True Positive or Control Triggered)[/bold red]"
+    )
+    console.print(
+        Panel(
+            f"Rule Validation: {status_str}\n"
+            f"True Positives: {eval_res.get('true_positives')} | False Positives: {eval_res.get('false_positives')}",
+            title="Sigma In-Memory Evaluation",
+            border_style="green" if is_ok else "red",
+        )
+    )
+
+    if forward_siem:
+        sourcetype = infer_splunk_sourcetype(tp_event)
+        all_events = [tp_event, *benign_events]
+        ingested = forward_events_to_splunk(all_events, sourcetype=sourcetype, workspace=workspace)
+        console.print(
+            f"[bold green]Ingested {ingested} synthetic events into Splunk (sourcetype={sourcetype})[/bold green]"
+        )
