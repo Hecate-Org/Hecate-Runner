@@ -65,7 +65,7 @@ def test_pending_card_shows_latest_release_digest_only() -> None:
     releases = [
         {
             "hunt_id": "H-0032",
-            "digest": "abc123def456",
+            "digest": "release-digest-01",
             "updated_at": "2026-11-15T12:00:00+00:00",
             "awaiting_count": 23,
         }
@@ -74,7 +74,7 @@ def test_pending_card_shows_latest_release_digest_only() -> None:
     blocks = card[0]["blocks"]
     text = json.dumps(blocks)
     assert "Release digests" in text
-    assert "abc123def456"[:12] in text or "abc123def456" in text
+    assert "release-digest-01"[:12] in text or "release-digest-01" in text
     assert "22 older" in text or "Superseded" in text
     assert "hecate_release_diff" in text
     assert "Diff vs last published" in text
