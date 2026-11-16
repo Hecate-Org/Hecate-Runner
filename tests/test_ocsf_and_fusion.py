@@ -627,6 +627,22 @@ def test_partial_fuse_does_not_request_refusion() -> None:
     assert event.needs_lineage_fusion() is False
 
 
+def test_parent_only_fuse_does_not_lock_lineage() -> None:
+    event = NormalizedEvent(
+        event_id="e1",
+        hunt_id="H-0001",
+        target_siem="splunk",
+        timestamp="2026-01-01T00:00:00Z",
+        host="fin-1",
+        dst_ip="198.51.100.1",
+        class_uid=int(OCSFClassUID.NETWORK_ACTIVITY),
+    )
+    event.fuse_process_lineage(process_name="", parent_process="explorer.exe")
+    assert event.parent_process == "explorer.exe"
+    assert event.fused_lineage is False
+    assert event.needs_lineage_fusion() is True
+
+
 def test_ocsf_hash_length_maps_to_algorithm_keys() -> None:
     md5_event = normalize_event(
         {"host": "h1", "md5": "a" * 32, "Image": "x.exe", "EventCode": "1"},

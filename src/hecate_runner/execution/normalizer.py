@@ -399,7 +399,11 @@ class NormalizedEvent:
         fusion_source: str = "endpoint_network_fusion",
         fusion_detail: str = "",
     ) -> None:
-        """Fuse recovered endpoint process execution context into this network/DNS event."""
+        """Fuse recovered endpoint process execution context into this network/DNS event.
+
+        Parent-only tips are stored without setting ``fused_lineage``, so a later
+        pass can still recover process name / command line.
+        """
         if process_name:
             self.process_name = process_name
         if parent_process:
@@ -412,6 +416,9 @@ class NormalizedEvent:
             self.pid = pid
         if parent_pid:
             self.parent_pid = parent_pid
+        # Require process name or command line before claiming fusion complete.
+        if not (self.process_name or self.command_line):
+            return
         self.fused_lineage = True
         self.fusion_source = fusion_source
         self.fusion_detail = (
