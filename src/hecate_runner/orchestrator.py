@@ -195,6 +195,8 @@ class Orchestrator(
         #: The cycle's research grounding: "", "independent" or "source-only".
         self._research_grounding = ""
         self._research_grounding_label = ""
+        self._enriched_context: str = ""
+        self._enrichment_citations: list[dict[str, str]] = []
         # Defaults to a no-op so tests and callers that don't care about
         # notifications don't have to pass one.
         self.notify = notify or (lambda result: None)
@@ -307,11 +309,11 @@ class Orchestrator(
             specimen=specimen,
         )
 
-    def _run_body(self, state: OrchestratorState, *, dry_run: bool) -> RunResult:
-        # Primary-source evidence for this cycle's item; see _gather_source_evidence.
+    def _reset_cycle_context(self) -> None:
+        """Reset primary-source and intelligence evidence state for a new cycle."""
         self._source_evidence = None
         self._enriched_context = ""
-        self._enrichment_citations: list[dict[str, str]] = []
+        self._enrichment_citations = []
         self._indicator_records = []
         self._detection_guidance = []
         self._specimen = []
@@ -321,92 +323,90 @@ class Orchestrator(
         self._technique_evidence = []
         self._claim_audit = []
         self._claim_evidence = []
-        with self.metrics.measure("cti_intake"):
-            item, skipped, parked_count = self._next_actionable_item()
-        if item is None:
-            if skipped:
-                log.info("No actionable CTI this cycle; %d item(s) had nothing to hunt.", skipped)
-                return RunResult(
-                    outcome="no_actionable_cti",
-                    detail=f"skipped {skipped}",
-                    parked_count=parked_count,
-                )
-            log.info("No CTI in queue; nothing to do this cycle.")
-            return RunResult(outcome="no_cti", parked_count=parked_count)
 
-        log.info("Picked up CTI item from %s (%d chars)", item.source, len(item.content))
-        self.metrics.set_source(item.source, item.identifier)
+    def _try_campaign_correlation(
+        self,
+        item: CTIItem,
+        *,
+        state: OrchestratorState,
+        parked_count: int,
+        dry_run: bool,
+    ) -> RunResult | None:
+        """Check for correlation with existing hunts and perform incremental enrichment if found."""
+        if not self.settings.campaign_clustering_enabled:
+            return None
 
-        # Campaign Clustering & Incremental Enrichment
-        if self.settings.campaign_clustering_enabled:
-            from hecate_runner.correlation import IncrementalEnricher, ThreatEntityCorrelator
+        from hecate_runner.correlation import IncrementalEnricher, ThreatEntityCorrelator
 
-            correlator = ThreatEntityCorrelator(self.settings.hunts_root)
-            match = correlator.correlate(
-                item, threshold=self.settings.correlation_confidence_threshold
+        correlator = ThreatEntityCorrelator(self.settings.hunts_root)
+        match = correlator.correlate(item, threshold=self.settings.correlation_confidence_threshold)
+        if match is None:
+            return None
+
+        if dry_run:
+            return RunResult(
+                outcome="dry_run",
+                hunt_id=match.hunt_id,
+                draft_path=match.hunt_path,
+                detail=f"Would enrich {match.hunt_id} via {match.match_type}",
+                parked_count=parked_count,
             )
-            if match is not None:
-                if dry_run:
-                    return RunResult(
-                        outcome="dry_run",
-                        hunt_id=match.hunt_id,
-                        draft_path=match.hunt_path,
-                        detail=f"Would enrich {match.hunt_id} via {match.match_type}",
-                        parked_count=parked_count,
-                    )
-                log.info(
-                    "Correlated CTI item from %s with existing hunt %s via %s (%s, confidence %.2f)",
-                    item.source,
-                    match.hunt_id,
-                    match.match_type,
-                    ", ".join(match.matched_entities),
-                    match.confidence,
-                )
-                self.trail.step(
-                    "correlation",
-                    "matched %s via %s (%s, confidence %.2f); performing incremental enrichment",
-                    match.hunt_id,
-                    match.match_type,
-                    ", ".join(match.matched_entities),
-                    match.confidence,
-                )
-                enrichment = IncrementalEnricher.enrich(item, match, self.settings.hecate_workspace)
-                if enrichment.changed:
-                    self.trail.step(
-                        "enrichment",
-                        "enriched %s: +%d indicator(s), +%d technique(s)",
-                        match.hunt_id,
-                        enrichment.new_indicators_count,
-                        len(enrichment.added_techniques),
-                    )
-                else:
-                    self.trail.step(
-                        "enrichment",
-                        "correlated %s with no net-new indicators/techniques; skipped rewrite",
-                        match.hunt_id,
-                    )
-                clear_retry(self.settings.cti_queue_dir_resolved, item)
-                self._advance_past(item)
-                result = RunResult(
-                    outcome=(
-                        "incremental_enrichment" if enrichment.changed else "correlation_noop"
-                    ),
-                    hunt_id=match.hunt_id,
-                    draft_path=match.hunt_path,
-                    detail=enrichment.details,
-                    parked_count=parked_count,
-                )
-                # IOC/technique dossier updates stay private. Public GitHub review
-                # is reserved for material behavioral-rule changes (new Sigma),
-                # not correlator appendices. MISP still receives IOC enrichments.
-                # Slack cards stay quiet for IOC-only living-dossier updates.
-                if enrichment.changed:
-                    if enrichment.material_for_public_promote:
-                        self._publish_github(match.hunt_id)
-                        self._notify_cycle(result)
-                    self._publish_misp(match.hunt_id)
-                return result
+        log.info(
+            "Correlated CTI item from %s with existing hunt %s via %s (%s, confidence %.2f)",
+            item.source,
+            match.hunt_id,
+            match.match_type,
+            ", ".join(match.matched_entities),
+            match.confidence,
+        )
+        self.trail.step(
+            "correlation",
+            "matched %s via %s (%s, confidence %.2f); performing incremental enrichment",
+            match.hunt_id,
+            match.match_type,
+            ", ".join(match.matched_entities),
+            match.confidence,
+        )
+        enrichment = IncrementalEnricher.enrich(item, match, self.settings.hecate_workspace)
+        if enrichment.changed:
+            self.trail.step(
+                "enrichment",
+                "enriched %s: +%d indicator(s), +%d technique(s)",
+                match.hunt_id,
+                enrichment.new_indicators_count,
+                len(enrichment.added_techniques),
+            )
+        else:
+            self.trail.step(
+                "enrichment",
+                "correlated %s with no net-new indicators/techniques; skipped rewrite",
+                match.hunt_id,
+            )
+        clear_retry(self.settings.cti_queue_dir_resolved, item)
+        self._advance_past(item)
+        result = RunResult(
+            outcome=("incremental_enrichment" if enrichment.changed else "correlation_noop"),
+            hunt_id=match.hunt_id,
+            draft_path=match.hunt_path,
+            detail=enrichment.details,
+            parked_count=parked_count,
+        )
+        if enrichment.changed:
+            if enrichment.material_for_public_promote:
+                self._publish_github(match.hunt_id)
+                self._notify_cycle(result)
+            self._publish_misp(match.hunt_id)
+        return result
 
+    def _check_quotas_and_spacing(
+        self,
+        item: CTIItem,
+        *,
+        state: OrchestratorState,
+        parked_count: int,
+        dry_run: bool,
+    ) -> RunResult | None:
+        """Enforce spacing cooldown between hunts and reserve a draft quota slot."""
         is_sweep = item.metadata.get("processing_track") != "deep" and (
             bool(parse_indicator_inventory(item.content))
             if not has_narrative(item.content)
@@ -465,8 +465,16 @@ class Orchestrator(
             return RunResult(
                 outcome="dry_run", detail=item.content[:100], parked_count=parked_count
             )
+        return None
 
-        # Notify Slack only when the draft slot has actually been reserved and not dry run!
+    def _execute_enrichment_phase(
+        self,
+        item: CTIItem,
+        *,
+        state: OrchestratorState,
+        parked_count: int,
+    ) -> tuple[str, str, bool, dict[str, int], RunResult | None]:
+        """Aggregate primary source artifacts, OSINT enrichment, catalog lookups, and VT graph."""
         try:
             from hecate_runner.notifications import notify_threat_intake
 
@@ -508,10 +516,16 @@ class Orchestrator(
                 self.settings.max_research_runs_per_day,
             )
             state.refund_draft()
-            return RunResult(
-                outcome="research_quota_reached",
-                detail=f"{state.research_runs_today}/{self.settings.max_research_runs_per_day}",
-                parked_count=parked_count,
+            return (
+                "",
+                "",
+                intel_has_narrative,
+                sweep_inventory,
+                RunResult(
+                    outcome="research_quota_reached",
+                    detail=f"{state.research_runs_today}/{self.settings.max_research_runs_per_day}",
+                    parked_count=parked_count,
+                ),
             )
 
         if source_is_indicator_only:
@@ -528,7 +542,6 @@ class Orchestrator(
             else ""
         )
 
-        # Enrich the CTI using external OSINT sources
         from hecate_agent.api import extract_indicators, generate_enrichment_summary
 
         log.info(
@@ -706,7 +719,6 @@ class Orchestrator(
                             if bg:
                                 graphs.append((chash, bg))
 
-                # Preserve candidate order for stable draft text.
                 order = {h: i for i, h in enumerate(candidate_hashes)}
                 graphs.sort(key=lambda pair: order.get(pair[0], 0))
 
@@ -772,145 +784,183 @@ class Orchestrator(
                 + self._enriched_context
             )
 
+        return (
+            primary_intel_context,
+            research_context,
+            intel_has_narrative,
+            sweep_inventory,
+            None,
+        )
+
+    def _execute_research_phase(
+        self,
+        item: CTIItem,
+        *,
+        research_context: str,
+        intel_has_narrative: bool,
+        sweep_inventory: dict[str, int],
+        state: OrchestratorState,
+        parked_count: int,
+    ) -> tuple[str | None, list[str], RunResult | None]:
+        """Perform contextual background research or reuse recent matching analysis."""
         research_id: str | None = None
         related_hunts: list[str] = []
         if sweep_inventory:
             log.info("CTI is a parseable indicator dump; skipping research context.")
-        elif self.settings.research_enabled:
-            topic, technique = derive_research_topic(item.content, title=item.title or None)
+            return None, [], None
+
+        if not self.settings.research_enabled:
+            return None, [], None
+
+        topic, technique = derive_research_topic(item.content, title=item.title or None)
+        self.trail.step(
+            "research",
+            'starting: topic "%s"%s; web search %s; source text %d chars',
+            clip(topic, 80),
+            f", technique {technique}" if technique else "",
+            "on" if intel_has_narrative else "off",
+            len(research_context),
+        )
+        research_started = self.trail.elapsed
+
+        reused_doc = None
+        describes_behavior = True
+        if self.settings.research_reuse_enabled:
+            try:
+                from hecate_agent.core.research_manager import ResearchManager
+
+                manager = ResearchManager(self.hecate.workspace / "research")
+                reused_doc = manager.find_recent_match(
+                    topic=topic,
+                    technique_id=technique,
+                    max_age_days=self.settings.research_reuse_max_age_days,
+                )
+            except Exception as exc:
+                log.debug("Research reuse lookup failed: %s", exc)
+
+        if reused_doc and reused_doc.get("research_id"):
+            research_id = reused_doc["research_id"]
+            fm = reused_doc.get("frontmatter", {})
+            linked_hunts = [h for h in fm.get("linked_hunts", []) if isinstance(h, str)]
+            self._research_grounding = fm.get("grounding", "web_and_local")
+            self._research_grounding_label = f"reused {research_id}"
+            related_hunts = linked_hunts
+            content = reused_doc.get("content", "")
+            if "describes no observable adversary behavior" in content.lower():
+                describes_behavior = False
             self.trail.step(
                 "research",
-                'starting: topic "%s"%s; web search %s; source text %d chars',
-                clip(topic, 80),
-                f", technique {technique}" if technique else "",
-                "on" if intel_has_narrative else "off",
-                len(research_context),
+                "%s reused from workspace (<%dd old, topic %s); saved web searches & LLM calls; related hunts: %s",
+                research_id,
+                self.settings.research_reuse_max_age_days,
+                clip(topic, 60),
+                ", ".join(related_hunts) if related_hunts else "none",
             )
-            research_started = self.trail.elapsed
-
-            reused_doc = None
-            describes_behavior = True
-            if self.settings.research_reuse_enabled:
-                try:
-                    from hecate_agent.core.research_manager import ResearchManager
-
-                    manager = ResearchManager(self.hecate.workspace / "research")
-                    reused_doc = manager.find_recent_match(
+        else:
+            try:
+                log_payload_metrics(
+                    "research", f"{topic}\n{research_context}", self.settings.hecate_llm_model
+                )
+                with self.metrics.measure("research") as measured:
+                    research_result = self.hecate.research_new(
                         topic=topic,
-                        technique_id=technique,
-                        max_age_days=self.settings.research_reuse_max_age_days,
+                        technique=technique,
+                        depth=self.settings.research_depth,
+                        timeout_sec=self.settings.llm_timeout_sec,
+                        web_search_enabled=intel_has_narrative,
+                        source_context=research_context,
                     )
-                except Exception as exc:
-                    log.debug("Research reuse lookup failed: %s", exc)
+                    measured.set_usage(research_result.usage)
+            except HecateError as exc:
+                log.error(
+                    "hecate-agent research new failed (%s); refusing to generate without configured research context",
+                    exc,
+                )
+                state.refund_draft()
+                return (
+                    None,
+                    [],
+                    RunResult(outcome="research_error", detail=str(exc), parked_count=parked_count),
+                )
 
-            if reused_doc and reused_doc.get("research_id"):
-                research_id = reused_doc["research_id"]
-                fm = reused_doc.get("frontmatter", {})
-                linked_hunts = [h for h in fm.get("linked_hunts", []) if isinstance(h, str)]
-                self._research_grounding = fm.get("grounding", "web_and_local")
-                self._research_grounding_label = f"reused {research_id}"
-                related_hunts = linked_hunts
-                content = reused_doc.get("content", "")
-                if "describes no observable adversary behavior" in content.lower():
-                    describes_behavior = False
+            if research_result.is_empty:
+                log.error(
+                    "hecate-agent research new produced no research_id; refusing to generate without configured research context"
+                )
+                state.refund_draft()
+                return None, [], RunResult(outcome="research_empty", parked_count=parked_count)
+
+            research_id = research_result.research_id
+            related_hunts = research_result.related_hunts
+            self._research_grounding = research_result.grounding
+            self._research_grounding_label = research_result.grounding_label()
+            describes_behavior = research_result.describes_behavior
+            self.trail.step(
+                "research",
+                "%s done in %.0fs; context quality: %s; describes adversary behavior: %s; related hunts: %s",
+                research_id,
+                self.trail.elapsed - research_started,
+                self._research_grounding_label,
+                "yes" if describes_behavior else "NO",
+                listing(related_hunts),
+            )
+            if intel_has_narrative and research_result.grounding == "source-only":
+                log.warning(
+                    "Research %s ran source-only (%s); it will not count as evidence for techniques or grounding.",
+                    research_id,
+                    research_result.web_search_note or "no web searches",
+                )
                 self.trail.step(
                     "research",
-                    "%s reused from workspace (<%dd old, topic %s); saved web searches & LLM calls; related hunts: %s",
-                    research_id,
-                    self.settings.research_reuse_max_age_days,
-                    clip(topic, 60),
-                    ", ".join(related_hunts) if related_hunts else "none",
+                    "SOURCE-ONLY: web search was requested but none succeeded; "
+                    "research is not counted as evidence this cycle",
                 )
+
+        if self.settings.cti_triage == "park" and intel_has_narrative and not describes_behavior:
+            reason = (
+                f"research {research_id} found no adversary behavior to hunt in it "
+                "(commentary, product or opinion content)"
+            )
+            try:
+                park(self.settings.cti_queue_dir_resolved, item, reason)
+            except OSError as exc:
+                log.warning("Could not park CTI item (%s); drafting it instead.", exc)
             else:
-                try:
-                    log_payload_metrics(
-                        "research", f"{topic}\n{research_context}", self.settings.hecate_llm_model
-                    )
-                    with self.metrics.measure("research") as measured:
-                        research_result = self.hecate.research_new(
-                            topic=topic,
-                            technique=technique,
-                            depth=self.settings.research_depth,
-                            timeout_sec=self.settings.llm_timeout_sec,
-                            web_search_enabled=intel_has_narrative,
-                            source_context=research_context,
-                        )
-                        measured.set_usage(research_result.usage)
-                except HecateError as exc:
-                    log.error(
-                        "hecate-agent research new failed (%s); refusing to generate without configured research context",
-                        exc,
-                    )
-                    state.refund_draft()
-                    return RunResult(
-                        outcome="research_error", detail=str(exc), parked_count=parked_count
-                    )
-
-                if research_result.is_empty:
-                    log.error(
-                        "hecate-agent research new produced no research_id; refusing to generate without configured research context"
-                    )
-                    state.refund_draft()
-                    return RunResult(outcome="research_empty", parked_count=parked_count)
-
-                research_id = research_result.research_id
-                related_hunts = research_result.related_hunts
-                self._research_grounding = research_result.grounding
-                self._research_grounding_label = research_result.grounding_label()
-                describes_behavior = research_result.describes_behavior
-                self.trail.step(
-                    "research",
-                    "%s done in %.0fs; context quality: %s; describes adversary behavior: %s; related hunts: %s",
-                    research_id,
-                    self.trail.elapsed - research_started,
-                    self._research_grounding_label,
-                    "yes" if describes_behavior else "NO",
-                    listing(related_hunts),
+                self.trail.step("research", "park: %s; draft slot refunded", reason)
+                log.info(
+                    "Parking CTI item from %s (%s): %s",
+                    item.source,
+                    item.title[:60] or "untitled",
+                    reason,
                 )
-                if intel_has_narrative and research_result.grounding == "source-only":
-                    log.warning(
-                        "Research %s ran source-only (%s); it will not count as evidence for techniques or grounding.",
-                        research_id,
-                        research_result.web_search_note or "no web searches",
-                    )
-                    self.trail.step(
-                        "research",
-                        "SOURCE-ONLY: web search was requested but none succeeded; "
-                        "research is not counted as evidence this cycle",
-                    )
-
-            if (
-                self.settings.cti_triage == "park"
-                and intel_has_narrative
-                and not describes_behavior
-            ):
-                reason = (
-                    f"research {research_id} found no adversary behavior to hunt in it "
-                    "(commentary, product or opinion content)"
-                )
-                try:
-                    park(self.settings.cti_queue_dir_resolved, item, reason)
-                except OSError as exc:
-                    log.warning("Could not park CTI item (%s); drafting it instead.", exc)
-                else:
-                    self.trail.step("research", "park: %s; draft slot refunded", reason)
-                    log.info(
-                        "Parking CTI item from %s (%s): %s",
-                        item.source,
-                        item.title[:60] or "untitled",
-                        reason,
-                    )
-                    state.refund_draft()
-                    self._advance_past(item)
-                    return RunResult(
+                state.refund_draft()
+                self._advance_past(item)
+                return (
+                    None,
+                    [],
+                    RunResult(
                         outcome="parked_after_research",
                         detail=reason,
                         research_id=research_id,
                         parked_count=parked_count + 1,
-                    )
+                    ),
+                )
 
-            log.info("Research %s is ready as background context", research_id)
+        log.info("Research %s is ready as background context", research_id)
+        return research_id, related_hunts, None
 
+    def _execute_hypothesis_phase(
+        self,
+        item: CTIItem,
+        *,
+        primary_intel_context: str,
+        research_id: str | None,
+        intel_has_narrative: bool,
+        sweep_inventory: dict[str, int],
+        state: OrchestratorState,
+        parked_count: int,
+    ) -> tuple[Any, RunResult | None]:
+        """Synthesize threat hypothesis and structured indicator provenance."""
         if sweep_inventory:
             log.info(
                 "CTI is an indicator dump (%d indicators, %d type(s)); building a sweep "
@@ -943,7 +993,7 @@ class Orchestrator(
                         measured.set_status("partial")
             except HecateError as exc:
                 log.error("hecate hypothesis-generator failed: %s", exc)
-                return self._handle_item_failure(
+                return None, self._handle_item_failure(
                     item, "hecate_error", str(exc), parked_count, state
                 )
 
@@ -1019,19 +1069,32 @@ class Orchestrator(
                         )
                         state.refund_draft()
                         self._advance_past(item)
-                        return RunResult(
+                        return None, RunResult(
                             outcome="parked_after_hypothesis",
                             detail=reason,
                             research_id=research_id,
                             parked_count=parked_count + 1,
                         )
-        model_techniques = list(hypothesis.techniques)
 
         if hypothesis.is_empty:
             log.warning("hecate returned empty hypothesis; refunding quota and leaving CTI.")
             state.refund_draft()
-            return RunResult(outcome="empty_hypothesis", parked_count=parked_count)
+            return None, RunResult(outcome="empty_hypothesis", parked_count=parked_count)
 
+        return hypothesis, None
+
+    def _execute_grounding_and_ttps_phase(
+        self,
+        item: CTIItem,
+        *,
+        hypothesis: Any,
+        research_id: str | None,
+        sweep_inventory: dict[str, int],
+        state: OrchestratorState,
+        parked_count: int,
+    ) -> tuple[list[str], list[str], dict[str, TechniqueFact], RunResult | None]:
+        """Ground extracted techniques against ATT&CK, platform scopes, and claim evidence."""
+        model_techniques = list(hypothesis.techniques)
         cti_techniques = [str(t) for t in (item.metadata.get("techniques") or [])]
 
         candidates: list[tuple[str, str]] = []
@@ -1169,11 +1232,16 @@ class Orchestrator(
                 )
                 state.refund_draft()
                 self._advance_past(item)
-                return RunResult(
-                    outcome="parked_no_techniques",
-                    detail=reason,
-                    research_id=research_id,
-                    parked_count=parked_count + 1,
+                return (
+                    [],
+                    [],
+                    {},
+                    RunResult(
+                        outcome="parked_no_techniques",
+                        detail=reason,
+                        research_id=research_id,
+                        parked_count=parked_count + 1,
+                    ),
                 )
 
         if not hypothesis.actor.strip():
@@ -1216,6 +1284,22 @@ class Orchestrator(
             else:
                 hypothesis.actor = "Unattributed"
 
+        return tactics, platforms, technique_facts, None
+
+    def _execute_drafting_and_publishing_phase(
+        self,
+        item: CTIItem,
+        *,
+        hypothesis: Any,
+        research_id: str | None,
+        tactics: list[str],
+        platforms: list[str],
+        technique_facts: dict[str, TechniqueFact],
+        related_hunts: list[str],
+        state: OrchestratorState,
+        parked_count: int,
+    ) -> RunResult:
+        """Write hunt draft to disk, trigger Sigma derivations/BAS validations, and publish."""
         try:
             with hunt_id_lock(self.settings.hunts_root):
                 hunt_id = next_hunt_id(self.settings.hunts_root)
@@ -1298,6 +1382,100 @@ class Orchestrator(
         self._notify_cycle(result)
 
         return result
+
+    def _run_body(self, state: OrchestratorState, *, dry_run: bool) -> RunResult:
+        """Execute one orchestrator cycle through its modular pipeline stages."""
+        self._reset_cycle_context()
+        with self.metrics.measure("cti_intake"):
+            item, skipped, parked_count = self._next_actionable_item()
+        if item is None:
+            if skipped:
+                log.info("No actionable CTI this cycle; %d item(s) had nothing to hunt.", skipped)
+                return RunResult(
+                    outcome="no_actionable_cti",
+                    detail=f"skipped {skipped}",
+                    parked_count=parked_count,
+                )
+            log.info("No CTI in queue; nothing to do this cycle.")
+            return RunResult(outcome="no_cti", parked_count=parked_count)
+
+        log.info("Picked up CTI item from %s (%d chars)", item.source, len(item.content))
+        self.metrics.set_source(item.source, item.identifier)
+
+        # 1. Campaign Clustering & Incremental Enrichment
+        if corr_result := self._try_campaign_correlation(
+            item, state=state, parked_count=parked_count, dry_run=dry_run
+        ):
+            return corr_result
+
+        # 2. Spacing and Quota Reservation
+        if quota_result := self._check_quotas_and_spacing(
+            item, state=state, parked_count=parked_count, dry_run=dry_run
+        ):
+            return quota_result
+
+        # 3. Enrichment and Context Aggregation
+        (
+            primary_intel_context,
+            research_context,
+            intel_has_narrative,
+            sweep_inventory,
+            enrich_result,
+        ) = self._execute_enrichment_phase(item, state=state, parked_count=parked_count)
+        if enrich_result is not None:
+            return enrich_result
+
+        # 4. Research Phase
+        research_id, related_hunts, research_result = self._execute_research_phase(
+            item,
+            research_context=research_context,
+            intel_has_narrative=intel_has_narrative,
+            sweep_inventory=sweep_inventory,
+            state=state,
+            parked_count=parked_count,
+        )
+        if research_result is not None:
+            return research_result
+
+        # 5. Hypothesis Phase
+        hypothesis, hypothesis_result = self._execute_hypothesis_phase(
+            item,
+            primary_intel_context=primary_intel_context,
+            research_id=research_id,
+            intel_has_narrative=intel_has_narrative,
+            sweep_inventory=sweep_inventory,
+            state=state,
+            parked_count=parked_count,
+        )
+        if hypothesis_result is not None:
+            return hypothesis_result
+
+        # 6. Grounding, TTPs & Claim Audit Phase
+        tactics, platforms, technique_facts, grounding_result = (
+            self._execute_grounding_and_ttps_phase(
+                item,
+                hypothesis=hypothesis,
+                research_id=research_id,
+                sweep_inventory=sweep_inventory,
+                state=state,
+                parked_count=parked_count,
+            )
+        )
+        if grounding_result is not None:
+            return grounding_result
+
+        # 7. Drafting, Publication & Notifications Phase
+        return self._execute_drafting_and_publishing_phase(
+            item,
+            hypothesis=hypothesis,
+            research_id=research_id,
+            tactics=tactics,
+            platforms=platforms,
+            technique_facts=technique_facts,
+            related_hunts=related_hunts,
+            state=state,
+            parked_count=parked_count,
+        )
 
 
 # --- Factory ---------------------------------------------------------------

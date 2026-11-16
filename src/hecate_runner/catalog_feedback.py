@@ -325,8 +325,10 @@ def _nudge_sigma_level(rule_path: Path, workspace: Path) -> str | None:
         text = read_artifact(rule_path, workspace)
     except Exception:
         return None
+    # Tabs after ``level:`` break PyYAML; normalize whitespace for parse + rewrite.
+    parse_text = text.replace("\t", " ")
     try:
-        data = yaml.safe_load(text)
+        data = yaml.safe_load(parse_text)
     except yaml.YAMLError:
         return None
     if not isinstance(data, dict):
@@ -337,12 +339,13 @@ def _nudge_sigma_level(rule_path: Path, workspace: Path) -> str | None:
     new_level = _LEVEL_DOWN[current]
     if new_level == current:
         return None
-    # Preserve document formatting where possible via line replace (quoted/commented).
+    # Preserve document formatting where possible via line replace (quoted/commented/tabs).
     pattern = re.compile(
         rf"(?im)^(\s*level\s*:\s*)(['\"]?){re.escape(current)}\2(\s*(?:#.*)?)?\s*$"
     )
-    if pattern.search(text):
-        updated = pattern.sub(rf"\g<1>\g<2>{new_level}\g<2>\g<3>", text, count=1)
+    searchable = text.replace("\t", " ")
+    if pattern.search(searchable):
+        updated = pattern.sub(rf"\g<1>\g<2>{new_level}\g<2>\g<3>", searchable, count=1)
     else:
         data["level"] = new_level
         updated = yaml.dump(data, sort_keys=False)

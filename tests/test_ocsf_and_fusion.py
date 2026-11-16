@@ -248,8 +248,8 @@ def test_build_process_creation_query_dialects() -> None:
 def test_parse_time_window() -> None:
     ts = "2026-11-15T12:00:00Z"
     e_iso, l_iso, e_sp, l_sp = parse_time_window(ts, window_sec=120)
-    assert e_iso == "2026-11-15T11:58:00Z"
-    assert l_iso == "2026-11-15T12:02:00Z"
+    assert e_iso == "2026-11-15T11:58:00+00:00"
+    assert l_iso == "2026-11-15T12:02:00+00:00"
     assert e_sp == "11/15/2026:11:58:00"
     assert l_sp == "11/15/2026:12:02:00"
 
@@ -584,3 +584,164 @@ def test_fusion_queries_include_time_window(dialect: str) -> None:
     )
     assert "2026" in net
     assert "2026" in proc
+
+
+def test_negative_pid_and_bool_host_are_dropped() -> None:
+    event = normalize_event(
+        {"host": True, "ProcessId": "-3", "Image": "x.exe", "EventCode": "1"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert event.host == ""
+    assert event.pid == ""
+    assert event.to_ocsf_dict()["process"]["pid"] is None
+
+
+def test_hash_prefix_stripped() -> None:
+    event = normalize_event(
+        {
+            "host": "h1",
+            "Hashes": "MD5=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "Image": "x.exe",
+            "EventCode": "1",
+        },
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert event.hash_val == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+
+def test_partial_fuse_does_not_request_refusion() -> None:
+    event = NormalizedEvent(
+        event_id="e1",
+        hunt_id="H-0001",
+        target_siem="splunk",
+        timestamp="2026-01-01T00:00:00Z",
+        host="fin-1",
+        dst_ip="198.51.100.1",
+        class_uid=int(OCSFClassUID.NETWORK_ACTIVITY),
+    )
+    assert event.needs_lineage_fusion() is True
+    event.fuse_process_lineage(process_name="curl")
+    assert event.fused_lineage is True
+    assert event.needs_lineage_fusion() is False
+
+
+def test_ocsf_hash_length_maps_to_algorithm_keys() -> None:
+    md5_event = normalize_event(
+        {"host": "h1", "md5": "a" * 32, "Image": "x.exe", "EventCode": "1"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert md5_event.to_ocsf_dict()["file"]["hashes"] == {"md5": "a" * 32}
+
+    sha1_event = normalize_event(
+        {"host": "h1", "SHA1": "b" * 40, "Image": "x.exe", "EventCode": "1"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert sha1_event.to_ocsf_dict()["file"]["hashes"] == {"sha1": "b" * 40}
+
+
+def test_ipv6_host_populates_device_ip() -> None:
+    event = normalize_event(
+        {"host": "2001:db8::2", "dest_ip": "2001:db8::1", "EventCode": "3"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    ocsf = event.to_ocsf_dict()
+    assert ocsf["device"]["ip"] == "2001:db8::2"
+    assert ocsf["src_endpoint"]["ip"] == "2001:db8::2"
+
+    bracketed = normalize_event(
+        {"host": "[2001:db8::3]", "dest_ip": "1.1.1.1", "EventCode": "3"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert bracketed.to_ocsf_dict()["device"]["ip"] == "2001:db8::3"
+
+
+def test_file_hash_md5_nested_extraction() -> None:
+    event = normalize_event(
+        {
+            "file": {"hash": {"md5": "a" * 32}},
+            "host": "h1",
+            "EventCode": "11",
+            "TargetFilename": "/tmp/x",
+        },
+        target_siem="elastic",
+        hunt_id="H-0001",
+    )
+    assert event.hash_val == "a" * 32
+
+
+def test_sentinel_fusion_datetime_has_no_trailing_z() -> None:
+    query = build_network_connection_query(
+        "sentinel",
+        host="HOST1",
+        ip="1.1.1.1",
+        earliest="2026-01-01T00:00:00Z",
+        latest="2026-01-01T01:00:00Z",
+    )
+    assert "datetime(" in query
+    assert 'datetime("2026-01-01T00:00:00Z")' not in query
+    assert "+00:00" in query
+
+
+def test_fusion_recovers_via_process_lookup_when_network_empty() -> None:
+    class ProcessOnlyProvider(MockQueryProvider):
+        def execute(self, query: ProposedQuery) -> QueryResult:
+            q = query.query_text.lower()
+            now_iso = datetime.now(UTC).isoformat()
+            is_count = " | count" in q or "stats count" in q
+            if "eventcode=3" in q or "devicenetwork" in q:
+                if is_count:
+                    return QueryResult(
+                        outcome="executed",
+                        provider="splunk",
+                        row_count=1,
+                        detail=json.dumps([{"count": 0}]),
+                    )
+                return QueryResult(outcome="executed", provider="splunk", row_count=0, events=[])
+            if is_count:
+                return QueryResult(
+                    outcome="executed",
+                    provider="splunk",
+                    row_count=1,
+                    detail=json.dumps([{"count": 1}]),
+                )
+            return QueryResult(
+                outcome="executed",
+                provider="splunk",
+                row_count=1,
+                events=[
+                    {
+                        "_time": now_iso,
+                        "host": "fin-1",
+                        "Image": "/usr/bin/wget",
+                        "CommandLine": "wget http://c2",
+                        "User": "bob",
+                        "ProcessId": "12",
+                        "ParentImage": "/bin/sh",
+                        "EventCode": "1",
+                    }
+                ],
+            )
+
+    engine = EndpointNetworkFusionEngine(
+        gate=SafeExecutionGate(provider=ProcessOnlyProvider()),
+        settings=Settings(),
+    )
+    event = NormalizedEvent(
+        event_id="e1",
+        hunt_id="H-0001",
+        target_siem="splunk",
+        timestamp="2026-01-01T00:00:00Z",
+        host="fin-1",
+        dst_ip="198.51.100.1",
+        class_uid=int(OCSFClassUID.NETWORK_ACTIVITY),
+    )
+    fused = engine.fuse_events([event], target_siem="splunk", hunt_id="H-0001")[0]
+    assert fused.fused_lineage is True
+    assert "wget" in fused.process_name
+    assert "wget http://c2" in fused.command_line

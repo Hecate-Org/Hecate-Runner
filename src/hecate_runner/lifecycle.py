@@ -29,6 +29,29 @@ from hecate_runner.workspace_paths import (
 
 log = logging.getLogger(__name__)
 
+
+def _safe_count(value: Any, default: int = 0) -> int:
+    """Coerce frontmatter counters without raising on corrupt YAML scalars."""
+    if value is None or value is False:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        try:
+            return int(float(text))
+        except (TypeError, ValueError):
+            return default
+
+
 CANONICAL_LIFECYCLE_STATES = ("planning", "testing", "active", "deprecated", "retired")
 
 LIFECYCLE_ALIASES: dict[str, str] = {
@@ -365,10 +388,10 @@ def record_hunt_execution(
     now_iso = datetime.now(UTC).isoformat()
     fm["last_executed_at"] = now_iso
     fm["latest_execution_outcome"] = outcome
-    fm["execution_run_count"] = int(fm.get("execution_run_count") or 0) + 1
+    fm["execution_run_count"] = _safe_count(fm.get("execution_run_count")) + 1
 
     if outcome == "hits_detected" and matched_count > 0:
-        fm["findings_count"] = int(fm.get("findings_count") or 0) + matched_count
+        fm["findings_count"] = _safe_count(fm.get("findings_count")) + matched_count
 
     if triage_report is not None:
         verdict = getattr(triage_report, "verdict", "")
@@ -379,9 +402,9 @@ def record_hunt_execution(
         fm["latest_recommended_action"] = action
 
         if verdict == "true_positive":
-            fm["true_positives"] = int(fm.get("true_positives") or 0) + 1
+            fm["true_positives"] = _safe_count(fm.get("true_positives")) + 1
         elif verdict == "benign_noise":
-            fm["false_positives"] = int(fm.get("false_positives") or 0) + 1
+            fm["false_positives"] = _safe_count(fm.get("false_positives")) + 1
 
     if pivot_results:
         fm["pivots_executed"] = len(pivot_results)
