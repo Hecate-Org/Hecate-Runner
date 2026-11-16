@@ -177,7 +177,7 @@ def test_pending_card_buttons_and_block_limit():
 
     assert len(blocks) <= 50
     actions = [b for b in blocks if b["type"] == "actions"]
-    assert len(actions) == 20
+    assert len(actions) == 8  # planning shown cap
     assert [e["action_id"] for e in actions[0]["elements"]] == [
         "hecate_pending_approve",
         "hecate_pending_reject",
@@ -203,7 +203,7 @@ def test_slash_command_pending_lists_hunts(tmp_path: Path):
     )
 
     blocks = respond.call_args[1]["attachments"][0]["blocks"]
-    assert "Hunts Awaiting Review (1)" in blocks[0]["text"]["text"]
+    assert "Pending Review (1)" in blocks[0]["text"]["text"]
     assert any(b.get("block_id") == "pending_review_H-0001" for b in blocks)
 
 

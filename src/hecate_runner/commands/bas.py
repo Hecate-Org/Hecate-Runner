@@ -811,86 +811,20 @@ def bas_verify_cmd(
         raise typer.Exit(code=1)
 
 
-def _looks_like_sigma_yaml(text: str) -> bool:
-    lowered = text.lstrip()
-    return "detection:" in lowered and ("title:" in lowered or "logsource:" in lowered)
-
-
-def _sigma_rule_rank(path: Path, text: str) -> tuple[int, str]:
-    """Lower rank = better. Prefer behavioral cores over incremental IOC stubs."""
-    name = path.name.lower()
-    if "incremental" in name:
-        return (100, name)
-    score = 50
-    lowered = text.lower()
-    if "category: process_creation" in lowered:
-        # Parent→child process chains beat single-field command quotes.
-        if "parentimage" in lowered and ("selection_child" in lowered or "image|" in lowered):
-            score = 5
-        else:
-            score = 10
-    elif "category: webserver" in lowered:
-        score = 11
-    elif "category: file_event" in lowered or "category: network_connection" in lowered:
-        score = 12
-    elif "category: dns_query" in lowered:
-        score = 40
-    if "correlation-engine" in lowered or "incremental campaign detection" in lowered:
-        score += 50
-    if "command the source shows" in lowered or "command_the_source" in name:
-        score += 40
-    if "level: low" in lowered:
-        score += 5
-    if "level: high" in lowered or "level: critical" in lowered:
-        score -= 2
-    return (score, name)
-
-
 def _load_sigma_from_query_dirs(roots: list[Path], hunt_id: str) -> str:
     """Prefer authoritative Sigma YAML under queries/<hunt_id>/ over markdown fences."""
-    candidates: list[tuple[tuple[int, str], Path, str]] = []
-    for root in roots:
-        hunt_dir = root / "queries" / hunt_id
-        paths: list[Path] = []
-        if hunt_dir.is_dir():
-            paths.extend(hunt_dir.glob("*.yml"))
-            paths.extend(hunt_dir.glob("*.yaml"))
-        queries_root = root / "queries"
-        if queries_root.is_dir():
-            paths.extend(queries_root.glob(f"**/{hunt_id}*.yml"))
-            paths.extend(queries_root.glob(f"**/{hunt_id}*.yaml"))
-        for path in paths:
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if not _looks_like_sigma_yaml(text):
-                continue
-            candidates.append((_sigma_rule_rank(path, text), path, text))
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda item: item[0])
-    return candidates[0][2]
+    from hecate_runner.bas.rule_selection import load_sigma_from_query_dirs
+
+    text, _path = load_sigma_from_query_dirs(roots, hunt_id)
+    return text
 
 
 def _load_sigma_from_hunt_markdown(roots: list[Path], hunt_id: str) -> str:
     """Last-resort: extract a Sigma fence from the hunt markdown body."""
-    import re
+    from hecate_runner.bas.rule_selection import load_sigma_from_hunt_markdown
 
-    for root in roots:
-        matches = (
-            sorted((root / "hunts").glob(f"**/{hunt_id}.md")) if (root / "hunts").exists() else []
-        )
-        matches += sorted(root.glob(f"**/{hunt_id}.md"))
-        for path in matches:
-            try:
-                content = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            for block in re.findall(r"```ya?ml\s*\n(.*?)```", content, re.DOTALL | re.IGNORECASE):
-                if _looks_like_sigma_yaml(block):
-                    return str(block).strip() + "\n"
-    return ""
+    text, _path = load_sigma_from_hunt_markdown(roots, hunt_id)
+    return text
 
 
 def bas_synthesize_cmd(
@@ -917,6 +851,11 @@ def bas_synthesize_cmd(
         infer_splunk_sourcetype,
         synthetic_splunk_index,
     )
+    from hecate_runner.bas.rule_selection import (
+        load_sigma_from_hunt_markdown,
+        load_sigma_from_query_dirs,
+    )
+    from hecate_runner.bas.siem_verifier import SiemAlertVerifier
     from hecate_runner.bas.synthesizer import (
         evaluate_rule_synthetically,
         synthesize_events_from_rule,
@@ -942,12 +881,23 @@ def bas_synthesize_cmd(
     hunt_id = ""
     rule_yaml = ""
     rule_source = ""
+    rule_path: Path | None = None
 
     target_path = Path(target).expanduser()
     if target_path.exists() and target_path.is_file():
         rule_yaml = target_path.read_text(encoding="utf-8")
-        hunt_id = target_path.stem
-        rule_source = str(target_path.resolve())
+        rule_path = target_path.resolve()
+        rule_source = str(rule_path)
+        # queries/<H-XXXX>/<rule>.yml → hunt id is the parent directory, not the stem.
+        parent_name = rule_path.parent.name
+        if (
+            rule_path.parent.parent.name == "queries"
+            and parent_name.upper().startswith("H-")
+            and parent_name[2:].isdigit()
+        ):
+            hunt_id = parent_name.upper()
+        else:
+            hunt_id = target_path.stem
     else:
         clean_target = target.upper()
         if not clean_target.startswith("H-"):
@@ -960,20 +910,23 @@ def bas_synthesize_cmd(
         if pub_repo.exists() and pub_repo.resolve() != workspace.resolve():
             roots.append(pub_repo.resolve())
 
-        rule_yaml = _load_sigma_from_query_dirs(roots, hunt_id)
-        if rule_yaml:
-            rule_source = f"queries/{hunt_id}/*.yml"
+        rule_yaml, rule_path = load_sigma_from_query_dirs(roots, hunt_id)
+        if rule_yaml and rule_path is not None:
+            try:
+                rule_source = str(rule_path.relative_to(rule_path.parents[2]))
+            except ValueError:
+                rule_source = str(rule_path)
         else:
-            rule_yaml = _load_sigma_from_hunt_markdown(roots, hunt_id)
-            if rule_yaml:
-                rule_source = f"hunts/**/{hunt_id}.md"
+            rule_yaml, rule_path = load_sigma_from_hunt_markdown(roots, hunt_id)
+            if rule_yaml and rule_path is not None:
+                rule_source = str(rule_path)
 
     if not rule_yaml:
         console.print(f"[red]Could not locate a Sigma rule for target:[/red] {target}")
         raise typer.Exit(code=1)
 
     if rule_source:
-        console.print(f"[dim]Loaded Sigma from {rule_source}[/dim]")
+        console.print(f"[dim]Primary rule (ranked): {rule_source}[/dim]")
 
     tp_event, benign_events = synthesize_events_from_rule(rule_yaml, hunt_id=hunt_id)
     eval_res = evaluate_rule_synthetically(rule_yaml, hunt_id=hunt_id)
@@ -1022,10 +975,10 @@ def bas_synthesize_cmd(
     )
     console.print(
         Panel(
-            f"Rule Validation: {status_str}\n"
+            f"Self-check: {status_str}\n"
             f"True Positives: {eval_res.get('true_positives')} | False Positives: {eval_res.get('false_positives')}\n"
-            "[dim]In-memory Sigma self-check only — not proof against native Windows/cloud schemas.[/dim]",
-            title="Sigma In-Memory Evaluation",
+            "[dim]In-memory Sigma only — not SIEM proof. Use --forward-siem for lab query evidence.[/dim]",
+            title="Sigma In-Memory Self-Check",
             border_style="green" if is_ok else "red",
         )
     )
@@ -1048,4 +1001,52 @@ def bas_synthesize_cmd(
             console.print(
                 "[yellow]No events accepted — ensure the synthetic index exists and "
                 "SPLUNK_HEC_URL / ingest credentials are configured.[/yellow]"
+            )
+        else:
+            # Lab proof must use the SAME rule that was synthesized (explicit YAML
+            # paths must not be re-ranked to a different primary).
+            proof_workspace = workspace
+            proof_hunt = hunt_id if hunt_id.startswith("H-") else ""
+            companion_spl = ""
+            companion_name = rule_source
+            if rule_path is not None:
+                if rule_path.parent.parent.name == "queries":
+                    proof_workspace = rule_path.parents[2]
+                    proof_hunt = rule_path.parent.name
+                companion = rule_path.with_suffix(".spl")
+                if companion.is_file():
+                    companion_spl = companion.read_text(encoding="utf-8").strip()
+                    companion_name = rule_path.name
+            proof: dict[str, object] = {
+                "ok": False,
+                "status": "skipped",
+                "rule": companion_name,
+                "index": index_name,
+                "matched": 0,
+                "notes": ["No hunt id for lab search."],
+            }
+            if proof_hunt.startswith("H-") or companion_spl:
+                proof = SiemAlertVerifier(proof_workspace).verify_synthetic_lab_query(
+                    proof_hunt if proof_hunt.startswith("H-") else "",
+                    index=index_name,
+                    spl_query=companion_spl or None,
+                    rule_name=companion_name if companion_spl else None,
+                )
+            proof_ok = bool(proof.get("ok"))
+            notes = "; ".join(str(n) for n in (proof.get("notes") or []))  # type: ignore[union-attr]
+            console.print(
+                Panel(
+                    (
+                        f"[bold green]LAB QUERY MATCH[/bold green] — "
+                        f"{proof.get('matched', 0)} event(s) via {proof.get('rule') or rule_source}\n"
+                        if proof_ok
+                        else f"[bold yellow]LAB PROOF INCOMPLETE[/bold yellow] "
+                        f"({proof.get('status')}) via {proof.get('rule') or rule_source}\n"
+                    )
+                    + f"index={proof.get('index', index_name)}\n"
+                    + f"[dim]{notes}[/dim]\n"
+                    + "[dim]Lab sourcetype hecate:telemetry — not production alert-firing proof.[/dim]",
+                    title="SIEM Lab Evidence",
+                    border_style="green" if proof_ok else "yellow",
+                )
             )

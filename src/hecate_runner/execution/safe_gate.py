@@ -351,3 +351,111 @@ class SafeExecutionGate:
             raw_query=proposed.query_text,
             events=raw_res.events,
         )
+
+    def execute_composite_sweep(
+        self,
+        hunt_id: str,
+        target: str,
+        composite_queries: list[dict[str, Any]],
+        *,
+        time_range_days: int = 1,
+        force_raw: bool = False,
+    ) -> SafeExecutionResult:
+        """Execute a composite multi-stage attack sequence sweep via COUNT-FIRST."""
+        now_dt = datetime.now(UTC)
+        if not composite_queries:
+            return SafeExecutionResult(
+                hunt_id=hunt_id,
+                target=self.provider.name,
+                outcome="clean",
+                matched_count=0,
+                detail="No composite query stages configured.",
+                executed_at=now_dt.isoformat(),
+            )
+
+        all_events: list[dict[str, Any]] = []
+        stage_hits: dict[str, int] = {}
+        overmatches: list[str] = []
+        errors: list[str] = []
+        executed_queries: list[str] = []
+
+        for item in composite_queries:
+            q_text = str(item.get("query_text") or "").strip()
+            q_file = str(item.get("query_file") or "query")
+            stage = str(item.get("stage") or "execution")
+            stage_label = str(item.get("stage_label") or stage)
+            if not q_text:
+                continue
+
+            executed_queries.append(f"[{stage_label}] {q_file}")
+            stage_prop = ProposedQuery(
+                hunt_id=hunt_id,
+                data_source=target,
+                query_text=q_text,
+                time_range_days=time_range_days,
+                limit=self.max_limit,
+                justification=f"Composite attack sequence stage [{stage_label}] for {hunt_id}",
+            )
+
+            stage_res = self.execute_safely(stage_prop, force_raw=force_raw)
+            if stage_res.outcome == "overmatch":
+                overmatches.append(f"{q_file} ({stage_res.matched_count} hits)")
+            elif stage_res.outcome == "error":
+                errors.append(f"{q_file}: {stage_res.detail}")
+            elif stage_res.outcome == "hits_detected" and stage_res.events:
+                stage_hits[q_file] = stage_res.matched_count
+                for raw_ev in stage_res.events:
+                    ev_dict = dict(raw_ev) if isinstance(raw_ev, dict) else {"raw": raw_ev}
+                    ev_dict["_hecate_stage"] = stage
+                    ev_dict["_hecate_stage_label"] = stage_label
+                    ev_dict["_hecate_query_file"] = q_file
+                    all_events.append(ev_dict)
+
+        total_matched = len(all_events)
+        preview_queries = " | ".join(executed_queries)
+
+        if errors and not all_events:
+            return SafeExecutionResult(
+                hunt_id=hunt_id,
+                target=self.provider.name,
+                outcome="error",
+                matched_count=0,
+                detail=f"Composite sweep execution failed across stages: {'; '.join(errors)}",
+                executed_at=now_dt.isoformat(),
+                raw_query=preview_queries,
+            )
+
+        if total_matched == 0 and overmatches:
+            return SafeExecutionResult(
+                hunt_id=hunt_id,
+                target=self.provider.name,
+                outcome="overmatch",
+                matched_count=0,
+                detail=f"Composite sweep stages exceeded safe ceiling: {', '.join(overmatches)}",
+                executed_at=now_dt.isoformat(),
+                raw_query=preview_queries,
+            )
+
+        if total_matched == 0:
+            return SafeExecutionResult(
+                hunt_id=hunt_id,
+                target=self.provider.name,
+                outcome="clean",
+                matched_count=0,
+                detail=f"Not observed across {len(composite_queries)} attack sequence stages on {self.provider.name}.",
+                executed_at=now_dt.isoformat(),
+                raw_query=preview_queries,
+                events=[],
+            )
+
+        breakdown = ", ".join(f"{k}: {v}" for k, v in stage_hits.items())
+        return SafeExecutionResult(
+            hunt_id=hunt_id,
+            target=self.provider.name,
+            outcome="hits_detected",
+            matched_count=total_matched,
+            detail=f"Composite sweep matched {total_matched} event(s) across {len(stage_hits)} stage(s) ({breakdown}).",
+            executed_at=now_dt.isoformat(),
+            raw_query=preview_queries,
+            events=all_events,
+        )

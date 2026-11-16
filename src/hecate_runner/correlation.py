@@ -492,6 +492,11 @@ class EnrichmentResult:
     details: str
     changed: bool = True
 
+    @property
+    def material_for_public_promote(self) -> bool:
+        """True when enrichment wrote behavioral Sigma worth a public review."""
+        return self.changed and self.new_rules_count > 0
+
 
 class IncrementalEnricher:
     """Enriches an existing hunt dossier with net-new indicators and techniques."""

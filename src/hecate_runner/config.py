@@ -1416,6 +1416,18 @@ class Settings(BaseSettings):
         alias="HECATE_HUNT_EXECUTIONS_DB",
         description="Custom path to hunt execution watermarks SQLite database.",
     )
+    auto_hunt_composite_sweeps: bool = Field(
+        default=True,
+        alias="HECATE_AUTO_HUNT_COMPOSITE_SWEEPS",
+        description="Enable multi-query correlated attack sequence sweeps across all stage queries in a hunt.",
+    )
+    auto_hunt_correlation_window_sec: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        alias="HECATE_AUTO_HUNT_CORRELATION_WINDOW_SEC",
+        description="Maximum time delta in seconds between sequential attack stages on the same entity to establish a correlated attack sequence.",
+    )
     auto_hunt_pivots_enabled: bool = Field(
         default=True,
         alias="HECATE_AUTO_HUNT_PIVOTS_ENABLED",

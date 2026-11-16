@@ -213,17 +213,32 @@ class HuntExecutionScheduler:
                 )
                 continue
 
-            # Pick the primary query file (or first available)
-            q_file = q_files[0]
-            query_text = q_file.read_text(encoding="utf-8").strip()
+            from hecate_runner.execution.attack_sequence import (
+                build_composite_query_preview,
+                sort_and_group_queries,
+            )
+
+            # Sort and group query files across attack progression stages
+            stage_queries = sort_and_group_queries(q_files)
+            primary_file = stage_queries[0]["query_file"] if stage_queries else q_files[0].name
+            primary_text = stage_queries[0]["query_text"] if stage_queries else q_files[0].read_text(encoding="utf-8").strip()
+
+            is_composite = getattr(self.settings, "auto_hunt_composite_sweeps", True) and len(stage_queries) > 1
+            query_file_label = f"composite ({len(stage_queries)} stages)" if is_composite else primary_file
+            display_text = build_composite_query_preview(stage_queries) if is_composite else primary_text
 
             sweep = self.store.stage_sweep(
                 hunt_id=h_id,
                 target_siem=self.provider.name,
-                query_file=q_file.name,
-                query_text=query_text,
+                query_file=query_file_label,
+                query_text=display_text,
                 time_range_days=lookback,
-                justification=f"Scheduled sweep against {self.provider.name}",
+                justification=(
+                    f"Scheduled composite attack sequence sweep against {self.provider.name}"
+                    if is_composite
+                    else f"Scheduled sweep against {self.provider.name}"
+                ),
+                composite_queries=stage_queries if is_composite else [],
             )
             staged.append(sweep)
             log.info("Staged sweep %s for hunt %s", sweep.sweep_id, h_id)
@@ -277,17 +292,25 @@ class HuntExecutionScheduler:
         window_start = (now_dt - timedelta(days=staged.time_range_days)).isoformat()
         window_end = now_dt.isoformat()
 
-        proposed = ProposedQuery(
-            hunt_id=staged.hunt_id,
-            data_source=staged.target_siem,
-            query_text=staged.query_text,
-            time_range_days=staged.time_range_days,
-            limit=self.settings.max_query_limit,
-            justification=staged.justification,
-        )
-
-        # Execute via COUNT-FIRST Safe Execution Gate
-        result = self.gate.execute_safely(proposed, force_raw=force_raw)
+        # Execute via COUNT-FIRST Safe Execution Gate (composite sequence or single query)
+        if staged.composite_queries and len(staged.composite_queries) > 1:
+            result = self.gate.execute_composite_sweep(
+                hunt_id=staged.hunt_id,
+                target=staged.target_siem,
+                composite_queries=staged.composite_queries,
+                time_range_days=staged.time_range_days,
+                force_raw=force_raw,
+            )
+        else:
+            proposed = ProposedQuery(
+                hunt_id=staged.hunt_id,
+                data_source=staged.target_siem,
+                query_text=staged.query_text,
+                time_range_days=staged.time_range_days,
+                limit=self.settings.max_query_limit,
+                justification=staged.justification,
+            )
+            result = self.gate.execute_safely(proposed, force_raw=force_raw)
 
         # Update watermark in SQLite
         self.store.update_watermark(

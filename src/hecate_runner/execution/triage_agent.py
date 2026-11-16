@@ -233,6 +233,42 @@ class FindingTriageAgent:
 
         total_ev = len(events)
 
+        # 0. Multi-stage attack sequence correlation check across temporal windows
+        from hecate_runner.execution.attack_sequence import (
+            correlate_events_into_sequences,
+            format_sequence_timeline,
+        )
+
+        max_window_sec = getattr(self.settings, "auto_hunt_correlation_window_sec", 3600)
+        sequences = correlate_events_into_sequences(events, max_window_sec=max_window_sec)
+        confirmed_seq = next((s for s in sequences if s.is_confirmed_sequence), None)
+
+        if confirmed_seq is not None:
+            stage_cnt = confirmed_seq.distinct_stages_count
+            conf = confirmed_seq.confidence_boost or (0.95 if stage_cnt >= 3 else 0.88)
+            timeline_str = format_sequence_timeline(confirmed_seq)
+            return FindingTriageReport(
+                hunt_id=hunt_id,
+                sweep_id=sweep_id,
+                target_siem=target_siem,
+                verdict="true_positive",
+                confidence=conf,
+                summary=(
+                    f"Confirmed multi-stage attack sequence on {confirmed_seq.entity_type} '{confirmed_seq.entity_value}': "
+                    f"{stage_cnt} distinct kill-chain stages observed within {confirmed_seq.total_span_seconds:.0f}s."
+                ),
+                rationale=(
+                    f"Correlated attack progression verified across {stage_cnt} stages:\n{timeline_str}\n\n"
+                    f"Telemetry confirms coherent adversary tradecraft aligned with hypothesis: '{hypothesis[:120]}'."
+                ),
+                technique_matches=sorted(matched_techniques),
+                extracted_entities=entities,
+                recommended_action="escalate_to_soc",
+                event_count=total_ev,
+                reviewed_event_count=total_ev,
+                assessment_source="correlated_attack_sequence",
+            )
+
         # A same-event server/command association is a lead, not proof of exploit
         # success or initial access. Never combine unrelated events to assert it.
         if server_command_hits > 0:

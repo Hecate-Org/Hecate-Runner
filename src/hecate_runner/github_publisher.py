@@ -75,11 +75,20 @@ def _relative_file(workspace: Path, candidate: Path, *, allowed_root: str) -> tu
     root = (workspace_root / allowed_root).resolve()
     if not root.is_relative_to(workspace_root):
         raise PublisherError(f"Refusing to publish from a linked {allowed_root}/ directory")
-    resolved = candidate.resolve(strict=True)
-    if not resolved.is_relative_to(root) or candidate.is_symlink() or not resolved.is_file():
-        raise PublisherError(f"Refusing to publish an artifact outside {allowed_root}/")
-    relative = resolved.relative_to(workspace.resolve()).as_posix()
-    data = resolved.read_bytes()
+    try:
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(root) or candidate.is_symlink() or not resolved.is_file():
+            raise PublisherError(f"Refusing to publish an artifact outside {allowed_root}/")
+        relative = resolved.relative_to(workspace.resolve()).as_posix()
+        data = resolved.read_bytes()
+    except PublisherError:
+        raise
+    except OSError as exc:
+        # Isolation/group mode often surfaces as EACCES — keep it a PublisherError
+        # so operators get a clear outbox failure instead of a raw stack trace.
+        raise PublisherError(
+            f"Could not read artifact (permission or IO error): {candidate}"
+        ) from exc
     if len(data) > _MAX_FILE_BYTES or b"\x00" in data:
         raise PublisherError(f"Artifact is too large or not text: {relative}")
     try:
@@ -87,6 +96,30 @@ def _relative_file(workspace: Path, candidate: Path, *, allowed_root: str) -> tu
     except UnicodeDecodeError as exc:
         raise PublisherError(f"Artifact is not UTF-8 text: {relative}") from exc
     return relative, content
+
+
+# Correlator always prefixes with a horizontal rule, but older/manual copies may not.
+_INCREMENTAL_UPDATE_RE = re.compile(
+    r"(?:\n---)?\n+## Incremental Threat Intel Update\b.*?(?=\n---\n|\n## Incremental Threat Intel Update\b|\Z)",
+    re.DOTALL,
+)
+
+
+def public_hunt_text_for_promotion(hunt_text: str) -> str:
+    """Strip living-dossier IOC appendices so publish digests track behavioral content.
+
+    Correlator appends campaign IOC tables and ``last_enriched_at`` to the private
+    hunt; those must not churn public review or ship as the publish surface.
+    """
+    text = hunt_text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?m)^last_enriched_at:\s*.*\n", "", text)
+    # Repeat until stable so adjacent blocks and rule separators are fully removed.
+    prev = None
+    while prev != text:
+        prev = text
+        text = _INCREMENTAL_UPDATE_RE.sub("\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.rstrip() + ("\n" if text.strip() else "")
 
 
 def snapshot_hunt_artifacts(settings: Settings, hunt_id: str) -> tuple[dict[str, str], str]:
@@ -103,7 +136,8 @@ def snapshot_hunt_artifacts(settings: Settings, hunt_id: str) -> tuple[dict[str,
     hunt_path, hunt_text = _relative_file(workspace, matches[0], allowed_root="hunts")
     if not re.fullmatch(r"hunts/\d{4}/Q[1-4]/" + re.escape(hunt_id) + r"\.md", hunt_path):
         raise PublisherError(f"Unexpected hunt path: {hunt_path}")
-    files[hunt_path] = hunt_text
+    # Digest/publish surface excludes correlator IOC appendices.
+    files[hunt_path] = public_hunt_text_for_promotion(hunt_text)
 
     facts = parse_hunt_file(hunt_text)
     if facts.hunt_id != hunt_id:
@@ -283,6 +317,7 @@ class PromotionOutbox:
         now = datetime.now(UTC).isoformat()
         branch = f"hecate/promotion/{hunt_id.lower()}-{digest[:12]}"
         payload = json.dumps(files, sort_keys=True, separators=(",", ":"))
+        status = "queued" if reviewed else "awaiting_review"
         with self._connect() as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO promotions
@@ -292,18 +327,41 @@ class PromotionOutbox:
                     hunt_id,
                     digest,
                     payload,
-                    "queued" if reviewed else "awaiting_review",
+                    status,
                     branch,
                     now,
                     now,
                 ),
             )
             if reviewed:
+                # Revive review/retry tips; never interrupt an in-flight publish.
                 connection.execute(
-                    "UPDATE promotions SET status='queued', updated_at=? "
-                    "WHERE hunt_id=? AND digest=? AND status='awaiting_review'",
+                    "UPDATE promotions SET status='queued', updated_at=?, last_error=NULL "
+                    "WHERE hunt_id=? AND digest=? AND status IN "
+                    "('awaiting_review','superseded','retry')",
                     (now, hunt_id, digest),
                 )
+            else:
+                # Content can oscillate back to a previously superseded digest.
+                connection.execute(
+                    "UPDATE promotions SET status='awaiting_review', updated_at=?, last_error=NULL "
+                    "WHERE hunt_id=? AND digest=? AND status='superseded'",
+                    (now, hunt_id, digest),
+                )
+            # Living dossiers: only the tip digest stays reviewable / queued.
+            # Older awaiting_review rows for the same hunt are superseded in DB
+            # (not merely hidden by latest_awaiting_review). Never touch
+            # queued/retry/publishing/published peers.
+            connection.execute(
+                "UPDATE promotions SET status='superseded', updated_at=?, "
+                "last_error=? WHERE hunt_id=? AND status='awaiting_review' AND digest!=?",
+                (
+                    now,
+                    f"Superseded by digest {digest[:12]}",
+                    hunt_id,
+                    digest,
+                ),
+            )
             row = connection.execute(
                 "SELECT status FROM promotions WHERE hunt_id=? AND digest=?", (hunt_id, digest)
             ).fetchone()
@@ -359,15 +417,30 @@ class PromotionOutbox:
             )
 
     def await_review(self, row_id: int) -> None:
+        now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
+            row = connection.execute(
+                "SELECT hunt_id, digest FROM promotions WHERE id=?", (row_id,)
+            ).fetchone()
             connection.execute(
                 "UPDATE promotions SET status='awaiting_review', last_error=?, updated_at=? WHERE id=?",
                 (
                     "Public privacy and redistribution review required",
-                    datetime.now(UTC).isoformat(),
+                    now,
                     row_id,
                 ),
             )
+            if row is not None:
+                connection.execute(
+                    "UPDATE promotions SET status='superseded', updated_at=?, last_error=? "
+                    "WHERE hunt_id=? AND status='awaiting_review' AND digest!=?",
+                    (
+                        now,
+                        f"Superseded by digest {str(row['digest'])[:12]}",
+                        row["hunt_id"],
+                        row["digest"],
+                    ),
+                )
 
     def summary(self) -> list[sqlite3.Row]:
         with self._connect() as connection:
@@ -375,6 +448,86 @@ class PromotionOutbox:
                 """SELECT hunt_id,digest,status,attempts,branch,pr_number,pr_url,last_error
                    FROM promotions ORDER BY id DESC LIMIT 50"""
             ).fetchall()
+
+    def compact_stale_awaiting_review(self) -> int:
+        """DB-supersede non-tip ``awaiting_review`` rows (heals pre-hygiene outboxes)."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            # Cheap existence check — after the first heal this is a no-op hot path.
+            stale = connection.execute(
+                """SELECT 1 FROM promotions p
+                   WHERE p.status = 'awaiting_review'
+                     AND p.id NOT IN (
+                       SELECT max_id FROM (
+                         SELECT MAX(id) AS max_id FROM promotions
+                         WHERE status = 'awaiting_review' GROUP BY hunt_id
+                       )
+                     )
+                   LIMIT 1"""
+            ).fetchone()
+            if stale is None:
+                return 0
+            cur = connection.execute(
+                """UPDATE promotions
+                   SET status='superseded', updated_at=?,
+                       last_error='Superseded by newer awaiting_review tip'
+                   WHERE status = 'awaiting_review'
+                     AND id NOT IN (
+                       SELECT max_id FROM (
+                         SELECT MAX(id) AS max_id FROM promotions
+                         WHERE status = 'awaiting_review' GROUP BY hunt_id
+                       )
+                     )""",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+
+    def latest_awaiting_review(self) -> list[dict[str, Any]]:
+        """One row per hunt: newest ``awaiting_review`` digest (older ones are noise)."""
+        self.compact_stale_awaiting_review()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT p.id, p.hunt_id, p.digest, p.updated_at, p.created_at, p.last_error,
+                          (SELECT COUNT(*) FROM promotions o
+                           WHERE o.hunt_id = p.hunt_id AND o.status = 'awaiting_review') AS awaiting_count
+                   FROM promotions p
+                   INNER JOIN (
+                     SELECT hunt_id, MAX(id) AS max_id FROM promotions
+                     WHERE status = 'awaiting_review' GROUP BY hunt_id
+                   ) latest ON p.id = latest.max_id
+                   ORDER BY p.hunt_id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def last_published_snapshot(self, hunt_id: str) -> dict[str, Any] | None:
+        """Most recent published/merged promotion for a hunt (payload may be cleared)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT id, hunt_id, digest, payload, status, updated_at, pr_url, pr_number
+                   FROM promotions
+                   WHERE hunt_id = ? AND status IN ('published', 'merged')
+                   ORDER BY id DESC LIMIT 1""",
+                (hunt_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def awaiting_snapshot(self, hunt_id: str, digest: str | None = None) -> dict[str, Any] | None:
+        """Load an awaiting_review row (latest for hunt when digest omitted)."""
+        with self._connect() as connection:
+            if digest:
+                row = connection.execute(
+                    """SELECT id, hunt_id, digest, payload, status, updated_at
+                       FROM promotions WHERE hunt_id = ? AND digest = ? AND status = 'awaiting_review'""",
+                    (hunt_id, digest),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """SELECT id, hunt_id, digest, payload, status, updated_at
+                       FROM promotions WHERE hunt_id = ? AND status = 'awaiting_review'
+                       ORDER BY id DESC LIMIT 1""",
+                    (hunt_id,),
+                ).fetchone()
+        return dict(row) if row else None
 
     def has_due(self) -> bool:
         with self._connect() as connection:
@@ -745,6 +898,60 @@ def enqueue_hunt(settings: Settings, hunt_id: str) -> str:
         except PublicReviewRequiredError:
             reviewed = False
     return outbox_for(settings).enqueue(hunt_id, digest, files, reviewed=reviewed)
+
+
+def diff_release_snapshots(
+    settings: Settings, hunt_id: str, *, digest: str | None = None
+) -> dict[str, Any]:
+    """Compare the latest (or specified) awaiting_review bundle to the last published one."""
+    outbox = outbox_for(settings)
+    pending = outbox.awaiting_snapshot(hunt_id, digest)
+    if pending is None:
+        return {
+            "ok": False,
+            "hunt_id": hunt_id,
+            "error": f"No awaiting_review snapshot for {hunt_id}",
+        }
+    try:
+        pending_files = json.loads(pending.get("payload") or "{}")
+    except json.JSONDecodeError:
+        pending_files = {}
+    if not isinstance(pending_files, dict):
+        pending_files = {}
+
+    published = outbox.last_published_snapshot(hunt_id)
+    published_files: dict[str, str] = {}
+    published_digest = ""
+    if published:
+        published_digest = str(published.get("digest") or "")
+        try:
+            loaded = json.loads(published.get("payload") or "{}")
+            if isinstance(loaded, dict) and loaded:
+                published_files = {str(k): str(v) for k, v in loaded.items()}
+        except json.JSONDecodeError:
+            published_files = {}
+
+    pending_paths = set(pending_files)
+    published_paths = set(published_files)
+    added = sorted(pending_paths - published_paths)
+    removed = sorted(published_paths - pending_paths)
+    changed = sorted(
+        p
+        for p in (pending_paths & published_paths)
+        if pending_files.get(p) != published_files.get(p)
+    )
+    return {
+        "ok": True,
+        "hunt_id": hunt_id,
+        "pending_digest": pending.get("digest"),
+        "published_digest": published_digest or None,
+        "baseline": "last_published" if published_files else "empty",
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "pending_file_count": len(pending_files),
+        "published_file_count": len(published_files),
+    }
 
 
 def sync_outbox(settings: Settings, *, max_items: int = 20) -> list[PublishResult]:

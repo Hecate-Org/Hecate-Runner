@@ -59,6 +59,7 @@ class StagedSweep:
     rejection_reason: str | None = None
     execution_outcome: str | None = None
     matched_count: int = 0
+    composite_queries: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,7 +151,7 @@ class WatermarkStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_findings_sweep_id ON hunt_execution_findings(sweep_id)"
             )
-            # Schema migrations for Phase 3 Pivot and Tuning attributes
+            # Schema migrations for Phase 3 Pivot and Tuning attributes & Composite Sweeps
             for col, col_def in (
                 ("pivots_json", "TEXT DEFAULT '[]'"),
                 ("tuning_status", "TEXT DEFAULT 'none'"),
@@ -159,6 +160,12 @@ class WatermarkStore:
             ):
                 with contextlib.suppress(sqlite3.OperationalError):
                     conn.execute(f"ALTER TABLE hunt_execution_findings ADD COLUMN {col} {col_def}")
+
+            for col, col_def in (
+                ("composite_queries_json", "TEXT DEFAULT '[]'"),
+            ):
+                with contextlib.suppress(sqlite3.OperationalError):
+                    conn.execute(f"ALTER TABLE hunt_staged_sweeps ADD COLUMN {col} {col_def}")
 
     def get_watermark(self, hunt_id: str) -> HuntExecutionWatermark | None:
         with self._connect() as conn:
@@ -274,10 +281,12 @@ class WatermarkStore:
         query_text: str,
         time_range_days: int = 1,
         justification: str = "",
+        composite_queries: list[dict[str, Any]] | None = None,
     ) -> StagedSweep:
         clean_hunt_id = hunt_id.upper()
         sweep_id = f"SWEEP-{clean_hunt_id}-{uuid.uuid4().hex[:6]}"
         now_iso = datetime.now(UTC).isoformat()
+        comp_queries = composite_queries or []
 
         sweep = StagedSweep(
             sweep_id=sweep_id,
@@ -289,6 +298,7 @@ class WatermarkStore:
             justification=justification or f"Automated scheduled sweep for {clean_hunt_id}",
             staged_at=now_iso,
             status="pending_approval",
+            composite_queries=comp_queries,
         )
 
         with self._connect() as conn:
@@ -296,8 +306,8 @@ class WatermarkStore:
                 """
                 INSERT INTO hunt_staged_sweeps (
                     sweep_id, hunt_id, target_siem, query_file, query_text,
-                    time_range_days, justification, staged_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    time_range_days, justification, staged_at, status, composite_queries_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sweep.sweep_id,
@@ -309,9 +319,33 @@ class WatermarkStore:
                     sweep.justification,
                     sweep.staged_at,
                     sweep.status,
+                    json.dumps(comp_queries),
                 ),
             )
         return sweep
+
+    def _row_to_staged_sweep(self, row: sqlite3.Row) -> StagedSweep:
+        comp_queries: list[dict[str, Any]] = []
+        if "composite_queries_json" in row.keys() and row["composite_queries_json"]:
+            with contextlib.suppress(Exception):
+                comp_queries = json.loads(row["composite_queries_json"])
+        return StagedSweep(
+            sweep_id=row["sweep_id"],
+            hunt_id=row["hunt_id"],
+            target_siem=row["target_siem"],
+            query_file=row["query_file"],
+            query_text=row["query_text"],
+            time_range_days=row["time_range_days"],
+            justification=row["justification"],
+            staged_at=row["staged_at"],
+            status=row["status"],
+            approved_by=row["approved_by"],
+            approved_at=row["approved_at"],
+            rejection_reason=row["rejection_reason"],
+            execution_outcome=row["execution_outcome"],
+            matched_count=row["matched_count"],
+            composite_queries=comp_queries,
+        )
 
     def get_staged_sweep(self, sweep_id_or_hunt_id: str) -> StagedSweep | None:
         key = sweep_id_or_hunt_id.strip()
@@ -336,22 +370,7 @@ class WatermarkStore:
             row = cursor.fetchone()
             if not row:
                 return None
-            return StagedSweep(
-                sweep_id=row["sweep_id"],
-                hunt_id=row["hunt_id"],
-                target_siem=row["target_siem"],
-                query_file=row["query_file"],
-                query_text=row["query_text"],
-                time_range_days=row["time_range_days"],
-                justification=row["justification"],
-                staged_at=row["staged_at"],
-                status=row["status"],
-                approved_by=row["approved_by"],
-                approved_at=row["approved_at"],
-                rejection_reason=row["rejection_reason"],
-                execution_outcome=row["execution_outcome"],
-                matched_count=row["matched_count"],
-            )
+            return self._row_to_staged_sweep(row)
 
     def list_staged_sweeps(self, status: str | None = "pending_approval") -> list[StagedSweep]:
         with self._connect() as conn:
@@ -363,25 +382,7 @@ class WatermarkStore:
                 )
             else:
                 cursor = conn.execute("SELECT * FROM hunt_staged_sweeps ORDER BY staged_at DESC")
-            return [
-                StagedSweep(
-                    sweep_id=row["sweep_id"],
-                    hunt_id=row["hunt_id"],
-                    target_siem=row["target_siem"],
-                    query_file=row["query_file"],
-                    query_text=row["query_text"],
-                    time_range_days=row["time_range_days"],
-                    justification=row["justification"],
-                    staged_at=row["staged_at"],
-                    status=row["status"],
-                    approved_by=row["approved_by"],
-                    approved_at=row["approved_at"],
-                    rejection_reason=row["rejection_reason"],
-                    execution_outcome=row["execution_outcome"],
-                    matched_count=row["matched_count"],
-                )
-                for row in cursor.fetchall()
-            ]
+            return [self._row_to_staged_sweep(row) for row in cursor.fetchall()]
 
     def mark_sweep_status(
         self,
