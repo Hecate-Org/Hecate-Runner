@@ -24,6 +24,13 @@ def test_invalid_hunt_ids_are_rejected(value, tmp_path):
         RuleTuner(tmp_path).auto_tune_from_miss(value, [])
 
 
+@pytest.mark.parametrize("value", ["H-TEST", "H-DETONATE", "HNT-LAB_01", "hnt-abc"])
+def test_alphanumeric_hunt_ids_are_accepted(value, tmp_path):
+    path = wp.query_directory(tmp_path, value)
+    assert path.name == wp.normalize_hunt_id(value)
+    assert path.parent.name == "queries"
+
+
 @pytest.mark.parametrize(
     "operation",
     [

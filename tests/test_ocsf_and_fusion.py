@@ -450,3 +450,137 @@ def test_triage_elevation_with_fused_lineage() -> None:
     assert any("curl" in p for p in fused_report.extracted_entities["processes"])
     assert any("bash" in p for p in fused_report.extracted_entities["parent_processes"])
     assert "profitnow.io" in fused_report.extracted_entities["domains"]
+
+
+def test_ecs_nested_source_destination_ip_extraction() -> None:
+    raw = {
+        "@timestamp": "2026-11-15T22:00:00Z",
+        "host": {"name": "web-01"},
+        "source": {"ip": "10.0.0.1", "port": 5555},
+        "destination": {"ip": "198.51.100.10", "port": 443},
+        "process": {"name": "curl", "command_line": "curl https://x"},
+    }
+    event = normalize_event(raw, target_siem="elastic", hunt_id="H-0001")
+    assert event.host == "web-01"
+    assert event.src_ip == "10.0.0.1"
+    assert event.dst_ip == "198.51.100.10"
+    assert event.src_port == 5555
+    assert event.dst_port == 443
+    assert event.process_name == "curl"
+
+
+def test_case_insensitive_nested_ocsf_paths() -> None:
+    raw = {
+        "Device": {"Hostname": "CASEHOST"},
+        "Actor": {"User": {"Name": "alice"}},
+        "Process": {"Name": "whoami.exe", "Cmd_Line": "whoami"},
+        "Dst_Endpoint": {"Ip": "9.9.9.9"},
+    }
+    event = normalize_event(raw, target_siem="splunk", hunt_id="H-0001")
+    assert event.host == "CASEHOST"
+    assert event.user == "alice"
+    assert event.process_name == "whoami.exe"
+    assert event.command_line == "whoami"
+    assert event.dst_ip == "9.9.9.9"
+
+
+def test_process_event_with_destination_hostname_not_dns() -> None:
+    raw = {
+        "host": "h1",
+        "Image": r"C:\Windows\curl.exe",
+        "CommandLine": "curl evil.com",
+        "DestinationHostname": "evil.com",
+        "EventCode": "1",
+    }
+    class_uid, class_name, _, _ = classify_ocsf_event(raw)
+    assert class_uid == int(OCSFClassUID.PROCESS_ACTIVITY)
+    assert class_name == "Process Activity"
+
+
+def test_epoch_time_normalizes_for_ocsf_export() -> None:
+    event = normalize_event(
+        {"_time": "1700000000", "host": "h1", "dest_ip": "1.2.3.4"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert "2023" in event.timestamp or "2024" in event.timestamp
+    ocsf = event.to_ocsf_dict()
+    assert ocsf["time"] == 1700000000000
+
+
+def test_crowdstrike_network_query_includes_domain() -> None:
+    query = build_network_connection_query(
+        "crowdstrike",
+        host="HOST1",
+        domain_val="evil.example",
+    )
+    assert "evil.example" in query
+    assert "DomainName=" in query or "HostName=" in query
+
+
+def test_list_and_wrapper_nested_field_extraction() -> None:
+    event = normalize_event(
+        {"process": {"name": ["curl", "unused"]}, "host": "h1", "EventCode": "1"},
+        target_siem="elastic",
+        hunt_id="H-0001",
+    )
+    assert event.process_name == "curl"
+
+    wrapped = normalize_event(
+        {"process": {"name": {"value": "nested-name"}}, "host": "h1", "EventCode": "1"},
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert wrapped.process_name == "nested-name"
+
+
+def test_floatish_ports_and_pids_normalize() -> None:
+    event = normalize_event(
+        {
+            "host": "h1",
+            "dest_ip": "1.1.1.1",
+            "dest_port": "443.0",
+            "ProcessId": "42.0",
+            "ParentProcessId": "7.0",
+            "Image": "curl",
+            "EventCode": "1",
+        },
+        target_siem="splunk",
+        hunt_id="H-0001",
+    )
+    assert event.dst_port == 443
+    assert event.pid == "42"
+    assert event.parent_pid == "7"
+    ocsf = event.to_ocsf_dict()
+    assert ocsf["process"]["pid"] == 42
+    assert ocsf["process"]["parent_process"]["pid"] == 7
+
+
+def test_ecs_dns_question_name_classifies_dns() -> None:
+    event = normalize_event(
+        {"dns": {"question": {"name": "evil.com"}}, "host": {"name": "h1"}},
+        target_siem="elastic",
+        hunt_id="H-0001",
+    )
+    assert event.domain == "evil.com"
+    assert event.class_uid == int(OCSFClassUID.DNS_ACTIVITY)
+
+
+@pytest.mark.parametrize("dialect", ["elastic", "chronicle", "crowdstrike", "sql"])
+def test_fusion_queries_include_time_window(dialect: str) -> None:
+    earliest, latest = "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"
+    net = build_network_connection_query(
+        dialect,
+        host="host1",
+        ip="1.1.1.1",
+        earliest=earliest,
+        latest=latest,
+    )
+    proc = build_process_creation_query(
+        dialect,
+        host="host1",
+        earliest=earliest,
+        latest=latest,
+    )
+    assert "2026" in net
+    assert "2026" in proc

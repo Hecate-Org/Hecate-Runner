@@ -7,6 +7,7 @@ endpoint-to-network lineage fusion.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -133,6 +134,7 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "source_ip",
         "SourceIp",
         "src_endpoint.ip",
+        "source.ip",
         "network.source.ip",
         "c-ip",
         "SourceAddress",
@@ -146,6 +148,7 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "dest",
         "DestinationIp",
         "dst_endpoint.ip",
+        "destination.ip",
         "network.destination.ip",
         "remote_ip",
         "RemoteIP",
@@ -160,6 +163,7 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "source_port",
         "SourcePort",
         "src_endpoint.port",
+        "source.port",
         "network.source.port",
         "s_port",
     },
@@ -168,6 +172,7 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "dest_port",
         "DestinationPort",
         "dst_endpoint.port",
+        "destination.port",
         "network.destination.port",
         "d_port",
     },
@@ -215,6 +220,7 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "cs-host",
         "query_name",
         "dns.query.name",
+        "dns.question.name",
         "QueryName",
         "dst_endpoint.domain",
         "rdata",
@@ -230,15 +236,18 @@ def classify_ocsf_event(data: dict[str, Any], query_file: str = "") -> tuple[int
     event_code = str(data.get("EventCode") or data.get("EventID") or "")
     sourcetype = str(data.get("sourcetype") or "").lower()
     q_lower = query_file.lower()
+    proc_name = _extract_field(data, _FIELD_ALIASES["process"])
+    cmd_line = _extract_field(data, _FIELD_ALIASES["command_line"])
+    file_path = _extract_field(data, _FIELD_ALIASES["file_path"])
+    dst_ip = _extract_field(data, _FIELD_ALIASES["dst_ip"])
+    is_network_st = any(
+        k in sourcetype
+        for k in ("network", "traffic", "zeek", "suricata", "pan:traffic", "netflow")
+    )
 
-    # 1. DNS Activity check (Class 4003, Category 4)
-    if (
-        domain_val
-        or event_code == "22"
-        or "dns" in sourcetype
-        or "stream:dns" in sourcetype
-        or "dns" in q_lower
-    ):
+    # Explicit DNS signals only. A DestinationHostname on process/network rows
+    # must not override EventCode 1/3/4688 classification.
+    if event_code == "22" or "dns" in sourcetype or "stream:dns" in sourcetype or "dns" in q_lower:
         return (
             int(OCSFClassUID.DNS_ACTIVITY),
             "DNS Activity",
@@ -246,7 +255,6 @@ def classify_ocsf_event(data: dict[str, Any], query_file: str = "") -> tuple[int
             "Network Activity",
         )
 
-    # 2. Authentication check (Class 3001, Category 3)
     if event_code in ("4624", "4625") or "auth" in sourcetype or "login" in q_lower:
         return (
             int(OCSFClassUID.AUTHENTICATION),
@@ -255,9 +263,20 @@ def classify_ocsf_event(data: dict[str, Any], query_file: str = "") -> tuple[int
             "Identity & Access Management",
         )
 
-    # 3. File Activity check (Class 1001, Category 1)
-    file_path = _extract_field(data, _FIELD_ALIASES["file_path"])
-    proc_name = _extract_field(data, _FIELD_ALIASES["process"])
+    # Process creation before domain-only DNS so Sysmon 1/4688 + DestinationHostname
+    # stays Process Activity.
+    if event_code in ("1", "4688") or (
+        (cmd_line or proc_name or "process" in sourcetype or "audit" in sourcetype)
+        and event_code not in ("3", "11", "2")
+        and not is_network_st
+    ):
+        return (
+            int(OCSFClassUID.PROCESS_ACTIVITY),
+            "Process Activity",
+            int(OCSFCategoryUID.SYSTEM_ACTIVITY),
+            "System Activity",
+        )
+
     if event_code in ("11", "2") or (file_path and not proc_name) or "file" in sourcetype:
         return (
             int(OCSFClassUID.FILE_ACTIVITY),
@@ -266,18 +285,12 @@ def classify_ocsf_event(data: dict[str, Any], query_file: str = "") -> tuple[int
             "System Activity",
         )
 
-    # 4. Network Activity check (Class 4001, Category 4)
-    dst_ip = _extract_field(data, _FIELD_ALIASES["dst_ip"])
-    is_network_st = any(
-        k in sourcetype
-        for k in ("network", "traffic", "zeek", "suricata", "pan:traffic", "netflow")
-    )
     if (
         event_code == "3"
         or is_network_st
         or "network" in q_lower
         or "egress" in q_lower
-        or (dst_ip and not _extract_field(data, _FIELD_ALIASES["command_line"]))
+        or (dst_ip and not cmd_line)
     ):
         return (
             int(OCSFClassUID.NETWORK_ACTIVITY),
@@ -286,15 +299,16 @@ def classify_ocsf_event(data: dict[str, Any], query_file: str = "") -> tuple[int
             "Network Activity",
         )
 
-    # 5. Process Activity check (Class 1007, Category 1)
-    cmd_line = _extract_field(data, _FIELD_ALIASES["command_line"])
-    if (
-        event_code in ("1", "4688")
-        or proc_name
-        or cmd_line
-        or "process" in sourcetype
-        or "audit" in sourcetype
-    ):
+    # Domain/query-only rows with no stronger process/network signal.
+    if domain_val:
+        return (
+            int(OCSFClassUID.DNS_ACTIVITY),
+            "DNS Activity",
+            int(OCSFCategoryUID.NETWORK_ACTIVITY),
+            "Network Activity",
+        )
+
+    if proc_name or cmd_line:
         return (
             int(OCSFClassUID.PROCESS_ACTIVITY),
             "Process Activity",
@@ -411,8 +425,14 @@ class NormalizedEvent:
         """Serialize event into standard OCSF v1.1.0 JSON-compatible dictionary."""
         epoch_millis = 0
         try:
-            dt = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
-            epoch_millis = int(dt.timestamp() * 1000)
+            raw_ts = str(self.timestamp or "").strip()
+            if re.fullmatch(r"\d+(\.\d+)?", raw_ts):
+                epoch_millis = int(float(raw_ts) * 1000)
+            else:
+                dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                epoch_millis = int(dt.timestamp() * 1000)
         except Exception:
             epoch_millis = int(datetime.now(UTC).timestamp() * 1000)
 
@@ -460,7 +480,7 @@ class NormalizedEvent:
             "process": {
                 "name": self.process_name,
                 "cmd_line": self.command_line,
-                "pid": int(self.pid) if self.pid.isdigit() else None,
+                "pid": _parse_whole_number(self.pid),
                 "file": {
                     "name": self.process_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
                     if self.process_name
@@ -471,7 +491,7 @@ class NormalizedEvent:
                 },
                 "parent_process": {
                     "name": self.parent_process,
-                    "pid": int(self.parent_pid) if self.parent_pid.isdigit() else None,
+                    "pid": _parse_whole_number(self.parent_pid),
                 },
             },
         }
@@ -507,43 +527,97 @@ class NormalizedEvent:
         return asdict(self)
 
 
+def _dict_get_ci(mapping: dict[str, Any], key: str) -> Any:
+    """Return ``mapping[key]`` with case-insensitive key fallback."""
+    if key in mapping:
+        return mapping[key]
+    key_l = key.lower()
+    for existing, value in mapping.items():
+        if isinstance(existing, str) and existing.lower() == key_l:
+            return value
+    return None
+
+
+def _dig_dotted_path(data: dict[str, Any], dotted: str) -> Any:
+    """Walk a dotted path with case-insensitive key matching at each level."""
+    curr: Any = data
+    for part in dotted.split("."):
+        if not isinstance(curr, dict):
+            return None
+        curr = _dict_get_ci(curr, part)
+        if curr is None:
+            return None
+    return curr
+
+
+def _first_scalar(value: Any) -> str:
+    """Return the first non-empty scalar from a value, list, or trivial object wrapper."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            found = _first_scalar(item)
+            if found:
+                return found
+        return ""
+    if isinstance(value, dict):
+        for subkey in ("name", "hostname", "value", "id", "ip"):
+            found = _first_scalar(_dict_get_ci(value, subkey))
+            if found:
+                return found
+        return ""
+    text = str(value).strip()
+    return text
+
+
 def _extract_field(data: dict[str, Any], aliases: set[str]) -> str:
     """Case-insensitive recursive lookup for candidate field names in a dictionary."""
     # 1. Exact or case-insensitive top-level match
-    lowered_data = {k.lower(): v for k, v in data.items() if v is not None}
+    lowered_data = {str(k).lower(): v for k, v in data.items() if v is not None}
     for alias in aliases:
         val = lowered_data.get(alias.lower())
         if val is not None:
-            if not isinstance(val, (dict, list)) and str(val).strip():
-                return str(val).strip()
-            if isinstance(val, list):
-                for item in val:
-                    if not isinstance(item, (dict, list)) and str(item).strip():
-                        return str(item).strip()
-            if isinstance(val, dict):
-                for subkey in ("name", "hostname", "value", "id", "ip"):
-                    if (
-                        subkey in val
-                        and not isinstance(val[subkey], (dict, list))
-                        and str(val[subkey]).strip()
-                    ):
-                        return str(val[subkey]).strip()
+            found = _first_scalar(val)
+            if found:
+                return found
 
-    # 2. Dot-delimited nested object lookup (e.g. process.name or host.name)
+    # 2. Dot-delimited nested object lookup (e.g. process.name or Device.Hostname)
     for alias in aliases:
-        if "." in alias:
-            parts = alias.split(".")
-            curr: Any = data
-            for part in parts:
-                if isinstance(curr, dict):
-                    curr = curr.get(part)
-                else:
-                    curr = None
-                    break
-            if curr is not None and not isinstance(curr, (dict, list)) and str(curr).strip():
-                return str(curr).strip()
+        if "." not in alias:
+            continue
+        found = _first_scalar(_dig_dotted_path(data, alias))
+        if found:
+            return found
 
     return ""
+
+
+def _parse_port(value: str) -> int | None:
+    """Parse a port from digits or whole-number floats like ``443.0``."""
+    parsed = _parse_whole_number(value)
+    return parsed if parsed is not None and 0 <= parsed <= 65535 else None
+
+
+def _parse_whole_number(value: Any) -> int | None:
+    """Parse an int from digits or whole-number floats like ``42.0``."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    try:
+        as_float = float(text)
+    except ValueError:
+        return None
+    if not as_float.is_integer():
+        return None
+    return int(as_float)
+
+
+def _normalize_id_str(value: str) -> str:
+    """Canonicalize process IDs so ``42.0`` becomes ``42`` for OCSF export."""
+    parsed = _parse_whole_number(value)
+    return str(parsed) if parsed is not None else str(value or "").strip()
 
 
 def normalize_event(
@@ -576,19 +650,21 @@ def normalize_event(
         or raw_dict.get("_time")
         or now_iso
     )
+    # Splunk-style epoch _time → ISO so OCSF export and correlation share one clock.
+    if re.fullmatch(r"\d+(\.\d+)?", ts.strip()):
+        with contextlib.suppress(OverflowError, OSError, ValueError):
+            ts = datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
 
     domain_val = _extract_field(raw_dict, _FIELD_ALIASES["domain"])
     src_ip_val = _extract_field(raw_dict, _FIELD_ALIASES["src_ip"])
     dst_ip_val = _extract_field(raw_dict, _FIELD_ALIASES["dst_ip"])
     ip_val = dst_ip_val or _extract_field(raw_dict, _FIELD_ALIASES["ip"]) or src_ip_val
 
-    src_port_raw = _extract_field(raw_dict, _FIELD_ALIASES["src_port"])
-    dst_port_raw = _extract_field(raw_dict, _FIELD_ALIASES["dst_port"])
-    src_port = int(src_port_raw) if src_port_raw.isdigit() else None
-    dst_port = int(dst_port_raw) if dst_port_raw.isdigit() else None
+    src_port = _parse_port(_extract_field(raw_dict, _FIELD_ALIASES["src_port"]))
+    dst_port = _parse_port(_extract_field(raw_dict, _FIELD_ALIASES["dst_port"]))
 
-    pid_val = _extract_field(raw_dict, _FIELD_ALIASES["pid"])
-    parent_pid_val = _extract_field(raw_dict, _FIELD_ALIASES["parent_pid"])
+    pid_val = _normalize_id_str(_extract_field(raw_dict, _FIELD_ALIASES["pid"]))
+    parent_pid_val = _normalize_id_str(_extract_field(raw_dict, _FIELD_ALIASES["parent_pid"]))
 
     q_file = str(raw_dict.get("_hecate_query_file") or "")
     class_uid, class_name, cat_uid, cat_name = classify_ocsf_event(raw_dict, query_file=q_file)
