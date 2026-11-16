@@ -13,7 +13,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.config import Settings
 
 console = Console()
@@ -658,6 +657,7 @@ def bas_verify_cmd(
 
     siem_latency_sec = res.detection_latency_sec
     siem_job_sid = res.search_job_id
+    siem_res = None
 
     # If SIEM verification requested and live Splunk configured, run search jobs validation
     if (
@@ -748,8 +748,8 @@ def bas_verify_cmd(
     console.print(table)
 
     tuning = getattr(res, "tuning_suggestion", None)
-    if not tuning and "siem_res" in locals() and hasattr(siem_res, "tuning_suggestion"):
-        tuning = siem_res.tuning_suggestion
+    if not tuning and "siem_res" in locals() and siem_res is not None:
+        tuning = getattr(siem_res, "tuning_suggestion", None)
 
     if tuning:
         console.print(
@@ -764,46 +764,36 @@ def bas_verify_cmd(
         )
 
     if write_back:
-        fm["bas_verified"] = confirms_technique(res.to_dict())
-        fm["bas_provider"] = res.provider
-        fm["bas_status"] = res.status.value
-        fm["bas_backend"] = res.backend
-        fm["bas_detection_triggered"] = res.rule_triggered
-        fm["bas_type"] = "synthesized_probe" if res.provider == "mock" else "live_detonation"
-        fm["bas_rules_evaluated"] = len(sigma_files)
-        fm["bas_rules_validated"] = len(sigma_files) if fm["bas_verified"] else 0
-        fm.pop("bas_verified_rules", None)
-        fm.pop("bas_detection_latency_sec", None)
-        fm.pop("bas_search_job_id", None)
-        if fm["bas_verified"]:
+        from hecate_runner.catalog_feedback import record_siem_verification_feedback
+
+        # Live SIEM verification already increments TP/miss via SiemAlertVerifier.
+        # Non-SIEM (mock / self-check) writeback still counts outcomes here.
+        used_live_siem = siem_res is not None
+        verified_rules: list[str] | None = None
+        if confirms_technique(res.to_dict()):
             if sigma_files:
-                fm["bas_verified_rules"] = [sigma_files[0].name]
+                verified_rules = [sigma_files[0].name]
             elif candidate_rule:
-                fm["bas_verified_rules"] = [Path(candidate_rule).name]
-        if siem_latency_sec is not None:
-            fm["bas_detection_latency_sec"] = round(siem_latency_sec, 3)
-        if siem_job_sid:
-            fm["bas_search_job_id"] = siem_job_sid
-        fm["bas_siem_alert_fired"] = res.siem_alert_fired
-        fm["bas_verification_scope"] = res.verification_scope
-        fm["bas_fidelity_scope"] = res.fidelity_scope
-        fm["bas_cleanup_success"] = det_result.cleanup_success
-        for key in (
-            "bas_alert_search_id",
-            "bas_alert_name",
-            "bas_alert_time_utc",
-            "bas_query_match_latency_sec",
-        ):
-            fm.pop(key, None)
-        if res.siem_alert_fired:
-            fm["bas_alert_search_id"] = res.alert_search_id
-            fm["bas_alert_name"] = res.alert_name
-            fm["bas_alert_time_utc"] = res.alert_time_utc
-        if res.query_match_latency_sec is not None:
-            fm["bas_query_match_latency_sec"] = round(res.query_match_latency_sec, 3)
-        new_fm = yaml.safe_dump(fm, sort_keys=False)
-        updated_content = f"---\n{new_fm}---\n" + fm_parts[2].lstrip()
-        atomic_write_text(hunt_file, updated_content)
+                verified_rules = [Path(candidate_rule).name]
+        record_siem_verification_feedback(
+            settings.hecate_workspace,
+            {
+                **res.to_dict(),
+                "hunt_id": hunt_id,
+                "bas_provider": res.provider,
+                "siem_backend": res.backend,
+                "detection_latency_sec": siem_latency_sec,
+                "search_job_id": siem_job_sid,
+            },
+            increment_outcomes=not used_live_siem,
+            extra_updates={
+                "bas_type": "synthesized_probe" if res.provider == "mock" else "live_detonation",
+                "bas_rules_evaluated": len(sigma_files),
+                "bas_rules_validated": len(sigma_files) if confirms_technique(res.to_dict()) else 0,
+                "bas_verified_rules": verified_rules,
+                "bas_cleanup_success": det_result.cleanup_success,
+            },
+        )
         console.print(
             f"[bold green]Updated hunt draft frontmatter in[/bold green] {hunt_file.name}"
         )
