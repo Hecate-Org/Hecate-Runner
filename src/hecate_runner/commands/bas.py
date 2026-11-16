@@ -1033,7 +1033,9 @@ def bas_synthesize_cmd(
                     rule_name=companion_name if companion_spl else None,
                 )
             proof_ok = bool(proof.get("ok"))
-            notes = "; ".join(str(n) for n in (proof.get("notes") or []))  # type: ignore[union-attr]
+            raw_notes = proof.get("notes")
+            notes_list = raw_notes if isinstance(raw_notes, list) else []
+            notes = "; ".join(str(n) for n in notes_list)
             console.print(
                 Panel(
                     (

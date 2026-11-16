@@ -62,7 +62,7 @@ class AttackStage(StrEnum):
 # Note: Specific technique behaviors (persistence, discovery, C2) are evaluated before
 # generic log sources (process_creation, file_event) so that commands like
 # process_creation__whoami_discovery are correctly categorized as DISCOVERY.
-_STAGE_PATTERNS: list[tuple[re.Pattern, AttackStage]] = [
+_STAGE_PATTERNS: list[tuple[re.Pattern[str], AttackStage]] = [
     # Specific Behavioral Techniques
     (
         re.compile(
