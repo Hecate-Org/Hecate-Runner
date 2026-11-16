@@ -359,6 +359,29 @@ class HuntExecutionScheduler:
                     techniques = list(fm.get("techniques") or [])
 
                 normalized = normalize_events(result.events, staged.target_siem, staged.hunt_id)
+
+                # Automatic endpoint-to-network fusion if enabled
+                if getattr(self.settings, "auto_hunt_fusion_enabled", True):
+                    try:
+                        from hecate_runner.execution.fusion import EndpointNetworkFusionEngine
+
+                        fusion_engine = EndpointNetworkFusionEngine(
+                            gate=self.gate,
+                            settings=self.settings,
+                        )
+                        normalized = fusion_engine.fuse_events(
+                            events=normalized,
+                            target_siem=staged.target_siem,
+                            hunt_id=staged.hunt_id,
+                            time_range_days=staged.time_range_days,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Endpoint-to-network fusion skipped for sweep %s (%s)",
+                            staged.sweep_id,
+                            exc,
+                        )
+
                 agent = FindingTriageAgent(settings=self.settings)
                 triage_report = agent.triage(
                     hunt_id=staged.hunt_id,

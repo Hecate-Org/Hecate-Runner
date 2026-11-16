@@ -29,6 +29,16 @@ def address(value: str) -> str:
     return str(ipaddress.ip_address(value))
 
 
+def domain(value: str) -> str:
+    if not value:
+        return ""
+    entity(value)
+    clean = value.strip().lower().rstrip(".")
+    if len(clean) > 253 or not re.fullmatch(r"[a-z0-9_.-]+", clean):
+        raise ValueError("Invalid pivot domain")
+    return clean
+
+
 def basename(value: str) -> str:
     result = entity(value).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if value and not result:
