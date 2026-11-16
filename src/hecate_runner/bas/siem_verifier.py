@@ -718,8 +718,11 @@ class SiemAlertVerifier:
         Idempotent for already-normalized lab queries, and preserves pipeline
         forms (``index=X | tstats ...``) instead of stuffing them under
         ``| spath | search``. Leading ``index=`` / ``INDEX=`` is matched
-        case-insensitively.
+        case-insensitively. Inner refs (``where index=main``, etc.) are pinned
+        to the lab index as well.
         """
+        import re
+
         clean = raw_query.strip()
         if clean.lower().startswith("search "):
             clean = clean[7:].strip()
@@ -727,23 +730,27 @@ class SiemAlertVerifier:
         idx = (lab_index or "").strip() or synthetic_splunk_index(self.workspace)
 
         if clean.lower().startswith("index="):
-            first, _, rest = clean.partition(" ")
-            current = first.split("=", 1)[1]
+            _, _, rest = clean.partition(" ")
             rest = rest.strip()
-            if current == idx:
-                # Re-emit canonical lowercase index= for stable idempotency.
-                return f"index={idx} {rest}".rstrip() if rest else f"index={idx}"
             if rest.startswith("|"):
-                return f"index={idx} {rest}"
-            if rest:
-                return f"index={idx} | spath | search {rest}"
-            return f"index={idx}"
+                built = f"index={idx} {rest}"
+            elif rest:
+                built = f"index={idx} | spath | search {rest}"
+            else:
+                built = f"index={idx}"
+        elif clean.startswith("|"):
+            built = f"index={idx} {clean}"
+        elif not clean:
+            built = f"index={idx}"
+        else:
+            built = f"index={idx} | spath | search {clean}"
 
-        if clean.startswith("|"):
-            return f"index={idx} {clean}"
-        if not clean:
-            return f"index={idx}"
-        return f"index={idx} | spath | search {clean}"
+        # Pin remaining index= tokens (tstats where index=…, mid-query INDEX=…).
+        return re.sub(
+            r'(?i)\bindex\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s|)]+)',
+            f"index={idx}",
+            built,
+        )
 
     def _persist_result(self, res: SiemAlertVerificationResult) -> None:
         """Persist verification provenance into SQLite drift history and durable BAS runs."""
