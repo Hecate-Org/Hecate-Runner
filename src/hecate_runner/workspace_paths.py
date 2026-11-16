@@ -22,6 +22,29 @@ def normalize_hunt_id(value: str) -> str:
     return value
 
 
+def is_valid_hunt_id(value: str) -> bool:
+    try:
+        normalize_hunt_id(value)
+        return True
+    except ValueError:
+        return False
+
+
+def list_query_hunt_ids(queries_root: Path) -> list[str]:
+    """Return sorted canonical hunt IDs for directories under ``queries/`` (H- and HNT-)."""
+    if not queries_root.is_dir():
+        return []
+    ids: set[str] = set()
+    for entry in queries_root.iterdir():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        try:
+            ids.add(normalize_hunt_id(entry.name))
+        except ValueError:
+            continue
+    return sorted(ids)
+
+
 def workspace_path(workspace: Path, *parts: str) -> Path:
     root = workspace.resolve()
     relative = PurePosixPath(*parts)
@@ -42,7 +65,23 @@ def workspace_path(workspace: Path, *parts: str) -> Path:
 
 
 def query_directory(workspace: Path, hunt_id: str) -> Path:
-    return workspace_path(workspace, "queries", normalize_hunt_id(hunt_id))
+    """Return the hunt query directory, resolving case-insensitive on-disk names."""
+    normalized = normalize_hunt_id(hunt_id)
+    primary = workspace_path(workspace, "queries", normalized)
+    if primary.exists():
+        return primary
+    queries_root = workspace_path(workspace, "queries")
+    if not queries_root.is_dir():
+        return primary
+    for entry in queries_root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            if normalize_hunt_id(entry.name) == normalized:
+                return workspace_path(workspace, "queries", entry.name)
+        except ValueError:
+            continue
+    return primary
 
 
 def _relative(workspace: Path, path: Path) -> Path:

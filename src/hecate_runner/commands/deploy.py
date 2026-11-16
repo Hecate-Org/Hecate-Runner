@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -16,7 +18,9 @@ from hecate_runner.config import Settings
 from hecate_runner.lifecycle import get_hunt_lifecycle, set_hunt_lifecycle
 from hecate_runner.siem_drift import decommission_hunt_queries, record_query_version
 from hecate_runner.slack_bot import deploy_queries_for_hunt, sync_queries_for_hunt
+from hecate_runner.workspace_paths import list_query_hunt_ids, normalize_hunt_id, query_directory
 
+log = logging.getLogger(__name__)
 console = Console()
 
 
@@ -25,6 +29,42 @@ def _get_settings() -> Settings:
     if cli_mod and hasattr(cli_mod, "Settings"):
         return cast(Settings, cli_mod.Settings())
     return Settings()
+
+
+def _require_hunt_id(hunt_id: str) -> str:
+    """Normalize a hunt ID or exit with a clean CLI error."""
+    try:
+        return normalize_hunt_id(hunt_id)
+    except ValueError:
+        console.print(f"[red]Invalid hunt ID:[/red] {hunt_id!r}")
+        raise typer.Exit(code=1) from None
+
+
+def _append_github_step_summary(markdown: str) -> None:
+    summary_env = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_env:
+        return
+    summary_path = Path(summary_env)
+    try:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("a", encoding="utf-8") as f:
+            f.write(markdown if markdown.endswith("\n") else markdown + "\n")
+    except OSError as exc:
+        log.warning("Could not write GITHUB_STEP_SUMMARY (%s): %s", summary_path, exc)
+        console.print(
+            f"[yellow]Warning:[/yellow] could not write GITHUB_STEP_SUMMARY ({summary_path}): {exc}"
+        )
+
+
+def _print_jsonable(data: Any) -> None:
+    """Pretty-print structured data for --verbose without crashing on Path/etc."""
+    try:
+        console.print_json(data=data)
+    except (TypeError, ValueError):
+        try:
+            console.print_json(json.dumps(data, default=str))
+        except Exception:
+            console.print(str(data))
 
 
 def deploy_queries_cmd(
@@ -64,15 +104,14 @@ def deploy_queries_cmd(
 
     target_hunts: list[str] = []
     if hunt_id.lower() == "all":
-        target_hunts = sorted(
-            [d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")]
-        )
+        target_hunts = list_query_hunt_ids(queries_root)
     else:
-        target_dir = queries_root / hunt_id
+        clean_id = _require_hunt_id(hunt_id)
+        target_dir = query_directory(settings.hecate_workspace, clean_id)
         if not target_dir.exists():
             console.print(f"[red]Query directory not found:[/red] {target_dir}")
             raise typer.Exit(code=1)
-        target_hunts = [hunt_id]
+        target_hunts = [clean_id]
 
     table = Table(
         title="SIEM & EDR Query Deployment (All Hunts)"
@@ -140,10 +179,9 @@ def deploy_queries_cmd(
                 console.print(
                     f"\n[bold cyan]── Contract Payload: {h_id} / {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
                 )
-                console.print_json(data=summary)
+                _print_jsonable(summary)
 
     if github_step_summary and "GITHUB_STEP_SUMMARY" in os.environ:
-        summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
         md_lines = [
             f"## 🚀 SIEM Detection-as-Code Deployment ({mode_str})",
             "",
@@ -162,8 +200,7 @@ def deploy_queries_cmd(
                 f"| ... | *({len(all_deployments) - 30} additional queries deployed)* | | | |"
             )
         md_lines.append("")
-        with summary_path.open("a", encoding="utf-8") as f:
-            f.write("\n".join(md_lines) + "\n")
+        _append_github_step_summary("\n".join(md_lines) + "\n")
 
 
 def decommission_queries_cmd(
@@ -214,9 +251,10 @@ def decommission_queries_cmd(
 ) -> None:
     """Decommission and undeploy hunt queries from target SIEM & EDR platforms with audit provenance."""
     settings = _get_settings()
+    clean_id = hunt_id if hunt_id.lower() == "all" else _require_hunt_id(hunt_id)
     summary = decommission_hunt_queries(
         workspace=settings.hecate_workspace,
-        hunt_id=hunt_id,
+        hunt_id=clean_id,
         dry_run=dry_run,
         target=target,
         reason=reason,
@@ -225,7 +263,7 @@ def decommission_queries_cmd(
     )
 
     table = Table(
-        title=f"SIEM Detection Query Decommissioning ({'All Hunts' if hunt_id.lower() == 'all' else hunt_id})",
+        title=f"SIEM Detection Query Decommissioning ({'All Hunts' if clean_id.lower() == 'all' else clean_id})",
         show_header=True,
         header_style="bold cyan",
     )
@@ -265,10 +303,9 @@ def decommission_queries_cmd(
                 console.print(
                     f"\n[bold red]── Teardown Contract: {res.get('target')} ({res.get('file')}) ──[/bold red]"
                 )
-                console.print_json(data=req_sum)
+                _print_jsonable(req_sum)
 
     if github_step_summary and "GITHUB_STEP_SUMMARY" in os.environ:
-        summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
         md_lines = [
             f"## 🧹 SIEM Detection Query Decommissioning ({mode_str})",
             "",
@@ -283,8 +320,7 @@ def decommission_queries_cmd(
                 f"| `{res.get('hunt_id')}` | `{res.get('file')}` | `{res.get('target')}` | {st} | `{(res.get('remote_id') or '')[:25]}` |"
             )
         md_lines.append("")
-        with summary_path.open("a", encoding="utf-8") as f:
-            f.write("\n".join(md_lines) + "\n")
+        _append_github_step_summary("\n".join(md_lines) + "\n")
 
 
 def undeploy_queries_cmd(
@@ -306,9 +342,10 @@ def undeploy_queries_cmd(
 ) -> None:
     """Undeploy/delete hunt queries from target SIEM and EDR platforms."""
     settings = _get_settings()
+    clean_id = hunt_id if hunt_id.lower() == "all" else _require_hunt_id(hunt_id)
     summary = decommission_hunt_queries(
         workspace=settings.hecate_workspace,
-        hunt_id=hunt_id,
+        hunt_id=clean_id,
         dry_run=dry_run,
         target=target,
         reason="Undeployed via CLI command",
@@ -356,7 +393,7 @@ def undeploy_queries_cmd(
                 console.print(
                     f"\n[bold red]── Teardown Contract: {res.get('target')} ({res.get('file')}) ──[/bold red]"
                 )
-                console.print_json(data=req_sum)
+                _print_jsonable(req_sum)
 
 
 def hunt_lifecycle_cmd(
@@ -378,11 +415,12 @@ def hunt_lifecycle_cmd(
 ) -> None:
     """View or transition hunt lifecycle state (planning, testing, active, deprecated, retired)."""
     settings = _get_settings()
+    clean_id = _require_hunt_id(hunt_id)
 
     if status:
         res = set_hunt_lifecycle(
             workspace=settings.hecate_workspace,
-            hunt_id=hunt_id,
+            hunt_id=clean_id,
             new_status=status,
             reason=reason,
             actor=actor,
@@ -391,16 +429,16 @@ def hunt_lifecycle_cmd(
             console.print(f"[bold red]Lifecycle update failed:[/bold red] {res.get('error')}")
             raise typer.Exit(code=1)
         console.print(
-            f"[bold green]✔ Hunt {hunt_id} transitioned:[/bold green] "
+            f"[bold green]✔ Hunt {clean_id} transitioned:[/bold green] "
             f"[dim]{res.get('previous_status')}[/dim] -> [bold cyan]{res.get('status')}[/bold cyan] "
             f"(by {actor}{f' — {reason}' if reason else ''})"
         )
         return
 
     # View current lifecycle
-    lc = get_hunt_lifecycle(settings.hecate_workspace, hunt_id)
+    lc = get_hunt_lifecycle(settings.hecate_workspace, clean_id)
     if not lc.get("found"):
-        console.print(f"[bold red]Hunt not found:[/bold red] {hunt_id}")
+        console.print(f"[bold red]Hunt not found:[/bold red] {clean_id}")
         raise typer.Exit(code=1)
 
     table = Table(
@@ -421,7 +459,7 @@ def hunt_lifecycle_cmd(
     else:
         st_color = "bright_white"
 
-    table.add_row("Hunt ID", hunt_id)
+    table.add_row("Hunt ID", clean_id)
     table.add_row("Title", str(lc.get("title", "")))
     table.add_row("Lifecycle Status", f"[{st_color}]{st}[/{st_color}]")
     table.add_row("Frontmatter Raw Status", str(lc.get("raw_status", "")))
@@ -459,13 +497,14 @@ def sync_queries_cmd(
 ) -> None:
     """Check synchronization and detect query drift against target SIEM and EDR platforms."""
     settings = _get_settings()
-    query_dir = settings.hecate_workspace / "queries" / hunt_id
+    clean_id = _require_hunt_id(hunt_id)
+    query_dir = query_directory(settings.hecate_workspace, clean_id)
     if not query_dir.exists():
         console.print(f"[red]Query directory not found:[/red] {query_dir}")
         raise typer.Exit(code=1)
 
     table = Table(
-        title=f"SIEM & EDR Query Synchronization & Drift for {hunt_id}",
+        title=f"SIEM & EDR Query Synchronization & Drift for {clean_id}",
         show_header=True,
         header_style="bold magenta",
     )
@@ -477,7 +516,7 @@ def sync_queries_cmd(
 
     syncs = sync_queries_for_hunt(
         settings.hecate_workspace,
-        hunt_id,
+        clean_id,
         dry_run=dry_run,
         target=target,
     )
@@ -531,4 +570,4 @@ def sync_queries_cmd(
                     console.print(
                         f"\n[bold cyan]── Sync Request: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
                     )
-                    console.print_json(data=summary)
+                    _print_jsonable(summary)

@@ -113,3 +113,35 @@ class TestDaemonCommand:
         result = runner.invoke(app, ["daemon", "--max-cycles", "1"])
         assert result.exit_code == 1
         assert "Fatal daemon exception: Disk corrupted" in result.output
+
+    def test_daemon_max_cycles_zero_runs_nothing(
+        self, cli_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        call_count = 0
+
+        class FakeOrch:
+            def run_once(self, dry_run: bool = False) -> RunResult:
+                nonlocal call_count
+                call_count += 1
+                return RunResult(outcome="empty")
+
+        monkeypatch.setattr(
+            cli, "build_default_orchestrator", lambda s, ignore_quota=False: FakeOrch()
+        )
+
+        result = runner.invoke(app, ["daemon", "--max-cycles", "0", "--interval", "1"])
+        assert result.exit_code == 0
+        assert call_count == 0
+        assert "after 0 cycles" in result.output
+
+    def test_daemon_rejects_negative_interval(
+        self, cli_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            cli,
+            "build_default_orchestrator",
+            lambda s, ignore_quota=False: (_ for _ in ()).throw(AssertionError("should not build")),
+        )
+        result = runner.invoke(app, ["daemon", "--max-cycles", "1", "--interval", "-1"])
+        assert result.exit_code == 1
+        assert "Invalid --interval" in result.output

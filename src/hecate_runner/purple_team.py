@@ -840,13 +840,9 @@ def run_continuous_replay_sweep(settings: Any) -> list[dict[str, Any]]:
     if not queries_dir.exists():
         return []
 
-    hunt_ids = sorted(
-        [
-            d.name.upper()
-            for d in queries_dir.iterdir()
-            if d.is_dir() and d.name.upper().startswith("H-")
-        ]
-    )
+    from hecate_runner.workspace_paths import list_query_hunt_ids
+
+    hunt_ids = list_query_hunt_ids(queries_dir)
     outcomes: list[dict[str, Any]] = []
     tuner = RuleTuner(workspace)
     suggestions_dir = workspace_path(workspace, ".hecate", "tuning_suggestions")
