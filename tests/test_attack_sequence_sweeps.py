@@ -151,6 +151,42 @@ def test_correlate_attack_sequence_confirmed() -> None:
     assert "Persistence & Defense Evasion" in timeline
 
 
+def test_correlate_mixed_parseable_and_bad_timestamps_does_not_crash() -> None:
+    """Unparseable timestamps must not raise naive/aware comparison errors."""
+    events = [
+        NormalizedEvent(
+            event_id="evt-1",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp="2026-11-15T22:00:00Z",
+            host="victim-macbook-pro",
+            stage=AttackStage.EXECUTION.value,
+            query_file="process_creation__curl.spl",
+        ),
+        NormalizedEvent(
+            event_id="evt-2",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp="not-a-date",
+            host="victim-macbook-pro",
+            stage=AttackStage.COMMAND_AND_CONTROL.value,
+            query_file="network_connection__c2.spl",
+        ),
+        NormalizedEvent(
+            event_id="evt-3",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp="1700000000",
+            host="victim-macbook-pro",
+            stage=AttackStage.PERSISTENCE_EVASION.value,
+            query_file="file_event__launchagent.spl",
+        ),
+    ]
+    sequences = correlate_events_into_sequences(events, max_window_sec=10**9)
+    assert sequences
+    assert sequences[0].is_confirmed_sequence is True
+
+
 def test_correlate_attack_sequence_isolated_single_stage() -> None:
     """Multiple events of the SAME stage do not form a multi-stage sequence."""
     t0 = datetime(2026, 11, 15, 23, 0, 0, tzinfo=UTC)

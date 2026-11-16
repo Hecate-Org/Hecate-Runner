@@ -120,6 +120,8 @@ def build_network_connection_query(
             clauses.append(f"destination.ip: {ip_val}")
         if clean_domain:
             clauses.append(f"dns.question.name: {dom_val}")
+        if earliest and latest:
+            clauses.append(f'@timestamp >= "{earliest}" and @timestamp <= "{latest}"')
         clauses.append("(process.name: * or process.executable: *)")
         return " and ".join(clauses)
 
@@ -131,13 +133,28 @@ def build_network_connection_query(
             clauses.append(f"target.ip = {ip_val}")
         if clean_domain:
             clauses.append(f"target.hostname = {dom_val}")
+        if earliest and latest:
+            clauses.append(f'metadata.event_timestamp >= "{earliest}"')
+            clauses.append(f'metadata.event_timestamp <= "{latest}"')
         clauses.append('principal.process.file.full_path != ""')
         return " and ".join(clauses)
 
     if dialect in ("crowdstrike", "crowdstrike_cql", "cql", "logscale"):
         host_filter = f"ComputerName={host_val} " if clean_host else ""
-        c2_filter = f"RemoteAddressIP4={ip_val} " if clean_ip else ""
-        return f"#event_simpleName=NetworkConnectIP4 {host_filter}{c2_filter}| limit(5)"
+        c2_parts: list[str] = []
+        if clean_ip:
+            c2_parts.append(f"RemoteAddressIP4={ip_val}")
+        if clean_domain:
+            c2_parts.append(f"(DomainName={dom_val} OR HostName={dom_val})")
+        c2_filter = f"{' OR '.join(c2_parts)} " if c2_parts else ""
+        time_filter = (
+            f'| @timestamp >= "{earliest}" | @timestamp <= "{latest}" '
+            if earliest and latest
+            else ""
+        )
+        return (
+            f"#event_simpleName=NetworkConnectIP4 {host_filter}{c2_filter}{time_filter}| limit(5)"
+        )
 
     # SQL / Generic fallback
     clauses = []
@@ -147,6 +164,10 @@ def build_network_connection_query(
         clauses.append(f"destination_ip = {quoted(clean_ip, 'sql')}")
     if clean_domain:
         clauses.append(f"domain = {quoted(clean_domain, 'sql')}")
+    if earliest and latest:
+        clauses.append(
+            f"timestamp >= {quoted(earliest, 'sql')} AND timestamp <= {quoted(latest, 'sql')}"
+        )
     where_str = " AND ".join(clauses) if clauses else "1=1"
     return f"SELECT * FROM network_connections WHERE {where_str} LIMIT 5"
 
@@ -208,6 +229,8 @@ def build_process_creation_query(
         if proc_filter:
             p_name = basename(proc_filter)
             clauses.append(f"process.name: {quoted(p_name, dialect, prefix='*')}")
+        if earliest and latest:
+            clauses.append(f'@timestamp >= "{earliest}" and @timestamp <= "{latest}"')
         clauses.append('(event.category: "process" or process.executable: *)')
         return " and ".join(clauses)
 
@@ -219,6 +242,9 @@ def build_process_creation_query(
             clauses.append(
                 f"target.process.file.full_path = {quoted(basename(proc_filter), dialect, prefix='*')}"
             )
+        if earliest and latest:
+            clauses.append(f'metadata.event_timestamp >= "{earliest}"')
+            clauses.append(f'metadata.event_timestamp <= "{latest}"')
         clauses.append('target.process.file.full_path != ""')
         return " and ".join(clauses)
 
@@ -227,7 +253,12 @@ def build_process_creation_query(
         proc_str = ""
         if proc_filter:
             proc_str = f"ImageFileName={quoted(basename(proc_filter), dialect, prefix='*')} "
-        return f"#event_simpleName=ProcessRollup2 {host_filter}{proc_str}| limit(10)"
+        time_filter = (
+            f'| @timestamp >= "{earliest}" | @timestamp <= "{latest}" '
+            if earliest and latest
+            else ""
+        )
+        return f"#event_simpleName=ProcessRollup2 {host_filter}{proc_str}{time_filter}| limit(10)"
 
     # SQL / Generic fallback
     clauses = []
@@ -236,6 +267,10 @@ def build_process_creation_query(
     if proc_filter:
         clauses.append(
             f"POSITION(LOWER({quoted(basename(proc_filter), 'sql')}) IN LOWER(process_name)) > 0"
+        )
+    if earliest and latest:
+        clauses.append(
+            f"timestamp >= {quoted(earliest, 'sql')} AND timestamp <= {quoted(latest, 'sql')}"
         )
     where_str = " AND ".join(clauses) if clauses else "1=1"
     return f"SELECT * FROM process_creation WHERE {where_str} LIMIT 10"

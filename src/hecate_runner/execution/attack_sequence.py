@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -197,22 +197,20 @@ class CorrelatedSequence:
 
 
 def _parse_event_dt(ts_str: str) -> datetime | None:
-    """Safely parse diverse timestamp strings into a datetime object."""
+    """Safely parse diverse timestamp strings into a timezone-aware datetime."""
     if not ts_str:
         return None
-    for _fmt in (
-        "%Y-%m-%dT%H:%M:%S.%f%z",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%SZ",
-    ):
-        try:
-            # Normalize trailing 'Z' if present
-            clean = ts_str.replace("Z", "+00:00") if "Z" in ts_str else ts_str
-            return datetime.fromisoformat(clean)
-        except Exception:
-            continue
-    return None
+    raw = str(ts_str).strip()
+    try:
+        if re.fullmatch(r"\d+(\.\d+)?", raw):
+            return datetime.fromtimestamp(float(raw), tz=UTC)
+        clean = raw.replace("Z", "+00:00") if "Z" in raw else raw
+        dt = datetime.fromisoformat(clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except Exception:
+        return None
 
 
 def correlate_events_into_sequences(
@@ -247,8 +245,9 @@ def correlate_events_into_sequences(
     for (ent_type, ent_val), ev_list in entity_groups.items():
         # Sort chronologically
         parsed_events: list[tuple[datetime, NormalizedEvent]] = []
+        epoch_floor = datetime.min.replace(tzinfo=UTC)
         for e in ev_list:
-            dt = _parse_event_dt(e.timestamp) or datetime.min
+            dt = _parse_event_dt(e.timestamp) or epoch_floor
             parsed_events.append((dt, e))
 
         parsed_events.sort(key=lambda t: t[0])
@@ -271,11 +270,9 @@ def correlate_events_into_sequences(
 
             stage_enum = AttackStage(stage_val)
 
-            if first_dt is None and dt != datetime.min:
+            if first_dt is None and dt != epoch_floor:
                 first_dt = dt
-            delta_sec = (
-                (dt - first_dt).total_seconds() if (first_dt and dt != datetime.min) else 0.0
-            )
+            delta_sec = (dt - first_dt).total_seconds() if (first_dt and dt != epoch_floor) else 0.0
 
             # Construct step summary
             detail_desc = ""
