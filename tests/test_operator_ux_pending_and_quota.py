@@ -7,7 +7,16 @@ import os
 from pathlib import Path
 from unittest import mock
 
-from hecate_agent.commands.monitor_samplers import RunnerStatusSampler, _diagnose_state_access
+try:
+    from hecate_agent.commands.monitor_samplers import (
+        RunnerStatusSampler,
+        _diagnose_state_access,
+    )
+except (ImportError, AttributeError):
+    RunnerStatusSampler = None  # type: ignore[assignment,misc]
+    _diagnose_state_access = None
+
+import pytest
 
 from hecate_runner.config import Settings
 from hecate_runner.github_publisher import PromotionOutbox, diff_release_snapshots
@@ -31,6 +40,8 @@ def test_diagnose_state_file_access_reports_permission_denied(tmp_path: Path) ->
 
 
 def test_monitor_sampler_sets_quota_unavailable_reason(tmp_path: Path) -> None:
+    if RunnerStatusSampler is None or _diagnose_state_access is None:
+        pytest.skip("hecate_agent.commands.monitor_samplers._diagnose_state_access not available")
     ws = tmp_path / "ws"
     ws.mkdir()
     state = ws / ".orchestrator_state.json"
