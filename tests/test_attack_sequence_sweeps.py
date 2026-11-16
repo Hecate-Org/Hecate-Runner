@@ -151,6 +151,70 @@ def test_correlate_attack_sequence_confirmed() -> None:
     assert "Persistence & Defense Evasion" in timeline
 
 
+def test_correlate_skips_admin_users_case_insensitively_and_ipv6_loopback() -> None:
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    admin_events = [
+        NormalizedEvent(
+            event_id="1",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp=t0.isoformat(),
+            user="Administrator",
+            stage=AttackStage.EXECUTION.value,
+        ),
+        NormalizedEvent(
+            event_id="2",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp=(t0 + timedelta(seconds=5)).isoformat(),
+            user="Administrator",
+            stage=AttackStage.COMMAND_AND_CONTROL.value,
+        ),
+    ]
+    assert correlate_events_into_sequences(admin_events) == []
+
+    for user in ("NT AUTHORITY\\SYSTEM", "LOCAL SERVICE", "LocalSystem"):
+        machine_events = [
+            NormalizedEvent(
+                event_id="1",
+                hunt_id="H-0038",
+                target_siem="splunk",
+                timestamp=t0.isoformat(),
+                user=user,
+                stage=AttackStage.EXECUTION.value,
+            ),
+            NormalizedEvent(
+                event_id="2",
+                hunt_id="H-0038",
+                target_siem="splunk",
+                timestamp=(t0 + timedelta(seconds=5)).isoformat(),
+                user=user,
+                stage=AttackStage.COMMAND_AND_CONTROL.value,
+            ),
+        ]
+        assert correlate_events_into_sequences(machine_events) == []
+
+    loopback_events = [
+        NormalizedEvent(
+            event_id="1",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp=t0.isoformat(),
+            ip="::1",
+            stage=AttackStage.EXECUTION.value,
+        ),
+        NormalizedEvent(
+            event_id="2",
+            hunt_id="H-0038",
+            target_siem="splunk",
+            timestamp=(t0 + timedelta(seconds=5)).isoformat(),
+            ip="::1",
+            stage=AttackStage.COMMAND_AND_CONTROL.value,
+        ),
+    ]
+    assert correlate_events_into_sequences(loopback_events) == []
+
+
 def test_correlate_mixed_parseable_and_bad_timestamps_does_not_crash() -> None:
     """Unparseable timestamps must not raise naive/aware comparison errors."""
     events = [

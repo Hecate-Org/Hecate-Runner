@@ -196,6 +196,51 @@ class CorrelatedSequence:
         return len(set(self.stages))
 
 
+def _is_non_correlatable_user(value: str) -> bool:
+    """True for machine / well-known service accounts that should not anchor sequences."""
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    # DOMAIN\user or user@realm → account basename
+    account = raw.split("\\")[-1].split("@")[0].strip().lower()
+    skipped = {
+        "root",
+        "system",
+        "administrator",
+        "localsystem",
+        "local service",
+        "localservice",
+        "network service",
+        "networkservice",
+        "anonymous logon",
+        "dwm-1",
+        "umfd-0",
+        "umfd-1",
+    }
+    return account in skipped or account.startswith(("dwm-", "umfd-"))
+
+
+def _is_non_correlatable_ip(value: str) -> bool:
+    """True for loopback / unspecified / link-local addresses (v4 and v6)."""
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if text.startswith(("127.", "0.", "169.254.")):
+        return True
+    lowered = text.lower()
+    if lowered in {"::1", "::", "0:0:0:0:0:0:0:1"}:
+        return True
+    if lowered.startswith("fe80:"):
+        return True
+    try:
+        import ipaddress
+
+        addr = ipaddress.ip_address(text.split("%", 1)[0])
+        return bool(addr.is_loopback or addr.is_unspecified or addr.is_link_local)
+    except ValueError:
+        return False
+
+
 def _parse_event_dt(ts_str: str) -> datetime | None:
     """Safely parse diverse timestamp strings into a timezone-aware datetime."""
     if not ts_str:
@@ -232,9 +277,9 @@ def correlate_events_into_sequences(
         group_key: tuple[str, str] | None = None
         if ev.host:
             group_key = ("host", ev.host)
-        elif ev.user and ev.user not in ("root", "system", "administrator"):
+        elif ev.user and not _is_non_correlatable_user(ev.user):
             group_key = ("user", ev.user)
-        elif ev.ip and not ev.ip.startswith(("127.", "0.", "169.254.")):
+        elif ev.ip and not _is_non_correlatable_ip(ev.ip):
             group_key = ("ip", ev.ip)
 
         if group_key is not None:

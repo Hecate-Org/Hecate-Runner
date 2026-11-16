@@ -39,6 +39,9 @@ def parse_time_window(
 
     Returns:
         (earliest_iso, latest_iso, earliest_splunk, latest_splunk)
+
+    ``earliest_iso`` / ``latest_iso`` use offset ``+00:00`` (not trailing ``Z``)
+    so Sentinel KQL ``datetime("...")`` accepts them without extra normalization.
     """
     try:
         clean = timestamp_str.replace("Z", "+00:00")
@@ -52,11 +55,19 @@ def parse_time_window(
     start_dt = dt - delta
     end_dt = dt + delta
 
-    earliest_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    latest_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    earliest_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    latest_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
     earliest_splunk = start_dt.strftime("%m/%d/%Y:%H:%M:%S")
     latest_splunk = end_dt.strftime("%m/%d/%Y:%H:%M:%S")
     return earliest_iso, latest_iso, earliest_splunk, latest_splunk
+
+
+def _kql_datetime(value: str) -> str:
+    """Normalize an ISO timestamp for KQL ``datetime()`` (no trailing ``Z``)."""
+    text = str(value or "").strip()
+    if text.endswith("Z"):
+        return text[:-1] + "+00:00"
+    return text
 
 
 def build_network_connection_query(
@@ -106,7 +117,8 @@ def build_network_connection_query(
             clauses.append(f"RemoteUrl has {dom_val}")
         where_filter = f"| where {' and '.join(clauses)} " if clauses else ""
         time_filter = (
-            f'| where TimeGenerated between (datetime("{earliest}") .. datetime("{latest}")) '
+            f'| where TimeGenerated between (datetime("{_kql_datetime(earliest)}") .. '
+            f'datetime("{_kql_datetime(latest)}")) '
             if earliest and latest
             else ""
         )
@@ -216,7 +228,8 @@ def build_process_creation_query(
             clauses.append(f"ProcessId == {pid_filter}")
         where_filter = f"| where {' and '.join(clauses)} " if clauses else ""
         time_filter = (
-            f'| where TimeGenerated between (datetime("{earliest}") .. datetime("{latest}")) '
+            f'| where TimeGenerated between (datetime("{_kql_datetime(earliest)}") .. '
+            f'datetime("{_kql_datetime(latest)}")) '
             if earliest and latest
             else ""
         )

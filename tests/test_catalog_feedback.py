@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import yaml
@@ -215,6 +216,51 @@ def test_exclude_tune_skips_level_nudge_when_tps_dominate(tmp_path: Path) -> Non
     assert yaml.safe_load(rule.read_text(encoding="utf-8"))["level"] == "high"
 
 
+def test_record_hunt_execution_tolerates_corrupt_counters(tmp_path: Path) -> None:
+    from hecate_runner.lifecycle import record_hunt_execution
+
+    hunt = _seed_hunt(tmp_path, hunt_id="H-0002")
+    hunt.write_text(
+        "---\n"
+        "hunt_id: H-0002\n"
+        "status: active\n"
+        "true_positives: not_a_number\n"
+        "false_positives: 0\n"
+        "---\n\n"
+        "# H-0002\n",
+        encoding="utf-8",
+    )
+
+    class _Triage:
+        verdict = "true_positive"
+        confidence = 0.9
+        recommended_action = "escalate"
+        summary = "s"
+        rationale = "r"
+        extracted_entities: ClassVar[dict[str, list[str]]] = {
+            "hosts": [],
+            "users": [],
+            "processes": [],
+            "parent_processes": [],
+            "ips": [],
+        }
+        technique_matches: ClassVar[list[str]] = []
+        reviewed_event_count = 1
+        event_count = 1
+
+    result = record_hunt_execution(
+        tmp_path,
+        "H-0002",
+        outcome="hits_detected",
+        matched_count=1,
+        target="splunk",
+        triage_report=_Triage(),
+    )
+    assert result["ok"] is True
+    fm, _, _ = parse_hunt_frontmatter(hunt.read_text(encoding="utf-8"))
+    assert fm["true_positives"] == 1
+
+
 def test_invalid_hunt_ids_return_error_not_raise(tmp_path: Path) -> None:
     from hecate_runner.catalog_feedback import patch_hunt_frontmatter
 
@@ -280,6 +326,11 @@ def test_quoted_and_commented_sigma_level_nudge(tmp_path: Path) -> None:
     floor = tmp_path / "floor.yml"
     floor.write_text("title: t\nlevel: low\ndetection:\n  condition: selection\n")
     assert _nudge_sigma_level(floor, tmp_path) is None
+
+    tabbed = tmp_path / "tabbed.yml"
+    tabbed.write_text("title: t\nlevel:\thigh\ndetection:\n  condition: selection\n")
+    assert _nudge_sigma_level(tabbed, tmp_path) == "medium"
+    assert "level: medium" in tabbed.read_text(encoding="utf-8")
 
 
 def test_no_increment_preserves_tp_on_metadata_rewrite(tmp_path: Path) -> None:

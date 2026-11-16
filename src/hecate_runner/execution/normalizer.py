@@ -206,6 +206,10 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "sha256",
         "Hashes",
         "file.hash.sha256",
+        "file.hash.md5",
+        "file.hash.sha1",
+        "file.hashes.md5",
+        "file.hashes.sha1",
         "MD5",
         "SHA256",
         "SHA1",
@@ -371,6 +375,9 @@ class NormalizedEvent:
 
     def needs_lineage_fusion(self) -> bool:
         """True if this event represents network/DNS telemetry lacking endpoint process context."""
+        if self.fused_lineage:
+            # Already fused once — avoid re-entry loops on partial lineage.
+            return False
         has_c2_indicator = bool(self.dst_ip or self.domain or self.ip)
         has_endpoint = bool(self.host or self.src_ip)
         lacks_process_lineage = not (self.process_name and self.command_line)
@@ -458,8 +465,7 @@ class NormalizedEvent:
             "severity_id": 3 if self.stage else 1,
             "device": {
                 "hostname": self.host,
-                "ip": self.src_ip
-                or (self.host if re.match(r"^\d+\.\d+\.\d+\.\d+$", self.host) else ""),
+                "ip": self.src_ip or (_host_if_ip(self.host)),
             },
             "actor": {
                 "user": {
@@ -467,8 +473,7 @@ class NormalizedEvent:
                 }
             },
             "src_endpoint": {
-                "ip": self.src_ip
-                or (self.host if re.match(r"^\d+\.\d+\.\d+\.\d+$", self.host) else ""),
+                "ip": self.src_ip or (_host_if_ip(self.host)),
                 "port": self.src_port,
             },
             "dst_endpoint": {
@@ -501,9 +506,7 @@ class NormalizedEvent:
                 "name": self.file_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
                 if self.file_path
                 else "",
-                "hashes": {"sha256": self.hash_val}
-                if len(self.hash_val) == 64
-                else {"hash": self.hash_val},
+                "hashes": _hash_dict_for_ocsf(self.hash_val),
             }
         if self.domain:
             ocsf_obj["dns"] = {
@@ -525,6 +528,40 @@ class NormalizedEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _host_if_ip(value: str) -> str:
+    """Return ``value`` when it is an IPv4 or IPv6 literal; otherwise empty."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # Common URI / log bracketing: [2001:db8::1]
+    if text.startswith("[") and text.endswith("]") and ":" in text:
+        text = text[1:-1].strip()
+    # Drop IPv6 zone identifiers (fe80::1%eth0) before parsing.
+    if "%" in text and ":" in text:
+        text = text.split("%", 1)[0]
+    try:
+        import ipaddress
+
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return ""
+
+
+def _hash_dict_for_ocsf(hash_val: str) -> dict[str, str]:
+    """Map a hash string to the appropriate OCSF ``file.hashes`` key by length."""
+    text = str(hash_val or "").strip()
+    if not text:
+        return {}
+    # Hex digest lengths: MD5=32, SHA1=40, SHA256=64
+    if len(text) == 64 and re.fullmatch(r"[0-9a-fA-F]+", text):
+        return {"sha256": text}
+    if len(text) == 40 and re.fullmatch(r"[0-9a-fA-F]+", text):
+        return {"sha1": text}
+    if len(text) == 32 and re.fullmatch(r"[0-9a-fA-F]+", text):
+        return {"md5": text}
+    return {"hash": text}
 
 
 def _dict_get_ci(mapping: dict[str, Any], key: str) -> Any:
@@ -552,7 +589,8 @@ def _dig_dotted_path(data: dict[str, Any], dotted: str) -> Any:
 
 def _first_scalar(value: Any) -> str:
     """Return the first non-empty scalar from a value, list, or trivial object wrapper."""
-    if value is None:
+    if value is None or isinstance(value, bool):
+        # Booleans must not become hostnames/users ("True" / "False").
         return ""
     if isinstance(value, list):
         for item in value:
@@ -599,7 +637,9 @@ def _parse_port(value: str) -> int | None:
 
 
 def _parse_whole_number(value: Any) -> int | None:
-    """Parse an int from digits or whole-number floats like ``42.0``."""
+    """Parse a non-negative int from digits or whole-number floats like ``42.0``."""
+    if isinstance(value, bool):
+        return None
     text = str(value or "").strip()
     if not text:
         return None
@@ -609,7 +649,7 @@ def _parse_whole_number(value: Any) -> int | None:
         as_float = float(text)
     except ValueError:
         return None
-    if not as_float.is_integer():
+    if not as_float.is_integer() or as_float < 0:
         return None
     return int(as_float)
 
@@ -617,7 +657,24 @@ def _parse_whole_number(value: Any) -> int | None:
 def _normalize_id_str(value: str) -> str:
     """Canonicalize process IDs so ``42.0`` becomes ``42`` for OCSF export."""
     parsed = _parse_whole_number(value)
-    return str(parsed) if parsed is not None else str(value or "").strip()
+    if parsed is None:
+        # Drop negative / non-numeric PIDs rather than persisting junk.
+        text = str(value or "").strip()
+        return text if text.isdigit() else ""
+    return str(parsed)
+
+
+def _normalize_hash(value: str) -> str:
+    """Strip common ``MD5=`` / ``SHA256=`` prefixes from hash fields."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for prefix in ("MD5=", "SHA256=", "SHA1=", "IMPHASH="):
+        if text.upper().startswith(prefix):
+            return text.split("=", 1)[1].strip()
+    if "=" in text and re.match(r"^(?i)(md5|sha1|sha256|imphash)\s*=", text):
+        return text.split("=", 1)[1].strip()
+    return text
 
 
 def normalize_event(
@@ -681,7 +738,7 @@ def normalize_event(
         command_line=_extract_field(raw_dict, _FIELD_ALIASES["command_line"]),
         ip=ip_val,
         file_path=_extract_field(raw_dict, _FIELD_ALIASES["file_path"]),
-        hash_val=_extract_field(raw_dict, _FIELD_ALIASES["hash"]),
+        hash_val=_normalize_hash(_extract_field(raw_dict, _FIELD_ALIASES["hash"])),
         stage=str(raw_dict.get("_hecate_stage") or ""),
         stage_label=str(raw_dict.get("_hecate_stage_label") or ""),
         query_file=q_file,
