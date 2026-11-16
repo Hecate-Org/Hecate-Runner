@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import sqlite3
 from pathlib import Path
@@ -170,8 +171,9 @@ def test_lost_create_response_retries_existing_event_without_duplicates(
     row = misp_publication_status(s)[0]
     assert row["status"] == "pending" and row["attempts"] == 1
     assert row["last_error"] == "MISP HTTP 503"
-    with sqlite3.connect(s.hecate_workspace / ".hecate/misp/outbox.sqlite3") as db:
-        db.execute("UPDATE exports SET next_attempt=0")
+    with contextlib.closing(sqlite3.connect(s.hecate_workspace / ".hecate/misp/outbox.sqlite3")) as db:
+        with db:
+            db.execute("UPDATE exports SET next_attempt=0")
     assert sync_misp_outbox(s, client=remote.client())
     assert len(remote.events) == 1
     assert sum(r.url.path == "/events/add" for r in remote.requests) == 1
