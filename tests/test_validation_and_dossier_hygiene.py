@@ -279,7 +279,8 @@ Initial hunt.
     assert result.outcome == "incremental_enrichment"
     assert "gh:H-0001" not in calls
     assert "misp:H-0001" in calls
-    assert "notify" in calls
+    # IOC-only living-dossier updates stay off Slack; MISP still gets them.
+    assert "notify" not in calls
 
 
 def test_material_for_public_promote_requires_rules() -> None:
@@ -418,9 +419,10 @@ def test_normalize_spl_respects_lab_index() -> None:
     assert once == twice
     assert once.count("| spath | search") == 1
 
-    # Preserve pipelines; do not stuff tstats under spath/search.
+    # Preserve pipelines; pin inner where index= as well.
     piped = v._force_lab_index("index=main | tstats count where index=main", "hecate_synthetic")
-    assert piped == "index=hecate_synthetic | tstats count where index=main"
+    assert piped == "index=hecate_synthetic | tstats count where index=hecate_synthetic"
+    assert "index=main" not in piped
 
     # Leading INDEX= (case variants) must still pin the lab index.
     upper = v._force_lab_index("INDEX=main Image=x", "hecate_synthetic")
@@ -701,6 +703,71 @@ def test_select_primary_survives_unreadable_companion_spl(tmp_path: Path) -> Non
         assert "php-fpm" in yaml_text
     finally:
         spl.chmod(mode)
+
+
+def test_finish_keeps_latest_published_payload_for_diff(tmp_path: Path) -> None:
+    from hecate_runner.github_publisher import PublishResult, diff_release_snapshots
+
+    db = tmp_path / "outbox.sqlite3"
+    outbox = PromotionOutbox(db)
+    files_v1 = {"hunts/2026/Q4/H-0001.md": "v1\n"}
+    files_v2 = {"hunts/2026/Q4/H-0001.md": "v2\n", "queries/H-0001/a.yml": "rule\n"}
+    outbox.enqueue("H-0001", "digest-old", files_v1, reviewed=True)
+    row = outbox.claim_due()
+    assert row is not None
+    outbox.finish(
+        int(row["id"]),
+        PublishResult(
+            hunt_id="H-0001",
+            digest="digest-old",
+            status="published",
+            branch="b",
+            pr_number=1,
+            pr_url="https://example.test/1",
+        ),
+    )
+    with outbox._connect() as conn:
+        payload = conn.execute(
+            "SELECT payload FROM promotions WHERE digest='digest-old'"
+        ).fetchone()["payload"]
+    assert "v1" in payload
+
+    outbox.enqueue("H-0001", "digest-new", files_v2, reviewed=False)
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        hecate_workspace=tmp_path,
+        github_publishing_outbox_path=db,
+    )
+    diff = diff_release_snapshots(settings, "H-0001")
+    assert diff["ok"] is True
+    assert diff["baseline"] == "last_published"
+    assert "queries/H-0001/a.yml" in diff["added"]
+    assert "hunts/2026/Q4/H-0001.md" in diff["changed"]
+
+    # Second publish prunes the older published payload.
+    outbox.enqueue("H-0001", "digest-newer", files_v2, reviewed=True)
+    row2 = outbox.claim_due()
+    assert row2 is not None
+    outbox.finish(
+        int(row2["id"]),
+        PublishResult(
+            hunt_id="H-0001",
+            digest="digest-newer",
+            status="published",
+            branch="b2",
+            pr_number=2,
+            pr_url="https://example.test/2",
+        ),
+    )
+    with outbox._connect() as conn:
+        old_payload = conn.execute(
+            "SELECT payload FROM promotions WHERE digest='digest-old'"
+        ).fetchone()["payload"]
+        new_payload = conn.execute(
+            "SELECT payload FROM promotions WHERE digest='digest-newer'"
+        ).fetchone()["payload"]
+    assert old_payload == "{}"
+    assert "v2" in new_payload
 
 
 def test_enqueue_revives_retry_but_not_publishing(tmp_path: Path) -> None:

@@ -391,20 +391,47 @@ class PromotionOutbox:
     def finish(self, row_id: int, result: PublishResult) -> None:
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
-            connection.execute(
-                """UPDATE promotions SET status=?, branch=?, pr_number=?, pr_url=?,
-                   payload=CASE WHEN ? IN ('published','closed','merged') THEN '{}' ELSE payload END,
-                   last_error=NULL, updated_at=? WHERE id=?""",
-                (
-                    result.status,
-                    result.branch,
-                    result.pr_number,
-                    result.pr_url,
-                    result.status,
-                    now,
-                    row_id,
-                ),
-            )
+            row = connection.execute(
+                "SELECT hunt_id FROM promotions WHERE id=?", (row_id,)
+            ).fetchone()
+            if result.status in {"published", "merged"}:
+                # Keep this tip's payload so diff_release_snapshots can compare
+                # against last published. Prune older published/merged payloads
+                # for the same hunt to bound outbox size.
+                connection.execute(
+                    """UPDATE promotions SET status=?, branch=?, pr_number=?, pr_url=?,
+                       last_error=NULL, updated_at=? WHERE id=?""",
+                    (
+                        result.status,
+                        result.branch,
+                        result.pr_number,
+                        result.pr_url,
+                        now,
+                        row_id,
+                    ),
+                )
+                if row is not None:
+                    connection.execute(
+                        """UPDATE promotions SET payload='{}', updated_at=?
+                           WHERE hunt_id=? AND status IN ('published','merged')
+                             AND id!=? AND payload != '{}'""",
+                        (now, row["hunt_id"], row_id),
+                    )
+            else:
+                connection.execute(
+                    """UPDATE promotions SET status=?, branch=?, pr_number=?, pr_url=?,
+                       payload=CASE WHEN ? = 'closed' THEN '{}' ELSE payload END,
+                       last_error=NULL, updated_at=? WHERE id=?""",
+                    (
+                        result.status,
+                        result.branch,
+                        result.pr_number,
+                        result.pr_url,
+                        result.status,
+                        now,
+                        row_id,
+                    ),
+                )
 
     def fail(self, row_id: int, attempts: int, error: str) -> None:
         delay = min(60 * (2 ** min(max(attempts - 1, 0), 8)), 21600)

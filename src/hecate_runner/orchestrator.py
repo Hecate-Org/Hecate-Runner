@@ -399,11 +399,12 @@ class Orchestrator(
                 # IOC/technique dossier updates stay private. Public GitHub review
                 # is reserved for material behavioral-rule changes (new Sigma),
                 # not correlator appendices. MISP still receives IOC enrichments.
+                # Slack cards stay quiet for IOC-only living-dossier updates.
                 if enrichment.changed:
                     if enrichment.material_for_public_promote:
                         self._publish_github(match.hunt_id)
+                        self._notify_cycle(result)
                     self._publish_misp(match.hunt_id)
-                    self._notify_cycle(result)
                 return result
 
         is_sweep = item.metadata.get("processing_track") != "deep" and (
