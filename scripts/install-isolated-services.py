@@ -14,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -25,6 +26,7 @@ UNITS = (
     "hecate-slack-bot",
     "hecate-bas-broker",
 )
+RUNTIME_UNIT_ROOT = Path("/run/systemd/system")
 RESERVED = {
     "HOME",
     "PATH",
@@ -47,6 +49,99 @@ def command(
     return subprocess.run(
         list(args), check=check, capture_output=True, text=True, timeout=120, env=env, cwd=cwd
     )
+
+
+def stop_existing_units(*units: str) -> None:
+    """A fresh host has no legacy workers; failures stopping real units still abort."""
+    existing = []
+    for unit in units:
+        state = command(
+            "/usr/bin/systemctl", "show", unit, "--property=LoadState", "--value"
+        ).stdout.strip()
+        if not state:
+            raise RuntimeError(f"Could not determine whether {unit} is installed")
+        if state != "not-found":
+            existing.append(unit)
+    if existing:
+        stop_units_gracefully(existing)
+
+
+def stop_units_gracefully(units: list[str]) -> None:
+    """Let in-flight work finish; a deployment must not inherit a short stop deadline."""
+    guards: list[Path] = []
+    requested = False
+    finished = False
+    try:
+        for unit in units:
+            if unit not in UNITS:
+                raise ValueError("Only managed Hecate units may use deployment stop guards")
+            directory = RUNTIME_UNIT_ROOT / f"{unit}.service.d"
+            directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                prefix="zz-hecate-drain-", suffix=".conf", dir=directory, delete=False
+            ) as stream:
+                guards.append(Path(stream.name))
+                stream.write(b"[Service]\nTimeoutStopSec=infinity\n")
+        command("/usr/bin/systemctl", "daemon-reload")
+        for unit in units:
+            value = command(
+                "/usr/bin/systemctl", "show", unit, "--property=TimeoutStopUSec", "--value"
+            ).stdout.strip()
+            if value != "infinity":
+                raise RuntimeError(
+                    "Graceful-stop protection did not load; refusing to stop workers"
+                )
+        requested = True
+        command("/usr/bin/systemctl", "stop", "--no-block", *units)
+        next_notice = time.monotonic()
+        while True:
+            stopped = []
+            for unit in units:
+                response = command(
+                    "/usr/bin/systemctl",
+                    "show",
+                    unit,
+                    "--property=ActiveState",
+                    "--property=MainPID",
+                ).stdout
+                values = dict(line.split("=", 1) for line in response.splitlines() if "=" in line)
+                if not {"ActiveState", "MainPID"} <= values.keys():
+                    raise RuntimeError("Cannot confirm worker stop state")
+                stopped.append(
+                    values["ActiveState"] in {"inactive", "failed"} and values["MainPID"] == "0"
+                )
+            if all(stopped):
+                finished = True
+                break
+            if time.monotonic() >= next_notice:
+                print(
+                    "Waiting for current Hecate work to finish before changing runtimes...",
+                    flush=True,
+                )
+                next_notice = time.monotonic() + 15
+            time.sleep(0.25)
+    finally:
+        if not requested or finished:
+            for path in guards:
+                path.unlink(missing_ok=True)
+            if guards:
+                command("/usr/bin/systemctl", "daemon-reload")
+        else:
+            # Do not reinstate a short deadline while a stop job may still be
+            # draining. A failed/interrupted deployment requires operator recovery.
+            print(
+                "Worker stop incomplete; temporary graceful-stop guards retained for recovery.",
+                file=sys.stderr,
+            )
+
+
+def select_runtime(current: Path, target: Path) -> None:
+    temporary = current.with_name(f".runtime-install-{os.getpid()}")
+    temporary.symlink_to(target)
+    try:
+        os.replace(temporary, current)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def check_role_runtime(role: str, runtime: Path, workspace: Path, values: dict[str, str]) -> None:
@@ -374,9 +469,14 @@ def install(args) -> None:
             os.chown(target, 0, grp.getgrnam(f"hecate-{role}").gr_gid)
             os.chmod(target, 0o640)
             effective_environments[role] = values
+        phase = "stopping previous workers"
+        activated = True
+        # Stop every managed identity before switching the code selection. An
+        # already-isolated system Slack worker must not keep the old runtime.
+        stop_existing_units(*UNITS)
+        user_command(args.operator, "stop", "hecate-slack-bot", check=False)
         phase = "runtime selection"
-        current.unlink(missing_ok=True)
-        current.symlink_to(release)
+        select_runtime(current, release)
         for role in ROLES:
             phase = f"{role} configuration preflight"
             check_role_runtime(role, current, workspace, effective_environments[role])
@@ -387,10 +487,6 @@ def install(args) -> None:
             "verify",
             *(str(unit_source / f"{unit}.service") for unit in UNITS),
         )
-        phase = "stopping previous workers"
-        activated = True
-        command("/usr/bin/systemctl", "stop", "hecate-runner-daemon", "hecate-runner-maintenance")
-        user_command(args.operator, "stop", "hecate-slack-bot", check=False)
         phase = "workspace permissions"
         data_gid = grp.getgrnam("hecate-data").gr_gid
         if not operator_in_data:
@@ -455,7 +551,8 @@ def install(args) -> None:
         with suppress(OSError):
             record_failure(backup, phase, failure)
         if activated:
-            command("/usr/bin/systemctl", "stop", *UNITS, check=False)
+            with suppress(Exception):
+                stop_existing_units(*UNITS)
         for unit in UNITS:
             old = backup / f"{unit}.service"
             target = unit_root / f"{unit}.service"
@@ -483,9 +580,10 @@ def install(args) -> None:
             os.chown(path, -1, gid)
             os.chmod(path, mode)
         command("/usr/bin/setfacl", "--restore", str(backup / "docker-socket.acl"), check=False)
-        current.unlink(missing_ok=True)
         if old_runtime:
-            current.symlink_to(old_runtime)
+            select_runtime(current, Path(old_runtime))
+        else:
+            current.unlink(missing_ok=True)
         if config_root.exists():
             shutil.rmtree(config_root)
         if (backup / "configuration").exists():

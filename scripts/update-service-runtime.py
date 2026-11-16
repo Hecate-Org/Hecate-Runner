@@ -95,7 +95,7 @@ def update(stage: Path) -> None:
             )
         phase = "stopping isolated services"
         stopped = True
-        installer.command("/usr/bin/systemctl", "stop", *installer.UNITS)
+        installer.stop_existing_units(*installer.UNITS)
         select_runtime(current, release)
         phase = "starting updated services"
         installer.command("/usr/bin/systemctl", "start", "hecate-bas-broker", *installer.UNITS[:-1])
@@ -156,7 +156,8 @@ def update(stage: Path) -> None:
         with suppress(OSError):
             installer.record_failure(backup, phase, failure)
         if stopped:
-            installer.command("/usr/bin/systemctl", "stop", *installer.UNITS, check=False)
+            with suppress(Exception):
+                installer.stop_existing_units(*installer.UNITS)
             select_runtime(current, previous)
             installer.command(
                 "/usr/bin/systemctl",

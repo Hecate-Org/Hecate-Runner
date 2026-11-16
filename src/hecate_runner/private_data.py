@@ -58,7 +58,11 @@ def _protect(path: Path, *, directory: bool) -> None:
 
 
 def prepare_directory(path: Path) -> None:
-    path.mkdir(mode=_mode(path, directory=True), parents=True, exist_ok=True)
+    # Isolated units reject explicit setuid/setgid mode bits, even for an
+    # already-existing directory. The provisioned parent supplies setgid by
+    # inheritance; verify the resulting shared policy below without weakening
+    # the unit's RestrictSUIDSGID protection.
+    path.mkdir(mode=_mode(path, directory=True) & 0o777, parents=True, exist_ok=True)
     _protect(path, directory=True)
 
 

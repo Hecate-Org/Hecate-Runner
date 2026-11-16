@@ -92,8 +92,10 @@ if its administrator-owned executable is elsewhere.
 
 The installer validates inputs, creates the dedicated accounts and root-owned
 runtime, snapshots installed units/configuration and workspace permissions,
-then stops the old daemon/maintenance and desktop Slack service before
-switching identities. It enables system services for all three workers.
+then stops all existing managed system workers and the desktop Slack service
+before atomically switching runtimes. A fresh host does not need legacy worker
+units to exist. Reinstalling also refreshes an already-isolated system Slack
+worker and broker. It enables system services for all three workers.
 The desktop operator joins only the shared hecate-data group and must open a
 new login session to access new worker-owned files. Existing artifact owners
 are preserved; private .env/key files are excluded
@@ -111,6 +113,15 @@ services and enablement settings. The recovery snapshot is root-only under
 /var/backups/hecate-service-isolation. Runtime releases and newly created
 inactive accounts may remain after rollback. Inspect the snapshot and service
 health before retrying; do not delete original workspace data.
+
+Installations and runtime updates temporarily extend managed units' stop deadlines
+while current work drains. They can wait for a long-running cycle; leave the
+deployment command running. The ordinary unit deadlines return after the old
+processes have stopped. If stopping fails or the deployment is interrupted,
+`/run/systemd/system/hecate-*.service.d/zz-hecate-drain-*.conf` guards may remain
+to prevent an in-progress stop from reverting to a short force-kill deadline.
+Inspect the backup and finish recovery before removing those guards. Runtime
+guards are transient and do not survive a host reboot.
 
 ## BAS without broad Docker access
 
@@ -173,12 +184,20 @@ files, workspace permissions and unit profiles, validates the candidate, switche
 runtime releases atomically, and verifies local outbox access as the writer in
 its service mount namespace. It restores the previous runtime if activation or
 that access check fails. The check does not publish queued content remotely.
+Mount-namespace probes do not inherit an existing service's syscall filters.
+Before relying on publication, exercise local outbox initialization through an
+actual hardened service as well. The Linux regression suite also applies a real
+unprivileged seccomp filter to cover privileged-mode syscall rejection.
 
 GitHub and MISP outboxes use the private hecate-data group in isolated mode:
 setgid directories 2770 and regular files 0660. Existing correct modes are
 accepted without an ownership-changing chmod. Other groups and world access are
 not accepted. Manual installations retain owner-only data unless the operator
 uses a tree explicitly provisioned for the private shared group.
+New shared directories inherit setgid from the provisioned parent instead of
+requesting privileged bits in `mkdir`, which `RestrictSUIDSGID` rejects. The
+resulting group and permissions are still checked; the syscall restriction stays
+enabled.
 
 Public release approvals remain separate from shared queue data. In a managed
 shared workspace, only the workspace owner can record approval. Approval files
