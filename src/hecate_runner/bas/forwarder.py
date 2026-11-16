@@ -46,6 +46,33 @@ def synthetic_splunk_index(workspace: Path | None = None) -> str:
     )
 
 
+def resolve_splunk_verify_ssl(
+    env: dict[str, str] | None = None,
+    *,
+    host_url: str | None = None,
+    workspace: Path | None = None,
+) -> bool:
+    """Shared SSL policy for forwarder + SIEM verify (loopback skips by default)."""
+    settings = env if env is not None else splunk_settings(workspace)
+    configured = settings.get("SPLUNK_VERIFY_SSL", "").strip().lower()
+    if configured in ("false", "0", "no"):
+        return False
+    if configured in ("true", "1", "yes"):
+        return True
+    ssl_host_src = (
+        host_url
+        or settings.get("SPLUNK_HEC_URL")
+        or settings.get("SPLUNK_HOST")
+        or settings.get("SPLUNK_URL")
+        or "https://localhost:8089"
+    )
+    try:
+        host_only = (httpx.URL(ssl_host_src).host or "").lower()
+    except Exception:
+        host_only = ""
+    return host_only not in {"localhost", "127.0.0.1", "::1"}
+
+
 def infer_splunk_sourcetype(event: dict[str, Any], *, synthetic: bool | None = None) -> str:
     """Infer a Splunk sourcetype for an event.
 
@@ -175,16 +202,7 @@ def forward_events_to_splunk(
         splunk_pass = ""
 
     if verify_ssl is None:
-        configured = setting("SPLUNK_VERIFY_SSL", "").strip().lower()
-        if configured in ("false", "0", "no"):
-            verify_ssl = False
-        elif configured in ("true", "1", "yes"):
-            verify_ssl = True
-        else:
-            # Dev containers often present a self-signed cert on localhost.
-            ssl_host_src = hec_url or splunk_host
-            host_only = (httpx.URL(ssl_host_src).host or "").lower()
-            verify_ssl = host_only not in {"localhost", "127.0.0.1", "::1"}
+        verify_ssl = resolve_splunk_verify_ssl(env, host_url=hec_url or splunk_host)
 
     endpoint = (
         f"{hec_url}/services/collector/event"

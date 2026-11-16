@@ -98,6 +98,15 @@ _FIELD_ALIASES: dict[str, set[str]] = {
         "SHA256",
         "SHA1",
     },
+    "domain": {
+        "domain",
+        "queryname",
+        "query",
+        "domain_name",
+        "destinationhostname",
+        "cs-host",
+        "query_name",
+    },
 }
 
 
@@ -117,6 +126,9 @@ class NormalizedEvent:
     ip: str = ""
     file_path: str = ""
     hash_val: str = ""
+    stage: str = ""
+    stage_label: str = ""
+    query_file: str = ""
     raw_data: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -132,6 +144,10 @@ def _extract_field(data: dict[str, Any], aliases: set[str]) -> str:
         if val is not None:
             if not isinstance(val, (dict, list)) and str(val).strip():
                 return str(val).strip()
+            if isinstance(val, list):
+                for item in val:
+                    if not isinstance(item, (dict, list)) and str(item).strip():
+                        return str(item).strip()
             if isinstance(val, dict):
                 for subkey in ("name", "hostname", "value", "id", "ip"):
                     if (
@@ -202,6 +218,9 @@ def normalize_event(
         ip=_extract_field(raw_dict, _FIELD_ALIASES["ip"]),
         file_path=_extract_field(raw_dict, _FIELD_ALIASES["file_path"]),
         hash_val=_extract_field(raw_dict, _FIELD_ALIASES["hash"]),
+        stage=str(raw_dict.get("_hecate_stage") or ""),
+        stage_label=str(raw_dict.get("_hecate_stage_label") or ""),
+        query_file=str(raw_dict.get("_hecate_query_file") or ""),
         raw_data=raw_dict,
     )
 
@@ -224,6 +243,7 @@ def extract_entities_from_events(events: list[NormalizedEvent]) -> dict[str, lis
         "parent_processes": set(),
         "ips": set(),
         "hashes": set(),
+        "domains": set(),
     }
     for e in events:
         if e.host:
@@ -238,5 +258,8 @@ def extract_entities_from_events(events: list[NormalizedEvent]) -> dict[str, lis
             entities["ips"].add(e.ip)
         if e.hash_val:
             entities["hashes"].add(e.hash_val)
+        domain_val = _extract_field(e.raw_data, _FIELD_ALIASES["domain"])
+        if domain_val:
+            entities["domains"].add(domain_val)
 
     return {k: sorted(v) for k, v in entities.items()}

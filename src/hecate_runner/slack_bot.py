@@ -23,6 +23,7 @@ from hecate_runner.slack_blocks import (
     build_reject_hunt_modal,
     build_runner_status_card,
     build_slash_help_card,
+    format_release_diff_message,
 )
 from hecate_runner.workspace_paths import (
     query_directory,
@@ -378,6 +379,28 @@ def list_pending_hunts(workspace: Path) -> list[dict[str, Any]]:
             }
         )
     return pending
+
+
+def list_pending_release_digests(settings: Settings) -> list[dict[str, Any]]:
+    """Latest ``awaiting_review`` promotion digest per hunt (hides superseded rows)."""
+    if not settings.github_publishing_enabled:
+        return []
+    try:
+        from hecate_runner.github_publisher import outbox_for
+
+        return outbox_for(settings).latest_awaiting_review()
+    except Exception as exc:
+        log.warning("Could not list pending release digests: %s", exc)
+        return []
+
+
+def pending_review_attachments(settings: Settings, *, notice: str = "") -> list[dict[str, Any]]:
+    """Combined planning + latest-release pending card for Slack."""
+    return build_pending_hunts_card(
+        list_pending_hunts(settings.hecate_workspace),
+        notice=notice,
+        releases=list_pending_release_digests(settings),
+    )
 
 
 def _frontmatter_scalar(raw: Any) -> str:
@@ -1132,14 +1155,24 @@ class SlackBotService:
 
                 WebhookClient(response_url).send(
                     replace_original=True,
-                    attachments=build_pending_hunts_card(
-                        list_pending_hunts(self.settings.hecate_workspace), notice=notice
-                    ),
+                    attachments=pending_review_attachments(self.settings, notice=notice),
                 )
             elif metadata.get("channel"):
                 client.chat_postMessage(
                     channel=metadata["channel"], thread_ts=metadata.get("thread_ts"), text=notice
                 )
+
+        @self._app.action("hecate_release_diff")
+        def handle_release_diff(ack: Any, body: dict[str, Any], respond: Any) -> None:
+            ack()
+            hunt_id = str(body.get("actions", [{}])[0].get("value") or "").strip().upper()
+            if not hunt_id.startswith("H-"):
+                respond(text="⚠️ Invalid hunt id for release diff.", response_type="ephemeral")
+                return
+            from hecate_runner.github_publisher import diff_release_snapshots
+
+            diff = diff_release_snapshots(self.settings, hunt_id)
+            respond(text=format_release_diff_message(diff), response_type="ephemeral")
 
         @self._app.action("hecate_pending_reject")
         def handle_pending_reject(ack: Any, body: dict[str, Any], client: Any) -> None:
@@ -1185,8 +1218,8 @@ class SlackBotService:
 
                 WebhookClient(response_url).send(
                     replace_original=True,
-                    attachments=build_pending_hunts_card(
-                        list_pending_hunts(self.settings.hecate_workspace),
+                    attachments=pending_review_attachments(
+                        self.settings,
                         notice=_review_notice(res, str(user.get("id", ""))),
                     ),
                 )
@@ -1213,8 +1246,7 @@ class SlackBotService:
                 return
 
             if subcmd in {"pending", "review"}:
-                hunts = list_pending_hunts(self.settings.hecate_workspace)
-                respond(attachments=build_pending_hunts_card(hunts))
+                respond(attachments=pending_review_attachments(self.settings))
                 return
 
             if subcmd == "deploy":

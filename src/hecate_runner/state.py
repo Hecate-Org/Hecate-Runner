@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import grp
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +13,32 @@ from pathlib import Path
 from hecate_runner.atomic_write import atomic_write_text
 
 log = logging.getLogger(__name__)
+
+
+def diagnose_state_file_access(path: Path) -> str | None:
+    """Explain why operator quota stats may be blank under service isolation."""
+    if not path.exists():
+        return None
+    try:
+        path.read_text(encoding="utf-8")
+        return None
+    except PermissionError:
+        hint = (
+            f"Cannot read `{path}` (permission denied). "
+            "Isolated services write this as group `hecate-data`."
+        )
+        try:
+            gid = grp.getgrnam("hecate-data").gr_gid
+        except KeyError:
+            return hint + " Ensure your user can read the file."
+        if gid not in os.getgroups():
+            return (
+                hint + " Your session is missing group `hecate-data` — run "
+                "`newgrp hecate-data` or open a new terminal, then retry."
+            )
+        return hint + " Check ACLs/ownership on the workspace state file."
+    except OSError as exc:
+        return f"Cannot read `{path}`: {exc}"
 
 
 @dataclass
@@ -33,9 +61,24 @@ class OrchestratorState:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             return cls(**{k: v for k, v in data.items() if k in cls.__annotations__})
+        except PermissionError:
+            raise
         except (json.JSONDecodeError, TypeError) as exc:
             log.warning("state file %s corrupt (%s); resetting", path, exc)
             return cls()
+
+    @classmethod
+    def load_or_explain(cls, path: Path) -> tuple[OrchestratorState, str | None]:
+        """Load quota state, or return empty state plus an operator-facing reason."""
+        issue = diagnose_state_file_access(path)
+        if issue:
+            return cls(), issue
+        try:
+            return cls.load(path), None
+        except PermissionError:
+            return cls(), diagnose_state_file_access(path) or (
+                f"Cannot read `{path}` (permission denied)."
+            )
 
     def save(self, path: Path) -> None:
         atomic_write_text(path, json.dumps(asdict(self), indent=2))

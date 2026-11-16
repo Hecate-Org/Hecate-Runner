@@ -2197,7 +2197,7 @@ def status(
 ) -> None:
     """Show quota, last run, and total drafts."""
     settings = Settings()
-    state = OrchestratorState.load(settings.state_file)
+    state, quota_issue = OrchestratorState.load_or_explain(settings.state_file)
     from hecate_runner.dead_letter import list_dead_letters
     from hecate_runner.parked_store import list_parked
 
@@ -2223,15 +2223,16 @@ def status(
             "cti_queue_dir": str(settings.cti_queue_dir_resolved),
             "model": _effective_model(settings),
             "llm_circuit_breaker": cb.status_dict(),
-            "drafts_today": state.drafts_today,
+            "drafts_today": state.drafts_today if not quota_issue else None,
             "max_drafts_per_day": settings.max_drafts_per_day,
-            "research_runs_today": state.research_runs_today,
+            "research_runs_today": state.research_runs_today if not quota_issue else None,
             "max_research_runs_per_day": settings.max_research_runs_per_day,
-            "total_drafts_ever": state.total_drafts_ever,
-            "last_run": state.last_run_iso,
-            "consecutive_failures": state.consecutive_failures,
+            "total_drafts_ever": state.total_drafts_ever if not quota_issue else None,
+            "last_run": state.last_run_iso if not quota_issue else None,
+            "consecutive_failures": state.consecutive_failures if not quota_issue else None,
             "parked_drafts": parked_count,
             "dead_letter_drafts": dead_letter_count,
+            "quota_unavailable_reason": quota_issue,
         }
         typer.echo(json.dumps(data, indent=2))
         return
@@ -2246,14 +2247,17 @@ def status(
     table.add_row("CTI queue dir", str(settings.cti_queue_dir_resolved))
     table.add_row("Model", _effective_model(settings))
     table.add_row("LLM Circuit Breaker", cb_display)
-    table.add_row("Drafts today", f"{state.drafts_today} / {settings.max_drafts_per_day}")
-    table.add_row(
-        "Research runs today",
-        f"{state.research_runs_today} / {settings.max_research_runs_per_day}",
-    )
-    table.add_row("Total drafts ever", str(state.total_drafts_ever))
-    table.add_row("Last run", state.last_run_iso or "(never)")
-    table.add_row("Consecutive failures", str(state.consecutive_failures))
+    if quota_issue:
+        table.add_row("Quota", f"[yellow]unavailable[/yellow]\n{quota_issue}")
+    else:
+        table.add_row("Drafts today", f"{state.drafts_today} / {settings.max_drafts_per_day}")
+        table.add_row(
+            "Research runs today",
+            f"{state.research_runs_today} / {settings.max_research_runs_per_day}",
+        )
+        table.add_row("Total drafts ever", str(state.total_drafts_ever))
+        table.add_row("Last run", state.last_run_iso or "(never)")
+        table.add_row("Consecutive failures", str(state.consecutive_failures))
     table.add_row("Parked drafts", str(parked_count))
     table.add_row("Dead-letter drafts", str(dead_letter_count))
     console.print(table)

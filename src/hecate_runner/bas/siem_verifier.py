@@ -17,7 +17,12 @@ from hecate_agent.core.splunk_credentials import splunk_token as splunk_role_tok
 from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.bas.approved import confirms_technique, resolve_fidelity_scope
 from hecate_runner.bas.base import DetonationResult
-from hecate_runner.bas.forwarder import forward_events_to_splunk, splunk_settings
+from hecate_runner.bas.forwarder import (
+    forward_events_to_splunk,
+    resolve_splunk_verify_ssl,
+    splunk_settings,
+    synthetic_splunk_index,
+)
 from hecate_runner.siem_drift import record_detection_validation
 
 log = logging.getLogger(__name__)
@@ -79,31 +84,24 @@ class SiemAlertVerifier:
     ) -> tuple[str, str, str]:
         """Locate candidate SPL query, source filename, and companion Sigma rule YAML.
 
+        Uses the same behavioral ranking as ``bas-synthesize`` so lab proof and
+        synthesize exercise one primary rule (not alphabetical first file).
+
         Returns:
             Tuple of (query_string, source_file_name, sigma_yaml_content)
         """
+        from hecate_runner.bas.rule_selection import select_primary_sigma_rule
+
         query_dir = self.workspace / "queries" / hunt_id
         if not query_dir.is_dir():
             return "", "", ""
-        # Resolve an actual rule and its same-stem query. Never manufacture a
-        # detection, or pair an unrelated YAML rule with a native query.
-        rules = sorted([*query_dir.glob("*.yml"), *query_dir.glob("*.yaml")])
-        for rule in rules:
-            content = rule.read_text(encoding="utf-8")
-            if technique_id:
-                technique = technique_id.lower()
-                names = (technique, technique.replace(".", "_"), technique.replace(".", ""))
-                if (
-                    not any(name in rule.stem.lower() for name in names)
-                    and technique not in content.lower()
-                    and (len(rules) != 1 or "attack.t" in content.lower())
-                ):
-                    continue
-            companion = rule.with_suffix(".spl")
-            query = companion.read_text(encoding="utf-8").strip() if companion.is_file() else ""
-            return query, rule.name, content
+        selected = select_primary_sigma_rule(query_dir, technique_id=technique_id)
+        if selected is not None:
+            return selected.spl_query, selected.name, selected.yaml_text
         # Native-only rules can be searched, but cannot support a Sigma probe.
         for native in sorted(query_dir.glob("*.spl")):
+            if "incremental" in native.name.lower():
+                continue
             if technique_id and not any(
                 name in native.stem.lower()
                 for name in (
@@ -113,7 +111,10 @@ class SiemAlertVerifier:
                 )
             ):
                 continue
-            return native.read_text(encoding="utf-8").strip(), native.name, ""
+            try:
+                return native.read_text(encoding="utf-8").strip(), native.name, ""
+            except OSError:
+                continue
         return "", "", ""
 
     def resolve_candidate_query(
@@ -129,8 +130,11 @@ class SiemAlertVerifier:
         query_str, filename, _ = self.resolve_candidate_rule(hunt_id, technique_id)
         return query_str, filename
 
-    def _normalize_spl_query(self, raw_query: str) -> str:
+    def _normalize_spl_query(self, raw_query: str, *, index: str | None = None) -> str:
         """Normalize transpiled SPL query so it executes against raw JSON index events."""
+        if index and index not in {"*", ""}:
+            # Lab callers that pin an index go through the force-rewrite path.
+            return self._force_lab_index(raw_query, index)
         clean = raw_query.strip()
         if clean.startswith("search "):
             clean = clean[7:].strip()
@@ -361,8 +365,7 @@ class SiemAlertVerifier:
                 token=splunk_role_token("read", env),
                 username=env.get("SPLUNK_USERNAME"),
                 password=env.get("SPLUNK_PASSWORD"),
-                verify_ssl=env.get("SPLUNK_VERIFY_SSL", "true").strip().lower()
-                not in ("false", "0", "no"),
+                verify_ssl=resolve_splunk_verify_ssl(env, host_url=splunk_host),
             )
         except Exception as client_exc:
             notes.append(f"Splunk client initialization failed: {client_exc}")
@@ -583,6 +586,164 @@ class SiemAlertVerifier:
         )
         self._persist_result(result)
         return result
+
+    def verify_synthetic_lab_query(
+        self,
+        hunt_id: str,
+        *,
+        technique_id: str | None = None,
+        max_wait_sec: float | None = None,
+        index: str | None = None,
+        spl_query: str | None = None,
+        rule_name: str | None = None,
+        settle_sec: float = 1.5,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        """Poll Splunk for a hit of the synthesized rule in the synthetic lab index.
+
+        Prefer ``spl_query`` / ``rule_name`` from the rule just synthesized so an
+        explicit YAML path is not re-ranked to a different primary. Caps Splunk
+        job creation (settle + few retries) instead of spawning a job every second.
+
+        This is lab evidence for ``bas-synthesize --forward-siem`` — not production
+        alert-firing proof. Returns a small status dict for CLI panels.
+        """
+        from hecate_agent.core.splunk_client import SplunkClient
+
+        env = splunk_settings(self.workspace)
+        lab_index = index or synthetic_splunk_index(self.workspace)
+        if spl_query is not None:
+            disk_query = spl_query.strip()
+            query_source = rule_name or "(explicit)"
+        else:
+            disk_query, query_source, _yaml = self.resolve_candidate_rule(hunt_id, technique_id)
+        if not disk_query:
+            return {
+                "ok": False,
+                "status": "no_companion_spl",
+                "rule": query_source or "",
+                "index": lab_index,
+                "matched": 0,
+                "query": "",
+                "notes": [
+                    f"Primary rule {query_source or '(none)'} has no companion .spl to search."
+                ],
+            }
+
+        splunk_host = env.get("SPLUNK_HOST") or env.get("SPLUNK_URL")
+        splunk_token = splunk_role_token("read", env) or env.get("SPLUNK_PASSWORD")
+        if not (splunk_host and splunk_token):
+            return {
+                "ok": False,
+                "status": "unconfigured_credentials",
+                "rule": query_source,
+                "index": lab_index,
+                "matched": 0,
+                "query": disk_query,
+                "notes": ["SPLUNK_HOST / read credentials missing; skipped SIEM lab proof."],
+            }
+
+        normalized = self._force_lab_index(disk_query, lab_index)
+        max_wait = max_wait_sec if max_wait_sec is not None else min(self.max_wait_sec, 15.0)
+        attempts = max(1, min(max_attempts, 5))
+        notes = [
+            f"Lab search against index={lab_index} using {query_source} "
+            f"(settle={settle_sec:.1f}s, max_attempts={attempts})"
+        ]
+        try:
+            client = SplunkClient(
+                host=splunk_host,
+                token=splunk_role_token("read", env),
+                username=env.get("SPLUNK_USERNAME"),
+                password=env.get("SPLUNK_PASSWORD"),
+                verify_ssl=resolve_splunk_verify_ssl(env, host_url=splunk_host),
+            )
+            if settle_sec > 0:
+                time.sleep(settle_sec)
+            deadline = time.perf_counter() + max_wait
+            matched: list[dict[str, Any]] = []
+            job_sid = ""
+            for attempt in range(1, attempts + 1):
+                if time.perf_counter() >= deadline:
+                    break
+                job_sid = client.create_search_job(
+                    query=normalized, earliest_time="-5m", latest_time="now"
+                )
+                job_deadline = min(time.perf_counter() + 8.0, deadline)
+                while time.perf_counter() < job_deadline:
+                    status = client.get_search_job_status(job_sid)
+                    content = status.get("entry", [{}])[0].get("content", {})
+                    if content.get("isDone"):
+                        matched = client.get_search_results(job_sid, count=10)
+                        break
+                    time.sleep(self.poll_interval_sec)
+                if matched:
+                    notes.append(f"Matched on attempt {attempt}/{attempts}.")
+                    break
+                # Indexing lag: brief backoff before the next job, not a new job/sec.
+                if attempt < attempts and time.perf_counter() < deadline:
+                    time.sleep(min(2.0, max(0.0, deadline - time.perf_counter())))
+            ok = len(matched) > 0
+            notes.append(
+                f"Search job {job_sid or '(none)'} matched {len(matched)} event(s) "
+                f"after {attempts} attempt(s)."
+                if job_sid
+                else "No search job completed."
+            )
+            return {
+                "ok": ok,
+                "status": "lab_query_match" if ok else "lab_detection_miss",
+                "rule": query_source,
+                "index": lab_index,
+                "matched": len(matched),
+                "query": normalized,
+                "search_job_id": job_sid,
+                "notes": notes,
+            }
+        except Exception as exc:
+            notes.append(f"Lab SIEM proof error: {exc}")
+            return {
+                "ok": False,
+                "status": "error",
+                "rule": query_source,
+                "index": lab_index,
+                "matched": 0,
+                "query": normalized,
+                "notes": notes,
+            }
+
+    def _force_lab_index(self, raw_query: str, lab_index: str) -> str:
+        """Ensure lab proof searches the synthetic index, even if SPL pins another.
+
+        Idempotent for already-normalized lab queries, and preserves pipeline
+        forms (``index=X | tstats ...``) instead of stuffing them under
+        ``| spath | search``. Leading ``index=`` / ``INDEX=`` is matched
+        case-insensitively.
+        """
+        clean = raw_query.strip()
+        if clean.lower().startswith("search "):
+            clean = clean[7:].strip()
+        clean = clean.replace("*\\\\", "*").replace("*\\", "*")
+        idx = (lab_index or "").strip() or synthetic_splunk_index(self.workspace)
+
+        if clean.lower().startswith("index="):
+            first, _, rest = clean.partition(" ")
+            current = first.split("=", 1)[1]
+            rest = rest.strip()
+            if current == idx:
+                # Re-emit canonical lowercase index= for stable idempotency.
+                return f"index={idx} {rest}".rstrip() if rest else f"index={idx}"
+            if rest.startswith("|"):
+                return f"index={idx} {rest}"
+            if rest:
+                return f"index={idx} | spath | search {rest}"
+            return f"index={idx}"
+
+        if clean.startswith("|"):
+            return f"index={idx} {clean}"
+        if not clean:
+            return f"index={idx}"
+        return f"index={idx} | spath | search {clean}"
 
     def _persist_result(self, res: SiemAlertVerificationResult) -> None:
         """Persist verification provenance into SQLite drift history and durable BAS runs."""

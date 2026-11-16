@@ -396,9 +396,12 @@ class Orchestrator(
                     detail=enrichment.details,
                     parked_count=parked_count,
                 )
-                # Only re-queue public/MISP publication when the dossier actually changed.
+                # IOC/technique dossier updates stay private. Public GitHub review
+                # is reserved for material behavioral-rule changes (new Sigma),
+                # not correlator appendices. MISP still receives IOC enrichments.
                 if enrichment.changed:
-                    self._publish_github(match.hunt_id)
+                    if enrichment.material_for_public_promote:
+                        self._publish_github(match.hunt_id)
                     self._publish_misp(match.hunt_id)
                     self._notify_cycle(result)
                 return result

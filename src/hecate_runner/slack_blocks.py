@@ -951,7 +951,7 @@ def build_slash_help_card() -> list[dict[str, Any]]:
                 "text": (
                     "*Autonomous Threat Hunting & Detection Engineering Commands:*\n\n"
                     "• `/hecate status` — View pipeline status, active hunts, quota & metrics\n"
-                    "• `/hecate pending` — Review planning hunts and approve or reject them\n"
+                    "• `/hecate pending` — Planning hunts + latest release digests (diff vs published)\n"
                     "• `/hecate hunt <topic_or_cve>` — Launch an immediate ad-hoc hunt cycle (e.g. `/hecate hunt Akira Ransomware`)\n"
                     "• `/hecate deploy <hunt_id> [target]` — Deploy or simulate queries across SIEM/EDRs (e.g. `/hecate deploy H-0868 sentinel_kql`)\n"
                     "• `/hecate undeploy <hunt_id> [target]` — Teardown/delete queries from SIEM/EDRs (e.g. `/hecate undeploy H-0868 splunk_spl`)\n"
@@ -979,112 +979,232 @@ def build_slash_help_card() -> list[dict[str, Any]]:
     return [{"color": COLOR_INFO, "blocks": sanitize_slack_blocks(blocks)}]
 
 
-# Two blocks per hunt; Slack rejects messages with more than 50 blocks.
-_PENDING_HUNTS_SHOWN = 20
+# Slack rejects messages with more than 50 blocks (~2 blocks/item).
+_PENDING_PLANNING_SHOWN = 8
+_PENDING_RELEASES_SHOWN = 10
+# Back-compat alias used by older tests/imports.
+_PENDING_HUNTS_SHOWN = _PENDING_PLANNING_SHOWN
 
 
 def build_pending_hunts_card(
-    hunts: list[dict[str, Any]], *, notice: str = ""
+    hunts: list[dict[str, Any]],
+    *,
+    notice: str = "",
+    releases: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the /hecate pending review queue with Approve / Reject buttons per hunt."""
+    """Build /hecate pending: planning hunts + latest release digests per hunt."""
+    releases = releases or []
+    total = len(hunts) + len(releases)
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"🗂️ Hunts Awaiting Review ({len(hunts)})",
+                "text": f"🗂️ Pending Review ({total})",
                 "emoji": True,
             },
         }
     ]
     if notice:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": notice}})
-    if not hunts:
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "✅ No hunts are waiting for review."},
-            }
-        )
 
-    for hunt in hunts[:_PENDING_HUNTS_SHOWN]:
-        hunt_id = hunt["hunt_id"]
-        techniques = hunt.get("techniques") or []
-        technique_text = ", ".join(f"`{t}`" for t in techniques[:6])
-        if len(techniques) > 6:
-            technique_text += f" +{len(techniques) - 6} more"
-        details = [
-            f"*Drafted:* {hunt.get('date') or 'unknown'}",
-            f"*Research:* `{hunt['research_id']}`" if hunt.get("research_id") else "",
-            f"*Techniques:* {technique_text}" if technique_text else "",
-        ]
-        blocking = int(hunt.get("publish_blocking") or 0)
-        if blocking:
-            details.append(f"*Publish check:* {blocking} blocking")
-        elif hunt.get("publish_check") == "review":
-            details.append("*Publish check:* review")
-        lab_status = str(hunt.get("lab_probe") or "").strip().lower()
-        if lab_status and lab_status not in {"skipped"}:
-            provider = hunt.get("lab_probe_provider") or "lab"
-            window = hunt.get("lab_probe_window_days") or "?"
-            hits = hunt.get("lab_probe_hits")
-            if lab_status == "miss":
-                details.append(f"*Lab hits:* miss on `{provider}` (0 in {window}d)")
-            elif lab_status == "unconfigured":
-                details.append(f"*Lab hits:* `{provider}` not configured")
-            elif lab_status == "error":
-                details.append(f"*Lab hits:* error on `{provider}`")
-            elif lab_status == "overmatch":
-                details.append(f"*Lab hits:* overmatch on `{provider}` ({hits} in {window}d)")
-            else:
-                details.append(f"*Lab hits:* {hits} on `{provider}` in {window}d")
+    if not hunts and not releases:
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*`{hunt_id}`* {defang_ioc(hunt.get('title') or '(untitled)')}\n"
-                        + " • ".join(d for d in details if d)
+                        "✅ Nothing waiting — no `planning` hunts and no "
+                        "`awaiting_review` release digests."
                     ),
                 },
             }
         )
+
+    if releases:
+        stale_total = sum(max(int(r.get("awaiting_count") or 1) - 1, 0) for r in releases)
         blocks.append(
             {
-                "type": "actions",
-                "block_id": f"pending_review_{hunt_id}",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
-                        "style": "primary",
-                        "action_id": "hecate_pending_approve",
-                        "value": hunt_id,
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "🚫 Reject", "emoji": True},
-                        "style": "danger",
-                        "action_id": "hecate_pending_reject",
-                        "value": hunt_id,
-                    },
-                ],
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "*Release digests* — showing **latest** snapshot per hunt"
+                        + (f" ({stale_total} older digest(s) hidden)" if stale_total else "")
+                    ),
+                },
             }
         )
+        for rel in releases[:_PENDING_RELEASES_SHOWN]:
+            hunt_id = str(rel["hunt_id"])
+            digest = str(rel.get("digest") or "")
+            awaiting = int(rel.get("awaiting_count") or 1)
+            updated = str(rel.get("updated_at") or rel.get("created_at") or "")[:19]
+            details = [
+                f"*Digest:* `{digest[:12]}…`" if digest else "",
+                f"*Updated:* {updated or 'unknown'}",
+            ]
+            if awaiting > 1:
+                details.append(f"*Superseded:* {awaiting - 1} older digest(s)")
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*`{hunt_id}`* release sign-off\n"
+                        + " • ".join(d for d in details if d),
+                    },
+                }
+            )
+            blocks.append(
+                {
+                    "type": "actions",
+                    "block_id": f"pending_release_{hunt_id}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🔎 Diff vs last published",
+                                "emoji": True,
+                            },
+                            "action_id": "hecate_release_diff",
+                            "value": hunt_id,
+                        },
+                    ],
+                }
+            )
 
-    footer = (
-        "🤖 *Hecate Review Queue* | Approve sets `active` and opens the publication PR; "
-        "Reject sets `suppressed`"
-    )
-    if len(hunts) > _PENDING_HUNTS_SHOWN:
-        footer = (
-            f"Showing the oldest {_PENDING_HUNTS_SHOWN} of {len(hunts)}; "
-            "review these to see the rest. " + footer
+    if hunts:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Planning hunts* — lifecycle approve / reject",
+                },
+            }
         )
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
-    color = COLOR_WARNING if hunts else COLOR_SUCCESS
+        for hunt in hunts[:_PENDING_PLANNING_SHOWN]:
+            hunt_id = hunt["hunt_id"]
+            techniques = hunt.get("techniques") or []
+            technique_text = ", ".join(f"`{t}`" for t in techniques[:6])
+            if len(techniques) > 6:
+                technique_text += f" +{len(techniques) - 6} more"
+            details = [
+                f"*Drafted:* {hunt.get('date') or 'unknown'}",
+                f"*Research:* `{hunt['research_id']}`" if hunt.get("research_id") else "",
+                f"*Techniques:* {technique_text}" if technique_text else "",
+            ]
+            blocking = int(hunt.get("publish_blocking") or 0)
+            if blocking:
+                details.append(f"*Publish check:* {blocking} blocking")
+            elif hunt.get("publish_check") == "review":
+                details.append("*Publish check:* review")
+            lab_status = str(hunt.get("lab_probe") or "").strip().lower()
+            if lab_status and lab_status not in {"skipped"}:
+                provider = hunt.get("lab_probe_provider") or "lab"
+                window = hunt.get("lab_probe_window_days") or "?"
+                hits = hunt.get("lab_probe_hits")
+                if lab_status == "miss":
+                    details.append(f"*Lab hits:* miss on `{provider}` (0 in {window}d)")
+                elif lab_status == "unconfigured":
+                    details.append(f"*Lab hits:* `{provider}` not configured")
+                elif lab_status == "error":
+                    details.append(f"*Lab hits:* error on `{provider}`")
+                elif lab_status == "overmatch":
+                    details.append(f"*Lab hits:* overmatch on `{provider}` ({hits} in {window}d)")
+                else:
+                    details.append(f"*Lab hits:* {hits} on `{provider}` in {window}d")
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*`{hunt_id}`* {defang_ioc(hunt.get('title') or '(untitled)')}\n"
+                            + " • ".join(d for d in details if d)
+                        ),
+                    },
+                }
+            )
+            blocks.append(
+                {
+                    "type": "actions",
+                    "block_id": f"pending_review_{hunt_id}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "✅ Approve", "emoji": True},
+                            "style": "primary",
+                            "action_id": "hecate_pending_approve",
+                            "value": hunt_id,
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "🚫 Reject", "emoji": True},
+                            "style": "danger",
+                            "action_id": "hecate_pending_reject",
+                            "value": hunt_id,
+                        },
+                    ],
+                }
+            )
+
+    footer_bits = [
+        "🤖 *Hecate Review Queue*",
+        "Diff compares the latest release digest to the last published snapshot",
+        "Approve sets `active` and can open a publication PR; Reject sets `suppressed`",
+    ]
+    if len(releases) > _PENDING_RELEASES_SHOWN:
+        footer_bits.insert(
+            1,
+            f"Showing {_PENDING_RELEASES_SHOWN} of {len(releases)} release digests",
+        )
+    if len(hunts) > _PENDING_PLANNING_SHOWN:
+        footer_bits.insert(
+            1,
+            f"Showing {_PENDING_PLANNING_SHOWN} of {len(hunts)} planning hunts",
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": " | ".join(footer_bits)}],
+        }
+    )
+    color = COLOR_WARNING if total else COLOR_SUCCESS
     return [{"color": color, "blocks": sanitize_slack_blocks(blocks)}]
+
+
+def format_release_diff_message(diff: dict[str, Any]) -> str:
+    """Ephemeral Slack text for a release-digest vs last-published diff."""
+    if not diff.get("ok"):
+        return f"⚠️ *Diff unavailable:* {diff.get('error') or 'unknown error'}"
+    hunt_id = diff.get("hunt_id")
+    pending = str(diff.get("pending_digest") or "")[:12]
+    published = diff.get("published_digest")
+    baseline = diff.get("baseline")
+    lines = [
+        f"*`{hunt_id}`* release digest `{pending}…`",
+        (
+            f"vs last published `{str(published)[:12]}…`"
+            if published
+            else "vs *empty baseline* (never published, or payload cleared)"
+        ),
+    ]
+    if baseline == "empty" and not published:
+        lines.append("_No prior published snapshot on disk — listing pending bundle only._")
+    for label, key in (("Added", "added"), ("Removed", "removed"), ("Changed", "changed")):
+        paths = diff.get(key) or []
+        if not paths:
+            continue
+        shown = paths[:12]
+        extra = f" _(+{len(paths) - 12} more)_" if len(paths) > 12 else ""
+        lines.append(f"*{label} ({len(paths)}):* " + ", ".join(f"`{p}`" for p in shown) + extra)
+    if not any(diff.get(k) for k in ("added", "removed", "changed")):
+        lines.append("_No path-level differences vs baseline._")
+    return "\n".join(lines)
 
 
 def build_approve_hunt_modal(
@@ -1257,7 +1377,7 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
     from hecate_runner.siem_drift import load_drift_state
     from hecate_runner.state import OrchestratorState
 
-    state = OrchestratorState.load(settings.state_file)
+    state, quota_issue = OrchestratorState.load_or_explain(settings.state_file)
     parked_count = len(list_parked(settings.cti_queue_dir_resolved))
 
     hunts_dir = settings.hecate_workspace / "hunts"
@@ -1292,11 +1412,19 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
         },
         {
             "type": "mrkdwn",
-            "text": f"*Draft Quota (24h):*\n`{state.drafts_today} / {settings.max_drafts_per_day}`",
+            "text": (
+                "*Draft Quota (24h):*\n⚠️ unavailable"
+                if quota_issue
+                else f"*Draft Quota (24h):*\n`{state.drafts_today} / {settings.max_drafts_per_day}`"
+            ),
         },
         {
             "type": "mrkdwn",
-            "text": f"*Research Quota:*\n`{state.research_runs_today} / {settings.max_research_runs_per_day}`",
+            "text": (
+                "*Research Quota:*\n⚠️ unavailable"
+                if quota_issue
+                else f"*Research Quota:*\n`{state.research_runs_today} / {settings.max_research_runs_per_day}`"
+            ),
         },
         {
             "type": "mrkdwn",
@@ -1342,24 +1470,47 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
             "type": "section",
             "fields": fields,
         },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Recent Hunt Operations:*\n{recent_text}\n*Last Pipeline Run:* `{state.last_run_iso or 'never'}`",
-            },
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "🤖 *Hecate Status* | Interactive SecOps Bot Active",
-                }
-            ],
-        },
     ]
-    return [{"color": COLOR_SUCCESS, "blocks": sanitize_slack_blocks(blocks)}]
+    if quota_issue:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"⚠️ *Quota unavailable:* {quota_issue}",
+                },
+            }
+        )
+    blocks.extend(
+        [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Recent Hunt Operations:*\n{recent_text}\n"
+                        f"*Last Pipeline Run:* "
+                        f"`{(state.last_run_iso if not quota_issue else None) or 'never'}`"
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "🤖 *Hecate Status* | Interactive SecOps Bot Active",
+                    }
+                ],
+            },
+        ]
+    )
+    return [
+        {
+            "color": COLOR_WARNING if quota_issue else COLOR_SUCCESS,
+            "blocks": sanitize_slack_blocks(blocks),
+        }
+    ]
 
 
 def build_siem_drift_alert_card(
