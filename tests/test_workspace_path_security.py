@@ -31,6 +31,26 @@ def test_alphanumeric_hunt_ids_are_accepted(value, tmp_path):
     assert path.parent.name == "queries"
 
 
+def test_list_query_hunt_ids_includes_hnt_and_skips_junk(tmp_path):
+    queries = tmp_path / "queries"
+    (queries / "H-0001").mkdir(parents=True)
+    (queries / "HNT-LAB_01").mkdir()
+    (queries / "not-a-hunt").mkdir()
+    (queries / "README.md").write_text("x")
+    assert wp.list_query_hunt_ids(queries) == ["H-0001", "HNT-LAB_01"]
+    assert wp.list_query_hunt_ids(tmp_path / "missing") == []
+
+
+def test_query_directory_resolves_case_insensitive_on_disk(tmp_path):
+    queries = tmp_path / "queries"
+    (queries / "hnt-case").mkdir(parents=True)
+    (queries / "hnt-case" / "q.kql").write_text("x")
+    resolved = wp.query_directory(tmp_path, "HNT-CASE")
+    assert resolved.exists()
+    assert resolved.name == "hnt-case"
+    assert wp.list_query_hunt_ids(queries) == ["HNT-CASE"]
+
+
 @pytest.mark.parametrize(
     "operation",
     [

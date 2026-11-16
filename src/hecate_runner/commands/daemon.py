@@ -102,7 +102,14 @@ def daemon(
     configure_logging(settings)
     build_default_orch = _get_build_default_orchestrator()
 
-    effective_interval = interval if interval is not None else settings.daemon_interval_sec
+    raw_interval = interval if interval is not None else settings.daemon_interval_sec
+    if raw_interval is None or int(raw_interval) < 0:
+        console.print(f"[bold red]Invalid --interval:[/bold red] {raw_interval!r} (must be >= 0).")
+        raise typer.Exit(code=1)
+    effective_interval = int(raw_interval)
+    if max_cycles is not None and max_cycles < 0:
+        console.print(f"[bold red]Invalid --max-cycles:[/bold red] {max_cycles!r} (must be >= 0).")
+        raise typer.Exit(code=1)
     stop_event = threading.Event()
     last_sweep_check: float = 0.0
     sweep_interval_sec = float(settings.auto_hunt_sweep_interval_sec)
@@ -119,6 +126,7 @@ def daemon(
     signal.signal(signal.SIGINT, _sig_handler)
     signal.signal(signal.SIGTERM, _sig_handler)
 
+    max_cycles_display = "unlimited" if max_cycles is None else str(max_cycles)
     console.print(
         Panel(
             f"[bold green]Starting Hecate-Runner Autonomous Daemon[/bold green]\n\n"
@@ -127,7 +135,7 @@ def daemon(
             f"• Idle Poll Interval: [cyan]{effective_interval}s[/cyan]\n"
             f"• Auto Hunt Sweeps: [cyan]{'enabled (' + str(settings.auto_hunt_sweep_interval_sec) + 's interval)' if (sweeps and settings.auto_hunt_execution_enabled) else 'disabled'}[/cyan]\n"
             f"• Continuous Purple Team: [cyan]{'enabled (' + str(settings.purple_team_continuous_replay_interval_sec) + 's interval)' if settings.purple_team_continuous_replay_interval_sec > 0 else 'disabled'}[/cyan]\n"
-            f"• Max Cycles: [cyan]{max_cycles or 'unlimited'}[/cyan]\n"
+            f"• Max Cycles: [cyan]{max_cycles_display}[/cyan]\n"
             f"• Research Reuse: [cyan]{'enabled (<=' + str(settings.research_reuse_max_age_days) + 'd)' if settings.research_reuse_enabled else 'disabled'}[/cyan]\n"
             f"• Dry Run: [cyan]{dry_run}[/cyan]\n"
             f"• Force Quotas: [cyan]{force}[/cyan]\n\n"
@@ -140,6 +148,11 @@ def daemon(
     from hecate_runner.integration_checks import start_health_refresh
 
     cycles_completed = 0
+    if max_cycles is not None and max_cycles == 0:
+        console.print("[bold green]Reached max cycles (0). Exiting daemon.[/bold green]")
+        console.print("[bold green]Hecate daemon shut down gracefully after 0 cycles.[/bold green]")
+        raise typer.Exit(code=0)
+
     try:
         while not stop_event.is_set():
             start_health_refresh(settings)

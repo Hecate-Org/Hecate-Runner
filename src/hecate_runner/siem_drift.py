@@ -19,7 +19,12 @@ from hecate_runner.atomic_write import atomic_write_text
 from hecate_runner.lifecycle import get_hunt_lifecycle, set_hunt_lifecycle
 from hecate_runner.slack_bot import sync_queries_for_hunt, undeploy_queries_for_hunt
 from hecate_runner.sqlite_utils import connect_sqlite, connect_sqlite_ro
-from hecate_runner.workspace_paths import query_directory, read_artifact
+from hecate_runner.workspace_paths import (
+    is_valid_hunt_id,
+    list_query_hunt_ids,
+    query_directory,
+    read_artifact,
+)
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +136,10 @@ def audit_workspace_queries(
             "dry_run": dry_run,
         }
 
-    hunt_dirs = sorted([d for d in queries_root.iterdir() if d.is_dir()])
+    hunt_dirs = sorted(
+        [queries_root / hunt_id for hunt_id in list_query_hunt_ids(queries_root)],
+        key=lambda p: p.name,
+    )
     total_queries = 0
     in_sync_count = 0
     decommissioned_count = 0
@@ -487,10 +495,10 @@ def decommission_hunt_queries(
     """
     queries_root = workspace / "queries"
     if hunt_id.lower() == "all":
-        hunts = sorted(
-            [d.name for d in queries_root.iterdir() if d.is_dir() and d.name.startswith("H-")]
-        )
+        hunts = list_query_hunt_ids(queries_root)
     else:
+        if not is_valid_hunt_id(hunt_id):
+            raise ValueError(f"Invalid hunt ID: {hunt_id!r}")
         hunts = [hunt_id]
 
     all_results: list[dict[str, Any]] = []

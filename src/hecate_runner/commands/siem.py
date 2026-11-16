@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import typer
 from rich.console import Console
@@ -14,7 +16,9 @@ from rich.table import Table
 
 from hecate_runner import drift_alerts, notifications, siem_drift
 from hecate_runner.config import Settings
+from hecate_runner.workspace_paths import normalize_hunt_id, query_directory
 
+log = logging.getLogger(__name__)
 console = Console()
 
 
@@ -23,6 +27,40 @@ def _get_settings() -> Settings:
     if cli_mod and hasattr(cli_mod, "Settings"):
         return cast(Settings, cli_mod.Settings())
     return Settings()
+
+
+def _require_hunt_id(hunt_id: str) -> str:
+    try:
+        return normalize_hunt_id(hunt_id)
+    except ValueError:
+        console.print(f"[red]Invalid hunt ID:[/red] {hunt_id!r}")
+        raise typer.Exit(code=1) from None
+
+
+def _append_github_step_summary(markdown: str) -> None:
+    summary_env = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_env:
+        return
+    summary_path = Path(summary_env)
+    try:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("a", encoding="utf-8") as f:
+            f.write(markdown if markdown.endswith("\n") else markdown + "\n")
+    except OSError as exc:
+        log.warning("Could not write GITHUB_STEP_SUMMARY (%s): %s", summary_path, exc)
+        console.print(
+            f"[yellow]Warning:[/yellow] could not write GITHUB_STEP_SUMMARY ({summary_path}): {exc}"
+        )
+
+
+def _print_jsonable(data: Any) -> None:
+    try:
+        console.print_json(data=data)
+    except (TypeError, ValueError):
+        try:
+            console.print_json(json.dumps(data, default=str))
+        except Exception:
+            console.print(str(data))
 
 
 def audit_siem_cmd(
@@ -106,7 +144,7 @@ def audit_siem_cmd(
     if format == "markdown":
         console.print(md_report)
     elif format == "json":
-        console.print_json(data=report)
+        _print_jsonable(report)
     else:
         table = Table(
             title=f"SIEM & EDR Detection-as-Code Audit ({mode_str})",
@@ -169,9 +207,7 @@ def audit_siem_cmd(
             console.print(f"[green]Markdown report written to:[/green] {output_markdown}")
 
     if github_step_summary and "GITHUB_STEP_SUMMARY" in os.environ:
-        summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
-        with summary_path.open("a", encoding="utf-8") as f:
-            f.write(md_report + "\n")
+        _append_github_step_summary(md_report + "\n")
 
     if alert_slack and (drifted > 0 or missing > 0):
         for hunt_id, problems in drift_alerts.drift_alert_groups(report).items():
@@ -228,13 +264,14 @@ def reconcile_queries_cmd(
 ) -> None:
     """Reconcile drifted or missing SIEM/EDR queries back to git-authoritative definitions."""
     settings = _get_settings()
-    query_dir = settings.hecate_workspace / "queries" / hunt_id
+    clean_id = _require_hunt_id(hunt_id)
+    query_dir = query_directory(settings.hecate_workspace, clean_id)
     if not query_dir.exists():
         console.print(f"[red]Query directory not found:[/red] {query_dir}")
         raise typer.Exit(code=1)
 
     table = Table(
-        title=f"SIEM & EDR Query Reconciliation for {hunt_id}",
+        title=f"SIEM & EDR Query Reconciliation for {clean_id}",
         show_header=True,
         header_style="bold green",
     )
@@ -247,14 +284,14 @@ def reconcile_queries_cmd(
 
     results = siem_drift.reconcile_hunt_queries(
         settings.hecate_workspace,
-        hunt_id,
+        clean_id,
         target=target,
         dry_run=dry_run,
         force=force,
     )
 
     if not results:
-        console.print(f"[green]All queries for {hunt_id} are already in sync.[/green]")
+        console.print(f"[green]All queries for {clean_id} are already in sync.[/green]")
         return
 
     reconciled_count = 0
@@ -284,7 +321,7 @@ def reconcile_queries_cmd(
                 console.print(
                     f"\n[bold cyan]── Reconciliation Request: {res.get('target')} ({res.get('file')}) ──[/bold cyan]"
                 )
-                console.print_json(data=summary)
+                _print_jsonable(summary)
 
 
 def drift_history_cmd(
@@ -307,9 +344,13 @@ def drift_history_cmd(
 ) -> None:
     """View chronological SIEM Detection-as-Code drift and reconciliation audit history."""
     settings = _get_settings()
+    clean_hunt = _require_hunt_id(hunt_id) if hunt_id else None
+    if limit < 0:
+        console.print(f"[red]Invalid --limit:[/red] {limit} (must be >= 0).")
+        raise typer.Exit(code=1)
 
     events = siem_drift.get_drift_history(
-        settings.hecate_workspace, hunt_id=hunt_id, target=target, limit=limit
+        settings.hecate_workspace, hunt_id=clean_hunt, target=target, limit=limit
     )
     if not events:
         console.print("[dim]No drift or reconciliation events found in audit history.[/dim]")
@@ -374,6 +415,9 @@ def siem_status_cmd(
 ) -> None:
     """Display comprehensive SIEM Detection-as-Code health, sync metrics, and audit summary."""
     settings = _get_settings()
+    if days < 1:
+        console.print(f"[red]Invalid --days:[/red] {days} (must be >= 1).")
+        raise typer.Exit(code=1)
 
     metrics = siem_drift.get_siem_drift_metrics(settings.hecate_workspace, days=days)
     history = siem_drift.get_drift_history(settings.hecate_workspace, limit=5)
@@ -391,13 +435,14 @@ def siem_status_cmd(
     health_color = (
         "green" if (drifted == 0 and missing == 0) else ("yellow" if drifted == 0 else "red")
     )
+    day_label = f"{days}-Day" if days != 1 else "1-Day"
 
     summary_text = (
         f"[bold]Sync Health:[/bold] [{health_color}]{health_pct:.1f}%[/{health_color}] "
         f"([green]{in_sync}[/green] in sync, [yellow]{drifted}[/yellow] drifted, [magenta]{missing}[/magenta] missing / {total_q} total)\n"
         f"[bold]Tracked Query Versions:[/bold] [cyan]{versions}[/cyan] rule version(s)\n"
         f"[bold]Last Audit Sweep:[/bold] {last_audited}\n"
-        f"[bold]7-Day Audit Sweeps:[/bold] {sweeps} | [bold]Reconciliations:[/bold] [green]{reconciled}[/green]"
+        f"[bold]{day_label} Audit Sweeps:[/bold] {sweeps} | [bold]Reconciliations:[/bold] [green]{reconciled}[/green]"
     )
 
     console.print(
@@ -410,7 +455,10 @@ def siem_status_cmd(
 
     target_breakdown = metrics.get("target_drift_breakdown", {})
     if target_breakdown:
-        tb_table = Table(title="Drift Incidents by Target Platform (Past 7 Days)", show_header=True)
+        tb_table = Table(
+            title=f"Drift Incidents by Target Platform (Past {days} Day{'s' if days != 1 else ''})",
+            show_header=True,
+        )
         tb_table.add_column("Target Platform")
         tb_table.add_column("Drift Incidents", justify="right")
         for tgt, count in sorted(target_breakdown.items(), key=lambda x: -x[1]):
@@ -458,16 +506,20 @@ def query_versions_cmd(
 ) -> None:
     """View deployed SIEM query versions, content hashes, and deployment history."""
     settings = _get_settings()
+    clean_hunt = _require_hunt_id(hunt_id) if hunt_id else None
+    if limit < 0:
+        console.print(f"[red]Invalid --limit:[/red] {limit} (must be >= 0).")
+        raise typer.Exit(code=1)
 
     versions = siem_drift.get_query_versions(
-        settings.hecate_workspace, hunt_id=hunt_id, target=target, limit=limit
+        settings.hecate_workspace, hunt_id=clean_hunt, target=target, limit=limit
     )
     if not versions:
         console.print("[dim]No query versions recorded in database yet.[/dim]")
         return
 
     table = Table(
-        title=f"SIEM Query Versions {f'for {hunt_id}' if hunt_id else ''}",
+        title=f"SIEM Query Versions {f'for {clean_hunt}' if clean_hunt else ''}",
         show_header=True,
         header_style="bold blue",
     )
