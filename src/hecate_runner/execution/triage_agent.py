@@ -227,9 +227,22 @@ class FindingTriageAgent:
             for pat in _SUSPICIOUS_CLI_PATTERNS:
                 if pat.search(e.command_line):
                     suspicious_cli_hits += 1
+                    cli_lower = e.command_line.lower()
+                    if (
+                        "bash" in cli_lower
+                        or "sh " in cli_lower
+                        or "| sh" in cli_lower
+                        or "| bash" in cli_lower
+                    ):
+                        matched_techniques.add("T1059.004")
+                    elif "powershell" in cli_lower or "iex" in cli_lower:
+                        matched_techniques.add("T1059.001")
                     if server_parent:
                         server_command_hits += 1
                     break
+
+            if e.fused_lineage:
+                matched_techniques.add("T1071")
 
         total_ev = len(events)
 
@@ -316,6 +329,35 @@ class FindingTriageAgent:
                 recommended_action="pivot",
                 event_count=total_ev,
                 reviewed_event_count=total_ev,
+            )
+
+        # Endpoint-to-Network Fusion: Process lineage verified connecting to external C2
+        fused_events = [e for e in events if e.fused_lineage and e.process_name]
+        if fused_events:
+            first_fused = fused_events[0]
+            matched_techniques.add("T1071")
+            c2_target = first_fused.dst_ip or first_fused.domain or first_fused.ip
+            return FindingTriageReport(
+                hunt_id=hunt_id,
+                sweep_id=sweep_id,
+                target_siem=target_siem,
+                verdict="suspicious",
+                confidence=0.78,
+                summary=(
+                    f"External C2 communication verified on host '{first_fused.host}': "
+                    f"endpoint process '{first_fused.process_name}' resolved to external indicator '{c2_target}'."
+                ),
+                rationale=(
+                    f"Endpoint-to-network fusion successfully recovered process lineage across {len(fused_events)} event(s).\n"
+                    f"Process '{first_fused.process_name}' (PID: {first_fused.pid or 'n/a'}) on host '{first_fused.host}' "
+                    f"communicated with external infrastructure '{c2_target}'. Investigation pivoting recommended."
+                ),
+                technique_matches=sorted(matched_techniques),
+                extracted_entities=entities,
+                recommended_action="pivot",
+                event_count=total_ev,
+                reviewed_event_count=total_ev,
+                assessment_source="endpoint_network_fusion",
             )
 
         # No heuristic match cannot establish a benign baseline or exclude abuse.

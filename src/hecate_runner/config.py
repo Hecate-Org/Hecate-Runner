@@ -1447,6 +1447,18 @@ class Settings(BaseSettings):
         alias="HECATE_AUTO_HUNT_PIVOT_MIN_CONFIDENCE",
         description="Minimum triage confidence required to trigger autonomous investigation pivoting.",
     )
+    auto_hunt_fusion_enabled: bool = Field(
+        default=True,
+        alias="HECATE_AUTO_HUNT_FUSION_ENABLED",
+        description="Enable automatic endpoint-to-network fusion when external C2 IP or domain hits lack process context.",
+    )
+    auto_hunt_fusion_window_sec: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        alias="HECATE_AUTO_HUNT_FUSION_WINDOW_SEC",
+        description="Time window in seconds (+/-) around network hits to search for matching endpoint process lineage.",
+    )
     auto_hunt_sweep_interval_sec: int = Field(
         default=3600,
         ge=60,
