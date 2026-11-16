@@ -288,6 +288,14 @@ class RuleTuner:
             )
 
         rule_file = sigma_files[0]
+        try:
+            from hecate_runner.bas.rule_selection import select_primary_sigma_rule
+
+            selected = select_primary_sigma_rule(query_dir)
+            if selected is not None:
+                rule_file = selected.path
+        except Exception as sel_exc:
+            log.debug("Primary Sigma selection fell back to first file: %s", sel_exc)
         original_yaml = read_artifact(rule_file, self.workspace)
 
         try:
@@ -375,13 +383,23 @@ class RuleTuner:
                 "Tuned rule for %s has subsumption warnings: %s", norm_hunt_id, subsumption_warnings
             )
 
-        # Also update the hunt markdown file if present
-        matches = sorted((self.workspace / "hunts").glob(f"**/{norm_hunt_id}.md"))
-        if matches:
-            hunt_doc = matches[0]
-            try:
+        # Hunt catalog writeback: frontmatter (tune/filter/level) + revision note
+        try:
+            from hecate_runner.catalog_feedback import record_rule_tune_feedback
+            from hecate_runner.lifecycle import find_hunt_path
+
+            record_rule_tune_feedback(
+                self.workspace,
+                norm_hunt_id,
+                summary=summary,
+                instruction=instruction,
+                rule_file=rule_file,
+                transpiled_targets=successful_targets,
+                body_note=False,
+            )
+            hunt_doc = find_hunt_path(self.workspace, norm_hunt_id)
+            if hunt_doc is not None:
                 doc_text = read_artifact(hunt_doc, self.workspace)
-                # Append a note in Revision / Grounding history
                 tuning_note = (
                     f"\n\n### Conversational Rule Tuning ({instruction})\n"
                     f"- **Summary:** {summary}\n"
@@ -392,8 +410,8 @@ class RuleTuner:
                         f"- **Subsumption Warnings:** {'; '.join(subsumption_warnings)}\n"
                     )
                 write_artifact(hunt_doc, doc_text + tuning_note, self.workspace)
-            except Exception as h_err:
-                log.debug("Note update to %s skipped (%s)", hunt_doc.name, h_err)
+        except Exception as h_err:
+            log.debug("Note/catalog update for %s skipped (%s)", norm_hunt_id, h_err)
 
         log.info("Successfully tuned rule for %s: %s", norm_hunt_id, summary)
         return RuleTuningResult(

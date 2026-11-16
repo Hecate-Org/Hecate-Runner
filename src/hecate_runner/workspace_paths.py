@@ -17,7 +17,7 @@ def normalize_hunt_id(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("Invalid hunt ID")
     value = value.strip().upper()
-    if not re.fullmatch(r"H-[0-9]{1,12}", value):
+    if not re.fullmatch(r"(H|HNT)-[A-Z0-9_-]{1,32}", value):
         raise ValueError("Invalid hunt ID")
     return value
 

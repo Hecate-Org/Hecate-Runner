@@ -839,3 +839,16 @@ class SiemAlertVerifier:
 
         except Exception as file_exc:
             log.warning("Could not persist BAS run record: %s", file_exc)
+
+        # 3. Hunt catalog frontmatter (TPs / miss counts / bas_* fidelity fields)
+        if res.hunt_id:
+            try:
+                from hecate_runner.catalog_feedback import record_siem_verification_feedback
+
+                record_siem_verification_feedback(
+                    self.workspace,
+                    res,
+                    increment_outcomes=True,
+                )
+            except Exception as cat_exc:
+                log.warning("Could not write SIEM verification into hunt catalog: %s", cat_exc)
