@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from hecate_agent.commands.monitor_samplers import RunnerStatusSampler, _diagnose_state_access
+
 from hecate_runner.config import Settings
 from hecate_runner.github_publisher import PromotionOutbox, diff_release_snapshots
 from hecate_runner.slack_blocks import build_pending_hunts_card, format_release_diff_message
@@ -49,10 +50,11 @@ def test_monitor_sampler_sets_quota_unavailable_reason(tmp_path: Path) -> None:
         reason = _diagnose_state_access(state)
         assert reason is not None
         sampler = RunnerStatusSampler(ws)
-        with mock.patch.object(sampler, "_sample_heavy", wraps=sampler._sample_heavy):
-            # Force heavy path against this workspace env
-            with mock.patch.dict(os.environ, {"HECATE_WORKSPACE": str(ws)}, clear=False):
-                heavy = sampler._sample_heavy(tmp_path)
+        with (
+            mock.patch.object(sampler, "_sample_heavy", wraps=sampler._sample_heavy),
+            mock.patch.dict(os.environ, {"HECATE_WORKSPACE": str(ws)}, clear=False),
+        ):
+            heavy = sampler._sample_heavy(tmp_path)
         assert heavy.quota_unavailable_reason is not None
         assert heavy.drafts_today is None
     finally:
@@ -105,9 +107,7 @@ def test_outbox_latest_awaiting_and_diff(tmp_path: Path) -> None:
     with outbox._connect() as conn:
         statuses = {
             row["digest"]: row["status"]
-            for row in conn.execute(
-                "SELECT digest, status FROM promotions WHERE hunt_id='H-0001'"
-            )
+            for row in conn.execute("SELECT digest, status FROM promotions WHERE hunt_id='H-0001'")
         }
     assert statuses["digest-mid"] == "superseded"
     assert statuses["digest-new"] == "awaiting_review"

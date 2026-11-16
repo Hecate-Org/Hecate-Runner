@@ -33,8 +33,7 @@ def diagnose_state_file_access(path: Path) -> str | None:
             return hint + " Ensure your user can read the file."
         if gid not in os.getgroups():
             return (
-                hint
-                + " Your session is missing group `hecate-data` — run "
+                hint + " Your session is missing group `hecate-data` — run "
                 "`newgrp hecate-data` or open a new terminal, then retry."
             )
         return hint + " Check ACLs/ownership on the workspace state file."

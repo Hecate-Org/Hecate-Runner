@@ -13,9 +13,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
-from hecate_runner.config import Settings
 from hecate_runner.execution.attack_sequence import (
     AttackStage,
     classify_query_stage,
@@ -23,12 +20,10 @@ from hecate_runner.execution.attack_sequence import (
     format_sequence_timeline,
     sort_and_group_queries,
 )
-from hecate_runner.execution.normalizer import NormalizedEvent, normalize_event
+from hecate_runner.execution.normalizer import NormalizedEvent
 from hecate_runner.execution.safe_gate import SafeExecutionGate
-from hecate_runner.execution.scheduler import HuntExecutionScheduler
 from hecate_runner.execution.triage_agent import FindingTriageAgent
 from hecate_runner.query_execution import MockQueryProvider
-
 
 # --- 1. Query Stage Classification & Ordering --------------------------------
 
@@ -36,12 +31,22 @@ from hecate_runner.query_execution import MockQueryProvider
 def test_classify_query_stage() -> None:
     assert classify_query_stage("dns_query__dns_lookup_of_domain.spl") == AttackStage.RECON_DELIVERY
     assert classify_query_stage("proxy__request_for_url.spl") == AttackStage.RECON_DELIVERY
-    assert classify_query_stage("webserver__cve_2024_3400_exploit.spl") == AttackStage.INITIAL_ACCESS
+    assert (
+        classify_query_stage("webserver__cve_2024_3400_exploit.spl") == AttackStage.INITIAL_ACCESS
+    )
     assert classify_query_stage("process_creation__curl_download.spl") == AttackStage.EXECUTION
     assert classify_query_stage("process_creation__bash_script.spl") == AttackStage.EXECUTION
-    assert classify_query_stage("file_event__launchagent_persistence.spl") == AttackStage.PERSISTENCE_EVASION
-    assert classify_query_stage("network_connection__c2_beacon.spl") == AttackStage.COMMAND_AND_CONTROL
-    assert classify_query_stage("process_creation__whoami_discovery.spl") == AttackStage.DISCOVERY_CREDENTIALS
+    assert (
+        classify_query_stage("file_event__launchagent_persistence.spl")
+        == AttackStage.PERSISTENCE_EVASION
+    )
+    assert (
+        classify_query_stage("network_connection__c2_beacon.spl") == AttackStage.COMMAND_AND_CONTROL
+    )
+    assert (
+        classify_query_stage("process_creation__whoami_discovery.spl")
+        == AttackStage.DISCOVERY_CREDENTIALS
+    )
 
 
 def test_sort_and_group_queries_progression(tmp_path: Path) -> None:

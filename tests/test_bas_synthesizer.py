@@ -434,3 +434,37 @@ def test_bas_synthesize_cli(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Synthesized Telemetry & Evaluation" in result.stdout
     assert "PASSED (True Positive Triggered, Controls Clean)" in result.stdout
+
+
+def test_bas_synthesize_explicit_queries_path_uses_parent_hunt_id(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from hecate_runner.bas.synthesizer import synthesize_events_from_rule
+    from hecate_runner.cli import app
+
+    q = tmp_path / "queries" / "H-0032"
+    q.mkdir(parents=True)
+    rule = q / "webserver__probe.yml"
+    rule.write_text(
+        """
+title: Probe
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|endswith: /curl
+  condition: selection
+level: high
+""",
+        encoding="utf-8",
+    )
+    # Direct synthesizer helper mirrors CLI hunt_id tagging once path is resolved.
+    tp, _ = synthesize_events_from_rule(rule.read_text(encoding="utf-8"), hunt_id="H-0032")
+    assert tp.get("hunt_id") == "H-0032"
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["bas-synthesize", str(rule)])
+    assert result.exit_code == 0
+    assert "for H-0032" in result.stdout
+    assert "webserver__http_request" not in result.stdout  # must not use filename as hunt id

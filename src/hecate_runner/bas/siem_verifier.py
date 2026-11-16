@@ -130,9 +130,7 @@ class SiemAlertVerifier:
         query_str, filename, _ = self.resolve_candidate_rule(hunt_id, technique_id)
         return query_str, filename
 
-    def _normalize_spl_query(
-        self, raw_query: str, *, index: str | None = None
-    ) -> str:
+    def _normalize_spl_query(self, raw_query: str, *, index: str | None = None) -> str:
         """Normalize transpiled SPL query so it executes against raw JSON index events."""
         if index and index not in {"*", ""}:
             # Lab callers that pin an index go through the force-rewrite path.

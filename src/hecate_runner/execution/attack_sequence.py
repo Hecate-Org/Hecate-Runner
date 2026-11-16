@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class AttackStage(str, Enum):
+class AttackStage(StrEnum):
     """Normalized MITRE ATT&CK kill-chain progression stages."""
 
     RECON_DELIVERY = "recon_delivery"
@@ -34,7 +34,7 @@ class AttackStage(str, Enum):
     @property
     def order(self) -> int:
         """Sequential ordering across an attack progression."""
-        _ORDER = {
+        _order = {
             AttackStage.RECON_DELIVERY: 1,
             AttackStage.INITIAL_ACCESS: 2,
             AttackStage.EXECUTION: 3,
@@ -42,12 +42,12 @@ class AttackStage(str, Enum):
             AttackStage.COMMAND_AND_CONTROL: 5,
             AttackStage.DISCOVERY_CREDENTIALS: 6,
         }
-        return _ORDER.get(self, 99)
+        return _order.get(self, 99)
 
     @property
     def label(self) -> str:
         """Human-readable display label."""
-        _LABELS = {
+        _labels = {
             AttackStage.RECON_DELIVERY: "Recon & Delivery",
             AttackStage.INITIAL_ACCESS: "Initial Access & Exploitation",
             AttackStage.EXECUTION: "Process Execution & Tool Transfer",
@@ -55,7 +55,7 @@ class AttackStage(str, Enum):
             AttackStage.COMMAND_AND_CONTROL: "Command & Control / Exfiltration",
             AttackStage.DISCOVERY_CREDENTIALS: "Discovery & Credential Access",
         }
-        return _LABELS.get(self, self.value)
+        return _labels.get(self, self.value)
 
 
 # Rules to classify queries by filename pattern or detection keywords.
@@ -64,15 +64,35 @@ class AttackStage(str, Enum):
 # process_creation__whoami_discovery are correctly categorized as DISCOVERY.
 _STAGE_PATTERNS: list[tuple[re.Pattern, AttackStage]] = [
     # Specific Behavioral Techniques
-    (re.compile(r"keychain|shadow|sam_|whoami|system_profiler|ioreg_|credential|discovery", re.IGNORECASE), AttackStage.DISCOVERY_CREDENTIALS),
-    (re.compile(r"launchagent|launchdaemon|launchctl|cron_|cron\.d|systemd|registry_|startup|plist|chmod_|xattr_|persistence", re.IGNORECASE), AttackStage.PERSISTENCE_EVASION),
-    (re.compile(r"c2_|beacon|outbound_|connect_to", re.IGNORECASE), AttackStage.COMMAND_AND_CONTROL),
+    (
+        re.compile(
+            r"keychain|shadow|sam_|whoami|system_profiler|ioreg_|credential|discovery",
+            re.IGNORECASE,
+        ),
+        AttackStage.DISCOVERY_CREDENTIALS,
+    ),
+    (
+        re.compile(
+            r"launchagent|launchdaemon|launchctl|cron_|cron\.d|systemd|registry_|startup|plist|chmod_|xattr_|persistence",
+            re.IGNORECASE,
+        ),
+        AttackStage.PERSISTENCE_EVASION,
+    ),
+    (
+        re.compile(r"c2_|beacon|outbound_|connect_to", re.IGNORECASE),
+        AttackStage.COMMAND_AND_CONTROL,
+    ),
     (re.compile(r"exploit|cve_|cve-|\/v2\/|\/flows", re.IGNORECASE), AttackStage.INITIAL_ACCESS),
     (re.compile(r"phish|email|attachment|spearphish", re.IGNORECASE), AttackStage.RECON_DELIVERY),
-    (re.compile(r"curl_|wget_|bash_|sh_|powershell|cmd_|exec_|shell_process", re.IGNORECASE), AttackStage.EXECUTION),
-
+    (
+        re.compile(r"curl_|wget_|bash_|sh_|powershell|cmd_|exec_|shell_process", re.IGNORECASE),
+        AttackStage.EXECUTION,
+    ),
     # Log Source Categories (if no specific technique matched)
-    (re.compile(r"dns_query|dns_lookup|domain_named|proxy", re.IGNORECASE), AttackStage.RECON_DELIVERY),
+    (
+        re.compile(r"dns_query|dns_lookup|domain_named|proxy", re.IGNORECASE),
+        AttackStage.RECON_DELIVERY,
+    ),
     (re.compile(r"webserver|http_request", re.IGNORECASE), AttackStage.INITIAL_ACCESS),
     (re.compile(r"network_connection", re.IGNORECASE), AttackStage.COMMAND_AND_CONTROL),
     (re.compile(r"file_event|file_creation", re.IGNORECASE), AttackStage.PERSISTENCE_EVASION),
@@ -180,7 +200,7 @@ def _parse_event_dt(ts_str: str) -> datetime | None:
     """Safely parse diverse timestamp strings into a datetime object."""
     if not ts_str:
         return None
-    for fmt in (
+    for _fmt in (
         "%Y-%m-%dT%H:%M:%S.%f%z",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%d %H:%M:%S",
@@ -240,7 +260,9 @@ def correlate_events_into_sequences(
         for dt, e in parsed_events:
             stage_val = ""
             if e.stage:
-                stage_val = e.stage.value if isinstance(e.stage, AttackStage) else str(e.stage).lower()
+                stage_val = (
+                    e.stage.value if isinstance(e.stage, AttackStage) else str(e.stage).lower()
+                )
             elif e.query_file:
                 stage_val = classify_query_stage(e.query_file).value
 
@@ -251,7 +273,9 @@ def correlate_events_into_sequences(
 
             if first_dt is None and dt != datetime.min:
                 first_dt = dt
-            delta_sec = (dt - first_dt).total_seconds() if (first_dt and dt != datetime.min) else 0.0
+            delta_sec = (
+                (dt - first_dt).total_seconds() if (first_dt and dt != datetime.min) else 0.0
+            )
 
             # Construct step summary
             detail_desc = ""
@@ -308,7 +332,6 @@ def format_sequence_timeline(seq: CorrelatedSequence) -> str:
         f"Correlated Attack Sequence on {seq.entity_type} '{seq.entity_value}' "
         f"({seq.distinct_stages_count} stages across {seq.total_span_seconds:.1f}s):"
     ]
-    seen_labels: set[str] = set()
     step_num = 1
 
     for step in seq.steps:

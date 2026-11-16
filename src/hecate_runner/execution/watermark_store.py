@@ -161,9 +161,7 @@ class WatermarkStore:
                 with contextlib.suppress(sqlite3.OperationalError):
                     conn.execute(f"ALTER TABLE hunt_execution_findings ADD COLUMN {col} {col_def}")
 
-            for col, col_def in (
-                ("composite_queries_json", "TEXT DEFAULT '[]'"),
-            ):
+            for col, col_def in (("composite_queries_json", "TEXT DEFAULT '[]'"),):
                 with contextlib.suppress(sqlite3.OperationalError):
                     conn.execute(f"ALTER TABLE hunt_staged_sweeps ADD COLUMN {col} {col_def}")
 
@@ -326,7 +324,10 @@ class WatermarkStore:
 
     def _row_to_staged_sweep(self, row: sqlite3.Row) -> StagedSweep:
         comp_queries: list[dict[str, Any]] = []
-        if "composite_queries_json" in row.keys() and row["composite_queries_json"]:
+        if (
+            "composite_queries_json" in row.keys()  # noqa: SIM118 (sqlite3.Row checks values with 'in')
+            and row["composite_queries_json"]
+        ):
             with contextlib.suppress(Exception):
                 comp_queries = json.loads(row["composite_queries_json"])
         return StagedSweep(

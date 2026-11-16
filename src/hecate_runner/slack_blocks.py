@@ -1030,12 +1030,8 @@ def build_pending_hunts_card(
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*Release digests* — showing **latest** snapshot per hunt"
-                        + (
-                            f" ({stale_total} older digest(s) hidden)"
-                            if stale_total
-                            else ""
-                        )
+                        "*Release digests* — showing **latest** snapshot per hunt"
+                        + (f" ({stale_total} older digest(s) hidden)" if stale_total else "")
                     ),
                 },
             }
@@ -1118,9 +1114,7 @@ def build_pending_hunts_card(
                 elif lab_status == "error":
                     details.append(f"*Lab hits:* error on `{provider}`")
                 elif lab_status == "overmatch":
-                    details.append(
-                        f"*Lab hits:* overmatch on `{provider}` ({hits} in {window}d)"
-                    )
+                    details.append(f"*Lab hits:* overmatch on `{provider}` ({hits} in {window}d)")
                 else:
                     details.append(f"*Lab hits:* {hits} on `{provider}` in {window}d")
             blocks.append(
@@ -1207,11 +1201,7 @@ def format_release_diff_message(diff: dict[str, Any]) -> str:
             continue
         shown = paths[:12]
         extra = f" _(+{len(paths) - 12} more)_" if len(paths) > 12 else ""
-        lines.append(
-            f"*{label} ({len(paths)}):* "
-            + ", ".join(f"`{p}`" for p in shown)
-            + extra
-        )
+        lines.append(f"*{label} ({len(paths)}):* " + ", ".join(f"`{p}`" for p in shown) + extra)
     if not any(diff.get(k) for k in ("added", "removed", "changed")):
         lines.append("_No path-level differences vs baseline._")
     return "\n".join(lines)
@@ -1423,7 +1413,7 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
         {
             "type": "mrkdwn",
             "text": (
-                f"*Draft Quota (24h):*\n⚠️ unavailable"
+                "*Draft Quota (24h):*\n⚠️ unavailable"
                 if quota_issue
                 else f"*Draft Quota (24h):*\n`{state.drafts_today} / {settings.max_drafts_per_day}`"
             ),
@@ -1431,7 +1421,7 @@ def build_runner_status_card(settings: Settings) -> list[dict[str, Any]]:
         {
             "type": "mrkdwn",
             "text": (
-                f"*Research Quota:*\n⚠️ unavailable"
+                "*Research Quota:*\n⚠️ unavailable"
                 if quota_issue
                 else f"*Research Quota:*\n`{state.research_runs_today} / {settings.max_research_runs_per_day}`"
             ),

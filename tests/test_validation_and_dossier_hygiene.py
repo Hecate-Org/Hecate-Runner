@@ -24,7 +24,6 @@ from hecate_runner.github_publisher import (
 from hecate_runner.orchestrator import Orchestrator
 from hecate_runner.state import OrchestratorState
 
-
 CORE_PHP = """
 title: PHP Web Server Spawning Shell
 logsource:
@@ -88,9 +87,10 @@ def _write_ranked_hunt(root: Path, hunt_id: str = "H-0032") -> Path:
 
 def test_shared_ranking_prefers_behavioral_core_over_alphabetical() -> None:
     path = Path("process_creation__php_shell.yml")
-    assert sigma_rule_rank(path, CORE_PHP)[0] < sigma_rule_rank(
-        Path("aaa_command_the_source_shows.yml"), COMMAND_QUOTE
-    )[0]
+    assert (
+        sigma_rule_rank(path, CORE_PHP)[0]
+        < sigma_rule_rank(Path("aaa_command_the_source_shows.yml"), COMMAND_QUOTE)[0]
+    )
     assert sigma_rule_rank(Path("dns__incremental_domain_1.yml"), INCREMENTAL)[0] >= 100
 
 
@@ -115,7 +115,9 @@ def test_select_primary_and_siem_verifier_agree(tmp_path: Path) -> None:
 def test_loopback_ssl_defaults_align() -> None:
     assert resolve_splunk_verify_ssl({}, host_url="https://localhost:8089") is False
     assert resolve_splunk_verify_ssl({}, host_url="https://127.0.0.1:8089") is False
-    assert resolve_splunk_verify_ssl({"SPLUNK_VERIFY_SSL": "true"}, host_url="https://localhost:8089")
+    assert resolve_splunk_verify_ssl(
+        {"SPLUNK_VERIFY_SSL": "true"}, host_url="https://localhost:8089"
+    )
     assert resolve_splunk_verify_ssl({}, host_url="https://splunk.example.com:8089") is True
 
 
@@ -373,9 +375,7 @@ def test_native_only_skips_incremental_spl(tmp_path: Path) -> None:
     q.mkdir(parents=True)
     (q / "zzz_incremental_ioc.spl").write_text('QueryName="evil"', encoding="utf-8")
     (q / "t1033.spl").write_text('Image="*whoami*"', encoding="utf-8")
-    query, name, yaml_text = SiemAlertVerifier(tmp_path).resolve_candidate_rule(
-        "H-0051", "T1033"
-    )
+    query, name, yaml_text = SiemAlertVerifier(tmp_path).resolve_candidate_rule("H-0051", "T1033")
     assert name == "t1033.spl"
     assert query == 'Image="*whoami*"'
     assert yaml_text == ""
@@ -465,8 +465,7 @@ def test_enqueue_revives_superseded_digest_and_spares_queued(
     outbox.enqueue("H-0001", "digest-queued", {"q": "3"}, reviewed=True)
     with outbox._connect() as conn:
         by_digest = {
-            r["digest"]: r["status"]
-            for r in conn.execute("SELECT digest, status FROM promotions")
+            r["digest"]: r["status"] for r in conn.execute("SELECT digest, status FROM promotions")
         }
     assert by_digest["digest-a"] == "superseded"
     assert by_digest["digest-b"] == "superseded"  # awaiting tip cleared by queued enqueue
@@ -476,8 +475,7 @@ def test_enqueue_revives_superseded_digest_and_spares_queued(
     assert outbox.enqueue("H-0001", "digest-a", {"a": "1"}, reviewed=False) == "awaiting_review"
     with outbox._connect() as conn:
         by_digest = {
-            r["digest"]: r["status"]
-            for r in conn.execute("SELECT digest, status FROM promotions")
+            r["digest"]: r["status"] for r in conn.execute("SELECT digest, status FROM promotions")
         }
     assert by_digest["digest-a"] == "awaiting_review"
     assert by_digest["digest-queued"] == "queued"  # must not be superseded
@@ -493,8 +491,7 @@ def test_enqueue_approve_revives_superseded_to_queued(tmp_path: Path) -> None:
     assert outbox.enqueue("H-0001", "digest-a", {"a": "1"}, reviewed=True) == "queued"
     with outbox._connect() as conn:
         statuses = {
-            r["digest"]: r["status"]
-            for r in conn.execute("SELECT digest, status FROM promotions")
+            r["digest"]: r["status"] for r in conn.execute("SELECT digest, status FROM promotions")
         }
     assert statuses["digest-a"] == "queued"
     assert statuses["digest-b"] == "superseded"
@@ -566,9 +563,7 @@ def test_lab_proof_uses_explicit_rule_not_reranked_primary(
     monkeypatch.setenv("SPLUNK_HOST", "https://localhost:8089")
     monkeypatch.setenv("SPLUNK_PASSWORD", "changeme")
     monkeypatch.setattr("hecate_agent.core.splunk_client.SplunkClient", _Client)
-    monkeypatch.setattr(
-        "hecate_agent.core.splunk_credentials.splunk_token", lambda *_a, **_k: ""
-    )
+    monkeypatch.setattr("hecate_agent.core.splunk_credentials.splunk_token", lambda *_a, **_k: "")
 
     explicit = 'CommandLine="*tooling/checker*"'
     result = SiemAlertVerifier(tmp_path).verify_synthetic_lab_query(
@@ -606,9 +601,7 @@ def test_lab_proof_caps_splunk_job_creation(tmp_path: Path, monkeypatch: Any) ->
     monkeypatch.setenv("SPLUNK_HOST", "https://localhost:8089")
     monkeypatch.setenv("SPLUNK_PASSWORD", "changeme")
     monkeypatch.setattr("hecate_agent.core.splunk_client.SplunkClient", _Client)
-    monkeypatch.setattr(
-        "hecate_agent.core.splunk_credentials.splunk_token", lambda *_a, **_k: ""
-    )
+    monkeypatch.setattr("hecate_agent.core.splunk_credentials.splunk_token", lambda *_a, **_k: "")
 
     SiemAlertVerifier(tmp_path).verify_synthetic_lab_query(
         "H-0032",
@@ -628,7 +621,9 @@ def test_technique_token_does_not_prefix_match() -> None:
     assert rule_matches_technique(path, content, "T1003") is True
     assert rule_matches_technique(path, content, "T1003.001") is True
     assert rule_matches_technique(path, content, "T100") is False
-    assert rule_matches_technique(Path("other.yml"), "mentions t1003.001 elsewhere", "T1059") is False
+    assert (
+        rule_matches_technique(Path("other.yml"), "mentions t1003.001 elsewhere", "T1059") is False
+    )
 
 
 def test_await_review_supersedes_sibling_awaiting(tmp_path: Path) -> None:
@@ -641,14 +636,11 @@ def test_await_review_supersedes_sibling_awaiting(tmp_path: Path) -> None:
                (hunt_id,digest,payload,status,branch,created_at,updated_at)
                VALUES ('H-0001','digest-stale','{}','awaiting_review','b','t','t')"""
         )
-        row = conn.execute(
-            "SELECT id FROM promotions WHERE digest='digest-new'"
-        ).fetchone()
+        row = conn.execute("SELECT id FROM promotions WHERE digest='digest-new'").fetchone()
     outbox.await_review(int(row["id"]))
     with outbox._connect() as conn:
         statuses = {
-            r["digest"]: r["status"]
-            for r in conn.execute("SELECT digest, status FROM promotions")
+            r["digest"]: r["status"] for r in conn.execute("SELECT digest, status FROM promotions")
         }
     assert statuses["digest-new"] == "awaiting_review"
     assert statuses["digest-stale"] == "superseded"
@@ -786,7 +778,6 @@ def test_compact_heals_legacy_stacked_awaiting(tmp_path: Path) -> None:
     assert latest[0]["awaiting_count"] == 1
     with outbox._connect() as conn:
         statuses = {
-            r["digest"]: r["status"]
-            for r in conn.execute("SELECT digest, status FROM promotions")
+            r["digest"]: r["status"] for r in conn.execute("SELECT digest, status FROM promotions")
         }
     assert statuses == {"old": "superseded", "mid": "superseded", "tip": "awaiting_review"}

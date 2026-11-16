@@ -221,11 +221,22 @@ class HuntExecutionScheduler:
             # Sort and group query files across attack progression stages
             stage_queries = sort_and_group_queries(q_files)
             primary_file = stage_queries[0]["query_file"] if stage_queries else q_files[0].name
-            primary_text = stage_queries[0]["query_text"] if stage_queries else q_files[0].read_text(encoding="utf-8").strip()
+            primary_text = (
+                stage_queries[0]["query_text"]
+                if stage_queries
+                else q_files[0].read_text(encoding="utf-8").strip()
+            )
 
-            is_composite = getattr(self.settings, "auto_hunt_composite_sweeps", True) and len(stage_queries) > 1
-            query_file_label = f"composite ({len(stage_queries)} stages)" if is_composite else primary_file
-            display_text = build_composite_query_preview(stage_queries) if is_composite else primary_text
+            is_composite = (
+                getattr(self.settings, "auto_hunt_composite_sweeps", True)
+                and len(stage_queries) > 1
+            )
+            query_file_label = (
+                f"composite ({len(stage_queries)} stages)" if is_composite else primary_file
+            )
+            display_text = (
+                build_composite_query_preview(stage_queries) if is_composite else primary_text
+            )
 
             sweep = self.store.stage_sweep(
                 hunt_id=h_id,

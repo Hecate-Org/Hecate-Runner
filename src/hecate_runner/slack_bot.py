@@ -394,9 +394,7 @@ def list_pending_release_digests(settings: Settings) -> list[dict[str, Any]]:
         return []
 
 
-def pending_review_attachments(
-    settings: Settings, *, notice: str = ""
-) -> list[dict[str, Any]]:
+def pending_review_attachments(settings: Settings, *, notice: str = "") -> list[dict[str, Any]]:
     """Combined planning + latest-release pending card for Slack."""
     return build_pending_hunts_card(
         list_pending_hunts(settings.hecate_workspace),

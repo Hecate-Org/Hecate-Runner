@@ -64,10 +64,7 @@ def _technique_names(technique_id: str) -> tuple[str, ...]:
 def _technique_token_re(technique_id: str) -> re.Pattern[str]:
     """Match ATT&CK IDs as tokens so ``T100`` does not hit ``T1003.001``."""
     technique = technique_id.lower()
-    if technique.startswith("t") and technique[1:2].isdigit():
-        body = technique[1:]
-    else:
-        body = technique
+    body = technique[1:] if technique.startswith("t") and technique[1:2].isdigit() else technique
     return re.compile(rf"(?<![0-9a-z])(?:attack\.)?t{re.escape(body)}(?![0-9a-z])", re.I)
 
 
@@ -88,9 +85,7 @@ def rule_matches_technique(path: Path, content: str, technique_id: str | None) -
             if (not before.isalnum()) and (not after.isalnum()):
                 return True
             start = idx + 1
-    if token_re.search(content):
-        return True
-    return False
+    return bool(token_re.search(content))
 
 
 @dataclass(frozen=True)
@@ -169,9 +164,7 @@ def select_primary_sigma_rule(
     )
 
 
-def load_sigma_from_query_dirs(
-    roots: list[Path], hunt_id: str
-) -> tuple[str, Path | None]:
+def load_sigma_from_query_dirs(roots: list[Path], hunt_id: str) -> tuple[str, Path | None]:
     """Prefer authoritative Sigma under ``queries/<hunt_id>/`` across workspace roots."""
     candidates: list[tuple[tuple[int, str], Path, str]] = []
     seen: set[Path] = set()
