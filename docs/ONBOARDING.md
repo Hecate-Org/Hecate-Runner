@@ -1,12 +1,12 @@
 # Runner onboarding
 
-Use this guide for a source installation. Core provides the engine, Runner
-coordinates it, and the selected workspace provides knowledge and stores results.
-You can browse or run existing hunts without enabling CTI-to-hunt generation.
+Core provides the engine, Runner coordinates workflows, and the selected workspace
+supplies knowledge and stores results. Choose catalog browsing, existing-hunt
+execution or model-assisted generation after installation.
 
 ## Install once into a shared environment
 
-Use Python 3.11+, Git, uv and Bash on Linux/macOS or WSL:
+Use Python 3.11.5+, Git, uv and Bash on Linux/macOS or WSL:
 
 ```bash
 mkdir hecate-dev
@@ -24,107 +24,89 @@ hecate-runner demo
 hecate-agent hunt list
 ```
 
-Keep the default repository directory names. The optional organization `.github`
-repository can be a sibling; neither application imports it. Source code can live
-elsewhere when paths and imports are configured explicitly.
+The demo uses temporary fixtures and needs no model, SIEM, Slack or BAS connection.
+The organization `.github` repository is optional to clone. For a locked Runner
+installation, see [dependency security](DEPENDENCY_SECURITY.md).
 
-Create `env.sh` in the parent `hecate-dev` directory for subsequent Bash shells:
+For subsequent Bash shells, save this as `hecate-dev/env.sh`:
 
 ```bash
-# Source this file; do not execute it in a child shell.
+# Source this file; executing it cannot update the parent shell.
 HECATE_DEV_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$HECATE_DEV_ROOT/.venv/bin/activate"
 export HECATE_WORKSPACE="$HECATE_DEV_ROOT/Hecate-Public"
 export HECATE_BIN="$HECATE_DEV_ROOT/.venv/bin/hecate-agent"
 ```
 
-Then run `source /absolute/path/to/hecate-dev/env.sh` from a new shell. For an
-enterprise workspace, change only the exported workspace path and keep using
-the same installed packages. Avoid mixing this shared-environment setup with
-`uv run --directory` examples that create or select another project's venv.
+Run `source /absolute/path/to/hecate-dev/env.sh` in a new shell. For enterprise
+use, change the workspace export to your private workspace. Keep the same package
+interpreter; `uv run --directory` may select a different project's environment.
 
 ## Workspace and secrets
 
-Run configuration/content commands from the selected workspace where practical.
-Both applications read `<HECATE_WORKSPACE>/.env`; existing environment variables
-win, and a cwd `.env` can override workspace values. Runner does not create a
-symlink automatically. A new process or service restart is required after
-changing configuration used by a long-running process.
+Export an absolute `HECATE_WORKSPACE` before launching either application. Both
+read its `.env`; existing environment values win and a cwd `.env` is an override.
+No symlink is created automatically. Copy `.env.example` only when `.env` does not
+exist, protect credentials with owner-only permissions, and do not source dotenv
+files as shell scripts. Restart long-running processes after configuration changes.
 
-Copy the workspace `.env.example` to `.env` only when a configuration file does
-not already exist. `HECATE_WORKSPACE` should be exported by the launching shell or
-service so the correct workspace is selected before discovery. Use absolute
-paths in service environments. Protect credentials with owner-only permissions.
-Do not source arbitrary `.env` files as shell scripts; not all dotenv syntax is
-valid shell syntax.
-
-For enterprise adoption, use a private workspace. Copy the reviewed hunts,
-queries, research and starter knowledge you need from Public. Complete
-`knowledge/environment.md` with verified telemetry and edit
-`knowledge/hunting-knowledge.md` for local guidance. Logs, `.hecate/`, findings
-and private evidence stay there. Core's bundled reference data is not a measured
-description of your enterprise.
+Seed a private workspace with reviewed Public content. Complete
+`knowledge/environment.md` with verified telemetry and adapt
+`knowledge/hunting-knowledge.md` to local practice. Keep logs, `.hecate/`, private
+findings and evidence there; bundled reference data does not establish coverage.
 
 ## Choose a workflow
 
 ### Offline evaluation
 
-`hecate-runner demo` creates and removes an isolated fixture workspace. No model,
-SIEM, Slack or BAS connection is needed. `hecate-agent hunt list` reads the
-selected catalog. `doctor` checks configured dependencies/providers and can
-report missing optional capabilities; it is not an execution test.
+Run `hecate-runner demo` for the isolated fixture workflow or `hecate-agent hunt list`
+to browse the selected catalog. `hecate-runner doctor` checks configuration and
+can report missing optional capabilities; it is not a live execution test.
 
 ### Existing-hunt execution
 
-Choose a query provider in `.env`. Keep `mock` for practice; for live searches,
-provide the backend's endpoint and credentials from the example file. Keep
-`HECATE_AUTO_HUNT_APPROVAL_REQUIRED=true`.
+Keep `HECATE_RUNNER_QUERY_PROVIDER=mock` for practice. For live queries, configure
+a supported backend's endpoint and credentials. Keep
+`HECATE_AUTO_HUNT_APPROVAL_REQUIRED=true` and use actual hunt and sweep IDs:
 
 ```bash
-hecate-agent hunt list
 hecate-agent context --hunt H-0001 --format json
 hecate-agent hunt update H-0001 --status active
 hecate-runner sweep stage --hunt-id H-0001 --days 1
 hecate-runner sweep pending
-hecate-runner sweep approve <SWEEP-ID>
+hecate-runner sweep approve "<SWEEP-ID>"
 ```
 
-Use an actual hunt and sweep ID. Approval executes through the count-first gate;
-large result sets are constrained by configured fetch limits. Continuous
-scheduling uses `sweep daemon` and the `HECATE_AUTO_HUNT_*` settings. This workflow
-does not need CTI polling or newly generated H files. Optional analysis/pivots
-can use models; basic native query execution is separate from generation.
+Approval uses the count-first gate and configured fetch limits. Continuous
+scheduling uses `sweep daemon` and `HECATE_AUTO_HUNT_*`. It does not need CTI polling
+or new hunts; optional analysis, pivots and tuning may use models.
 
 ### Model-assisted generation
 
-Configure `HECATE_LLM_PROVIDER`, `HECATE_LLM_MODEL`, and the provider's endpoint/key
-as needed. Optional web research uses its own search configuration. The example
-files list feature-specific stubs; do not use `HECATE_AI_PROVIDER`.
+Configure `HECATE_LLM_PROVIDER`, `HECATE_LLM_MODEL` and the relevant endpoint/key.
+Web search has separate configuration; see [.env.example](../.env.example).
 
 ```bash
 hecate-runner draft --file /path/to/intelligence.txt --dry-run
 hecate-runner draft --file /path/to/intelligence.txt
 ```
 
-`--url` supplies the primary report URL, and `--title` supplies a research topic.
-For queued intake, configure `HECATE_RUNNER_CTI_PROVIDER=file`, place a `.txt`
-item in `<workspace>/cti_queue/`, and run `hecate-runner run`. Select supported
-feeds with configuration or `sources` commands, not a nonexistent `run --source`.
-`hecate-runner daemon` continuously processes configured intake under quotas.
+`--url` supplies the primary report and `--title` the research topic. For queued
+intake, select `HECATE_RUNNER_CTI_PROVIDER=file`, place a `.txt` item in
+`<workspace>/cti_queue/`, and run `hecate-runner run`. Use `sources` commands for
+supported feeds; `daemon` processes configured intake continuously under quotas.
 
 ## Validation, publishing and services
 
-- [BAS automation](BAS_AUTOMATION.md) explains the pinned Linux catalog, sensors,
-  cleanup, simulation fidelity and fired-alert proof. `bas-check` executes lab
-  procedures; it is not a diagnostic-only command.
-- [Community releases](COMMUNITY_RELEASES.md) explains public snapshot review,
-  permissions and separate release approval. Supply an explicit publication repo.
-- [Background services](SERVICES.md) explains the dedicated systemd services
-  (`hecate-runner-daemon`, `hecate-runner-maintenance`, `hecate-slack-bot`, `hecate-bas-broker`),
-  dedicated service accounts, and streamlined setup via `scripts/setup-services.sh`.
-- [Operating recipes](HOW_TO.md#services) provides quick command recipes and troubleshooting.
-- `hecate-agent monitor` reads the same selected workspace. Reopen an existing
-  monitor after updating Core; a running Python process does not reload code.
+| Guide | Use it for |
+| --- | --- |
+| [BAS automation](BAS_AUTOMATION.md) | Pinned Linux procedures, sensors, cleanup and evidence limits; `bas-check` executes lab procedures |
+| [Community releases](COMMUNITY_RELEASES.md) | Exact public-snapshot review, redistribution and separate release approval |
+| [Background services](SERVICES.md) | Dedicated service accounts/units and `scripts/setup-services.sh` |
+| [Operating recipes](HOW_TO.md) | Commands and troubleshooting for feeds, execution, publication and monitoring |
+
+`hecate-agent monitor` reads the selected workspace. Reopen it after code updates;
+running processes do not reload edited source automatically.
 
 ## Contribute and verify
 
@@ -135,7 +117,6 @@ python -m pytest tests/ -q
 ruff check .
 ```
 
-Default tests use temporary dotenv fixtures and reject unmocked network I/O.
-Explicit external checks require `-m network` and their test-specific settings.
-Do not remove isolation guards or reuse operator Slack/SIEM credentials in tests.
-Core's mirrored guide updates also require `python scripts/sync_docs.py --check`.
+Default tests isolate operator dotenv files and reject unmocked external calls.
+Live checks require `-m network` and test-specific configuration. Keep those guards
+in place. Core guide edits also require `python scripts/sync_docs.py --check`.
