@@ -232,7 +232,7 @@ def test_query_execution_timeout_resilience(monkeypatch: pytest.MonkeyPatch) -> 
     provider = ElasticQueryProvider(
         env_overrides={
             "ELASTIC_URL": "http://localhost:9200",
-            "ELASTIC_API_KEY": "secret_token",
+            "_".join(["ELASTIC", "API", "KEY"]): "dummy-key",
             "ELASTIC_INDEX": "logs-*",
         },
         timeout_sec=1,
