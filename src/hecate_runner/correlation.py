@@ -40,6 +40,10 @@ _BENIGN_DOMAINS = {
     "google.com",
     "microsoft.com",
     "github.com",
+    "githubusercontent.com",
+    "raw.githubusercontent.com",
+    "gitlab.com",
+    "bitbucket.org",
     "virustotal.com",
     "mitre.org",
     "cisa.gov",
@@ -48,16 +52,36 @@ _BENIGN_DOMAINS = {
     "censys.io",
     "attack.mitre.org",
     "example.com",
+    "example.org",
+    "example.net",
+    "wordpress.org",
+    "apache.org",
+    "nginx.org",
     "schema.org",
     "w3.org",
     "tavily.com",
     "alienvault.com",
     "abuse.ch",
+    "nvd.nist.gov",
+    "nist.gov",
+    "exploit-db.com",
+    "cve.org",
+    "projectdiscovery.io",
 }
 
 #: Known file extensions mistaken for domains
 _IGNORE_EXTENSIONS = {
     ".py",
+    ".php",
+    ".phtml",
+    ".phar",
+    ".jsp",
+    ".asp",
+    ".aspx",
+    ".html",
+    ".htm",
+    ".css",
+    ".js",
     ".yml",
     ".yaml",
     ".json",
@@ -72,6 +96,18 @@ _IGNORE_EXTENSIONS = {
     ".so",
     ".bin",
     ".log",
+    ".snp",
+    ".component",
+}
+
+#: Reserved or special-use domain suffixes to ignore as external IOCs
+_SPECIAL_USE_TLDS = {
+    ".example",
+    ".test",
+    ".invalid",
+    ".local",
+    ".localhost",
+    ".internal",
 }
 
 #: Canonical threat actor aliases mapping normalized alias -> canonical group ID / name
@@ -126,22 +162,55 @@ _RFC1918_NETWORKS = (
     ipaddress.ip_network("192.168.0.0/16"),
 )
 
+#: Documentation and benchmark networks to exclude from cross-campaign correlation
+_DOC_OR_BENCHMARK_NETWORKS = (
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("100.64.0.0/10"),
+)
+
+_PLACEHOLDER_OR_RESOLVER_IPS = {
+    "0.0.0.0",
+    "1.1.1.1",
+    "1.2.3.4",
+    "8.8.8.8",
+    "8.8.4.4",
+    "9.9.9.9",
+    "255.255.255.255",
+}
+
 
 def _is_public_ip(ip_str: str) -> bool:
-    """True if ip_str is a valid external IP address (excluding loopback, multicast, link-local, and RFC 1918 private LANs)."""
+    """True if ip_str is a valid external IP address (excluding loopback, multicast, link-local, private LANs, and common placeholders)."""
+    cleaned = ip_str.strip()
+    if cleaned in _PLACEHOLDER_OR_RESOLVER_IPS:
+        return False
     try:
-        ip = ipaddress.ip_address(ip_str.strip())
+        ip = ipaddress.ip_address(cleaned)
         if (
             ip.is_loopback
             or ip.is_multicast
             or ip.is_unspecified
             or ip.is_link_local
-            or str(ip) == "255.255.255.255"
+            or ip.is_reserved
         ):
             return False
         return all(ip not in net for net in _RFC1918_NETWORKS)
     except ValueError:
         return False
+
+
+def _is_c2_correlation_candidate(ioc: str) -> bool:
+    """True if ioc is a valid external candidate for linking separate campaigns as shared C2 infrastructure."""
+    try:
+        ip = ipaddress.ip_address(ioc.strip())
+        if str(ip) in _PLACEHOLDER_OR_RESOLVER_IPS:
+            return False
+        return not any(ip in net for net in _DOC_OR_BENCHMARK_NETWORKS)
+    except ValueError:
+        return True
 
 
 def _is_relevant_domain(domain_str: str) -> bool:
@@ -151,12 +220,18 @@ def _is_relevant_domain(domain_str: str) -> bool:
         return False
     if dom in _BENIGN_DOMAINS or any(dom.endswith(f".{b}") for b in _BENIGN_DOMAINS):
         return False
+    if any(dom.endswith(tld) for tld in _SPECIAL_USE_TLDS):
+        return False
     # Ignore standalone numbers or single-label
     parts = dom.split(".")
     if len(parts) < 2 or any(len(p) == 0 for p in parts):
         return False
     # Avoid IP fragments parsed as domains
-    return not all(p.isdigit() for p in parts)
+    if all(p.isdigit() for p in parts):
+        return False
+    # TLD must be valid alphabetic or punycode label (excludes version strings like 5.6-7.4)
+    tld = parts[-1]
+    return bool(re.match(r"^(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9]+)$", tld))
 
 
 class ThreatEntityExtractor:
@@ -446,7 +521,11 @@ class ThreatEntityCorrelator:
                 matched_items.extend(sorted(shared_actors))
 
             # 3. Network IOC overlap (shared C2)
-            shared_net = item_network_iocs & prof.network_iocs
+            shared_net = {
+                ioc
+                for ioc in (item_network_iocs & prof.network_iocs)
+                if _is_c2_correlation_candidate(ioc)
+            }
             if shared_net:
                 score += 0.95
                 matched_types.append("shared_c2_ioc")
