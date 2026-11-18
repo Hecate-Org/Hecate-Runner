@@ -1,7 +1,9 @@
 """Dedicated service configuration must reject privilege and credential mixing."""
 
 import importlib.util
+import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,6 +15,122 @@ SPEC = importlib.util.spec_from_file_location(
 )
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
+
+
+def test_clean_install_does_not_stop_nonexistent_legacy_units(monkeypatch):
+    command = Mock(return_value=subprocess.CompletedProcess([], 0, "not-found\n", ""))
+    monkeypatch.setattr(installer, "command", command)
+    installer.stop_existing_units("hecate-runner-daemon", "hecate-runner-maintenance")
+    assert command.call_count == 2
+    assert all("stop" not in call.args for call in command.call_args_list)
+
+
+def test_existing_worker_stop_failure_aborts_migration(monkeypatch):
+    command = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, "loaded\n", ""),
+            subprocess.CompletedProcess([], 0, "not-found\n", ""),
+        ]
+    )
+    monkeypatch.setattr(installer, "command", command)
+    stop = Mock(side_effect=subprocess.CalledProcessError(1, ["systemctl", "stop"]))
+    monkeypatch.setattr(installer, "stop_units_gracefully", stop)
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.stop_existing_units("hecate-runner-daemon", "hecate-runner-maintenance")
+    stop.assert_called_once_with(["hecate-runner-daemon"])
+
+
+def test_unknown_unit_load_state_aborts_before_stop(monkeypatch):
+    command = Mock(return_value=subprocess.CompletedProcess([], 0, "\n", ""))
+    monkeypatch.setattr(installer, "command", command)
+    with pytest.raises(RuntimeError, match="determine"):
+        installer.stop_existing_units("hecate-runner-daemon")
+    command.assert_called_once()
+
+
+def test_failed_installer_runtime_swap_keeps_previous_selection(tmp_path, monkeypatch):
+    previous = tmp_path / "previous"
+    candidate = tmp_path / "candidate"
+    previous.mkdir()
+    candidate.mkdir()
+    current = tmp_path / "runtime"
+    current.symlink_to(previous)
+
+    def fail_replace(*args):
+        raise OSError("injected atomic selection failure")
+
+    monkeypatch.setattr(installer.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="selection"):
+        installer.select_runtime(current, candidate)
+    assert current.resolve() == previous
+    assert not list(tmp_path.glob(".runtime-install-*"))
+
+
+def test_deployment_waits_for_workers_before_restoring_stop_deadlines(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "RUNTIME_UNIT_ROOT", tmp_path)
+    monkeypatch.setattr(installer.time, "sleep", lambda _: None)
+    polls = 0
+    calls = []
+
+    def command(*args):
+        nonlocal polls
+        calls.append(args)
+        if "--property=TimeoutStopUSec" in args:
+            return subprocess.CompletedProcess(args, 0, "infinity\n", "")
+        if "stop" in args:
+            assert "--no-block" in args
+            assert len(list(tmp_path.rglob("*.conf"))) == 2
+        if "--property=ActiveState" in args:
+            polls += 1
+            response = (
+                "ActiveState=deactivating\nMainPID=123\n"
+                if polls <= 2
+                else "ActiveState=inactive\nMainPID=0\n"
+            )
+            return subprocess.CompletedProcess(args, 0, response, "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(installer, "command", command)
+    installer.stop_units_gracefully(["hecate-runner-daemon", "hecate-runner-maintenance"])
+    assert polls == 4
+    assert not list(tmp_path.rglob("*.conf"))
+    assert sum("daemon-reload" in args for args in calls) == 2
+
+
+def test_deployment_refuses_stop_when_graceful_override_did_not_load(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "RUNTIME_UNIT_ROOT", tmp_path)
+    command = Mock(return_value=subprocess.CompletedProcess([], 0, "30s\n", ""))
+    monkeypatch.setattr(installer, "command", command)
+    with pytest.raises(RuntimeError, match="protection"):
+        installer.stop_units_gracefully(["hecate-runner-daemon"])
+    assert all("stop" not in call.args for call in command.call_args_list)
+    assert not list(tmp_path.rglob("*.conf"))
+
+
+def test_incomplete_stop_retains_guards_instead_of_restoring_a_kill_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "RUNTIME_UNIT_ROOT", tmp_path)
+
+    def command(*args):
+        if "stop" in args:
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(args, 0, "infinity\n", "")
+
+    monkeypatch.setattr(installer, "command", command)
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.stop_units_gracefully(["hecate-runner-daemon"])
+    guards = list(tmp_path.rglob("*.conf"))
+    assert len(guards) == 1
+    assert "TimeoutStopSec=infinity" in guards[0].read_text()
+
+
+def test_deployment_stop_guards_cannot_target_unrelated_services(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "RUNTIME_UNIT_ROOT", tmp_path)
+    command = Mock()
+    monkeypatch.setattr(installer, "command", command)
+    with pytest.raises(ValueError, match="managed"):
+        installer.stop_units_gracefully(["unrelated-service"])
+    command.assert_not_called()
+    assert not list(tmp_path.iterdir())
 
 
 def write_env(path, values):

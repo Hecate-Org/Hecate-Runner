@@ -59,6 +59,45 @@ def test_acknowledge_when_no_file(tmp_path: Path) -> None:
     provider.acknowledge(CTIItem(content="stale", received_at=datetime.now(UTC)))
 
 
+@pytest.mark.parametrize("filename", ["next.txt", "reused-report.txt"])
+def test_acknowledge_preserves_same_second_inputs(tmp_path: Path, filename: str) -> None:
+    provider = FileQueueProvider(queue_dir=tmp_path / "q")
+    provider.ensure_dirs()
+    received = datetime(2026, 11, 16, tzinfo=UTC)
+    expected = {f"Original input {index}" for index in range(100)}
+    target = provider.next_file if filename == "next.txt" else provider.spool_dir / filename
+    for text in expected:
+        target.write_text(text)
+        item = provider.next_item()
+        assert item is not None
+        item.received_at = received
+        provider.acknowledge(item)
+    archives = list(provider.processed_dir.glob("cti-*.txt"))
+    assert len(archives) == len(expected)
+    assert {path.read_text() for path in archives} == expected
+
+
+def test_acknowledge_failed_move_keeps_pending_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hecate_runner.cti import file_queue
+
+    provider = FileQueueProvider(queue_dir=tmp_path / "q")
+    provider.ensure_dirs()
+    provider.next_file.write_text("Keep this raw input")
+    item = provider.next_item()
+    assert item is not None
+
+    def fail_move(*args: object) -> None:
+        raise PermissionError("injected archive failure")
+
+    monkeypatch.setattr(file_queue.shutil, "move", fail_move)
+    with pytest.raises(PermissionError, match="injected archive failure"):
+        provider.acknowledge(item)
+    assert provider.next_file.read_text() == "Keep this raw input"
+    assert list(provider.processed_dir.iterdir()) == []
+
+
 def test_spool_and_fifo_consumption(tmp_path: Path) -> None:
     q = tmp_path / "q"
     provider = FileQueueProvider(queue_dir=q)

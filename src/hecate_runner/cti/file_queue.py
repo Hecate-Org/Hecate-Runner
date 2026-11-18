@@ -11,8 +11,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 import shutil
+import tempfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from importlib import import_module
@@ -248,12 +250,20 @@ class FileQueueProvider(CTIProvider):
 
         self.processed_dir.mkdir(parents=True, exist_ok=True)
         stamp = (item.received_at or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
-        if target_file.name == "next.txt":
-            archive = self.processed_dir / f"cti-{stamp}.txt"
-        else:
-            archive = self.processed_dir / f"cti-{stamp}-{target_file.name}"
-
-        shutil.move(str(target_file), str(archive))
+        # Several inputs can be acknowledged in the same second, including a
+        # refilled next.txt or a reused spool filename. Reserve an exclusive
+        # destination rather than overwriting the previous raw input.
+        suffix = target_file.name[-120:]
+        fd, name = tempfile.mkstemp(
+            prefix=f"cti-{stamp}-", suffix=f"-{suffix}", dir=self.processed_dir
+        )
+        os.close(fd)
+        archive = Path(name)
+        try:
+            shutil.move(str(target_file), str(archive))
+        except OSError:
+            archive.unlink(missing_ok=True)
+            raise
         log.info("Archived CTI %s to %s", target_file, archive)
 
     def ensure_dirs(self) -> None:

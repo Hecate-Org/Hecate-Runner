@@ -51,6 +51,34 @@ def test_new_isolated_data_uses_the_private_group_policy(tmp_path, isolated):
     assert stat.S_IMODE(path.stat().st_mode) == 0o660
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_shared_directory_inherits_setgid_without_requesting_restricted_bits(
+    tmp_path, monkeypatch, isolated, existing
+):
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o2770)
+    path = parent / "outbox"
+    if existing:
+        path.mkdir()
+        path.chmod(0o2770)
+    original_mkdir = Path.mkdir
+
+    def restricted_mkdir(self, mode=0o777, parents=False, exist_ok=False):
+        if mode & 0o6000:
+            raise PermissionError("RestrictSUIDSGID rejects explicit privileged mode bits")
+        return original_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", restricted_mkdir)
+    monkeypatch.setattr(Path, "chmod", lambda *a, **k: (_ for _ in ()).throw(PermissionError()))
+    previous = os.umask(0o007)
+    try:
+        private_data.prepare_directory(path)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o2770
+
+
 def test_wrong_group_is_refused_before_permissions_are_changed(tmp_path, monkeypatch, isolated):
     path = tmp_path / "data.sqlite3"
     path.write_text("fixture")
