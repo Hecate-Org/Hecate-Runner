@@ -11,23 +11,21 @@ Covers:
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
-
 from hecate_agent.core.hunt_parser import HuntParser, validate_hunt_file_with_warnings
-from hecate_runner.config import Settings
-from hecate_runner.promotion_policy import evaluate_promotion, load_policy
+
+from hecate_runner.promotion_policy import evaluate_promotion
 
 _TECHNIQUE_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
 
 
 def validate_technique_id(tid: str) -> bool:
     return bool(_TECHNIQUE_RE.fullmatch(tid.strip())) if isinstance(tid, str) else False
+
 
 PUBLIC_REPO = Path("/home/chemch/betas/Hecate-Public")
 CORE_REPO = Path("/home/chemch/betas/Hecate-Core")
@@ -49,7 +47,7 @@ def test_real_public_hunts_conformance() -> None:
 
     for hunt_path in hunt_files:
         try:
-            is_valid, errors, warnings = validate_hunt_file_with_warnings(hunt_path)
+            is_valid, errors, _warnings = validate_hunt_file_with_warnings(hunt_path)
             assert is_valid, f"Public hunt {hunt_path.name} failed validation: {errors}"
         except PermissionError:
             # Under isolated data permissions, if not member of hecate-data group in CI
@@ -258,8 +256,8 @@ def test_onboarding_documentation_integrity() -> None:
         try:
             text = doc.read_text(encoding="utf-8")
             assert len(text) > 200, f"Documentation file {doc.name} is unexpectedly sparse"
-            assert (
-                "hecate" in text.lower() or "workspace" in text.lower()
-            ), f"Documentation file {doc.name} lacks core concepts"
+            assert "hecate" in text.lower() or "workspace" in text.lower(), (
+                f"Documentation file {doc.name} lacks core concepts"
+            )
         except PermissionError:
             pass

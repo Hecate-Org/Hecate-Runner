@@ -208,9 +208,7 @@ def _is_c2_correlation_candidate(ioc: str) -> bool:
         ip = ipaddress.ip_address(ioc.strip())
         if str(ip) in _PLACEHOLDER_OR_RESOLVER_IPS:
             return False
-        if any(ip in net for net in _DOC_OR_BENCHMARK_NETWORKS):
-            return False
-        return True
+        return not any(ip in net for net in _DOC_OR_BENCHMARK_NETWORKS)
     except ValueError:
         return True
 

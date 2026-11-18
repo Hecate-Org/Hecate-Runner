@@ -12,8 +12,6 @@ Evaluation Plan Stage 7 Requirements:
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,13 +22,10 @@ from hecate_runner.bas.base import DetonationRequest, DetonationStage, Detonatio
 from hecate_runner.bas.mock import MockBASProvider
 from hecate_runner.config import Settings
 from hecate_runner.cti import FileQueueProvider
-from hecate_runner.hecate_client import HecateError, ResearchResult, SigmaResult
+from hecate_runner.hecate_client import HecateError, ResearchResult
 from hecate_runner.orchestrator import Orchestrator
-from hecate_runner.parked_store import list_parked
-from hecate_runner.promotion_policy import evaluate_promotion, load_policy
+from hecate_runner.promotion_policy import evaluate_promotion
 from hecate_runner.query_execution import MockQueryProvider, ProposedQuery
-from hecate_runner.state import OrchestratorState
-
 
 # ==============================================================================
 # Helper builders
@@ -57,7 +52,9 @@ def _setup_promotion_policy(ws: Path, *, target_visibility: str = "public") -> N
             "bas_failed": "block",
         },
     }
-    (ws / "promotion-policy.yaml").write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    (ws / "promotion-policy.yaml").write_text(
+        yaml.safe_dump(policy, sort_keys=False), encoding="utf-8"
+    )
 
 
 # ==============================================================================
@@ -254,7 +251,9 @@ class TestDeterministicRejectionPaths:
         hunt_dir = workspace / "hunts" / "2026" / "Q4"
         hunt_dir.mkdir(parents=True, exist_ok=True)
         (workspace / "queries" / "H-0003").mkdir(parents=True, exist_ok=True)
-        (workspace / "queries" / "H-0003" / "rule.yml").write_text("title: Rule\n", encoding="utf-8")
+        (workspace / "queries" / "H-0003" / "rule.yml").write_text(
+            "title: Rule\n", encoding="utf-8"
+        )
         (workspace / "research").mkdir(parents=True, exist_ok=True)
         (workspace / "research" / "R-0003.md").write_text(
             "---\nresearch_id: R-0003\n---\n# Research\n", encoding="utf-8"
@@ -297,7 +296,9 @@ class TestDeterministicRejectionPaths:
         hunt_dir = workspace / "hunts" / "2026" / "Q4"
         hunt_dir.mkdir(parents=True, exist_ok=True)
         (workspace / "queries" / "H-0004").mkdir(parents=True, exist_ok=True)
-        (workspace / "queries" / "H-0004" / "rule.yml").write_text("title: Rule\n", encoding="utf-8")
+        (workspace / "queries" / "H-0004" / "rule.yml").write_text(
+            "title: Rule\n", encoding="utf-8"
+        )
         (workspace / "research").mkdir(parents=True, exist_ok=True)
         (workspace / "research" / "R-0004.md").write_text(
             "---\nresearch_id: R-0004\n---\n# Research\n", encoding="utf-8"
