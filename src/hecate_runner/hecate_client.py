@@ -186,8 +186,10 @@ class HecateClient:
         """Run an in-process Hecate API call under a wall-clock deadline.
 
         Uses a worker thread so the orchestrator cycle can fail closed when a
-        provider hangs past ``timeout_sec``. The underlying call may continue
-        until the provider's own HTTP timeout; the cycle no longer waits on it.
+        provider hangs past ``timeout_sec``. The executor is shut down without
+        waiting so a timed-out cycle returns promptly; the abandoned worker may
+        still finish in the background until the provider's own timeout. Stages
+        that must hard-kill side effects should use a process worker instead.
         """
         from concurrent.futures import ThreadPoolExecutor
         from concurrent.futures import TimeoutError as FuturesTimeout
@@ -196,13 +198,18 @@ class HecateClient:
         if deadline is None:
             return self._with_context(func, *args, **kwargs)
 
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"hecate-{stage}") as pool:
+        # Do not use ``with ThreadPoolExecutor``: its __exit__ waits for the
+        # worker, which turns a short deadline into a full hang (EVAL-08-002).
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"hecate-{stage}")
+        try:
             future = pool.submit(self._with_context, func, *args, **kwargs)
             try:
                 return future.result(timeout=deadline)
             except FuturesTimeout as exc:
                 future.cancel()
                 raise TimeoutError(f"{stage} timed out after {deadline:g} seconds") from exc
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def source_evidence(self, url: str) -> Any:
         """Verified artifacts from the report at ``url`` (hecate_agent.core.source_evidence).
