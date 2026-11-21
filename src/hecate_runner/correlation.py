@@ -38,8 +38,11 @@ _SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
 #: Benign / vendor domains to ignore in C2 clustering
 _BENIGN_DOMAINS = {
     "google.com",
+    "cloud.google.com",
     "microsoft.com",
+    "msrc.microsoft.com",
     "github.com",
+    "github.io",
     "githubusercontent.com",
     "raw.githubusercontent.com",
     "gitlab.com",
@@ -67,6 +70,32 @@ _BENIGN_DOMAINS = {
     "exploit-db.com",
     "cve.org",
     "projectdiscovery.io",
+    "rapid7.com",
+    "ciac.org",
+    "ibmcloud.com",
+    "ibm.com",
+    "tenable.com",
+    "qualys.com",
+    "jfrog.com",
+    "snyk.io",
+    "veracode.com",
+    "checkpoint.com",
+    "fortinet.com",
+    "paloaltonetworks.com",
+    "mandiant.com",
+    "crowdstrike.com",
+    "sentinelone.com",
+    "bleepingcomputer.com",
+    "thehackernews.com",
+    "securityweek.com",
+    "darkreading.com",
+    "oracle.com",
+    "openjdk.org",
+    "redhat.com",
+    "canonical.com",
+    "ubuntu.com",
+    "debian.org",
+    "kernel.org",
 }
 
 #: Known file extensions mistaken for domains
@@ -98,6 +127,25 @@ _IGNORE_EXTENSIONS = {
     ".log",
     ".snp",
     ".component",
+    ".shtml",
+    ".action",
+    ".do",
+    ".class",
+    ".jar",
+    ".war",
+    ".ear",
+    ".iso",
+    ".img",
+    ".dmg",
+    ".deb",
+    ".rpm",
+    ".apk",
+    ".msi",
+    ".ps1",
+    ".bat",
+    ".cmd",
+    ".vbs",
+    ".getdecoder",
 }
 
 #: Reserved or special-use domain suffixes to ignore as external IOCs
@@ -234,6 +282,72 @@ def _is_relevant_domain(domain_str: str) -> bool:
     return bool(re.match(r"^(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9]+)$", tld))
 
 
+def _extract_cve_years(cves: set[str]) -> set[int]:
+    """Extract 4-digit years from CVE identifiers."""
+    years: set[int] = set()
+    for c in cves:
+        m = re.match(r"CVE-(\d{4})-", c, re.IGNORECASE)
+        if m:
+            try:
+                years.add(int(m.group(1)))
+            except ValueError:
+                pass
+    return years
+
+
+_VERSION_CONTEXT_PREFIX_RE = re.compile(
+    r"(?i)(?:version|versions|ver|v\.?|jdk|openjdk|build|update|release|patch|rev|revision|glibc|kernel|openssl|python|node|ruby|go|curl|git|linux|apache|nginx|software|lib[\w-]*|fixed\s+in|affected(?:\s+versions?)?|upgrade\s+to|released\s+in)\s*[:=vV-]?\s*[-*]?\s*(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:[,\s\-*]+|and|or|\/)+)*$"
+)
+_VERSION_CONTEXT_SUFFIX_RE = re.compile(
+    r"(?i)^(?:\.GA|\.Final|-ea|-rc\d*|-beta\d*|-alpha\d*|\.tar|\.zip|\.gz|\.deb|\.rpm|\+[\w.-]+)"
+)
+
+
+def _is_version_context(text: str, start: int, end: int) -> bool:
+    """True if the IPv4 match at text[start:end] is in a software version or URL path context."""
+    prefix = text[max(0, start - 150) : start]
+    suffix = text[end : min(len(text), end + 60)]
+
+    # Preceding version indicators (e.g. 'version 17.0.21.1', 'v1.2.3.4', 'JDK 17.0.21.1', bullet points)
+    if _VERSION_CONTEXT_PREFIX_RE.search(prefix):
+        return True
+
+    # Immediate 'v' or 'V' prefix (e.g. v17.0.21.1)
+    if start > 0 and text[start - 1] in "vV":
+        return True
+
+    # Trailing version indicators (e.g. 17.0.21.1-ea, 17.0.21.1+1)
+    if _VERSION_CONTEXT_SUFFIX_RE.search(suffix):
+        return True
+
+    # Non-host URL path segment (e.g. /advisories/2026-11-17/17.0.21.1/...)
+    # An IP is only a host in a URL if preceded by '://' or '://user:pass@'
+    if start > 0 and text[start - 1] == "/":
+        scheme_idx = prefix.rfind("://")
+        if scheme_idx == -1 or ("/" in prefix[scheme_idx + 3 :]):
+            return True
+
+    # Inside a markdown table row (e.g. '| JDK 17 | 17.0.1.0 | 17.0.21.1 |')
+    line_start = text.rfind("\n", 0, start)
+    line_start = 0 if line_start == -1 else line_start + 1
+    line_end = text.find("\n", end)
+    line_end = len(text) if line_end == -1 else line_end
+    line = text[line_start:line_end]
+    if line.count("|") >= 2:
+        window = text[max(0, start - 250) : min(len(text), end + 250)].lower()
+        if any(term in window for term in ("version", "baseline", "fixed", "patch", "build", "release", "openjdk", "jdk")):
+            return True
+
+    # Markdown table column or link header indicating version
+    # e.g. "| 17.0.21.1 |" or "[17.0.21.1]"
+    if start > 0 and text[start - 1] in "|[" and suffix.startswith((" |", "]", "|")):
+        window = text[max(0, start - 200) : min(len(text), end + 200)].lower()
+        if any(term in window for term in ("version", "fixed in", "affected", "openjdk", "jdk", "release")):
+            return True
+
+    return False
+
+
 class ThreatEntityExtractor:
     """Extracts and normalizes CVEs, threat actor aliases, and network/hash IOCs."""
 
@@ -306,15 +420,21 @@ class ThreatEntityExtractor:
             ind = metadata["indicators"]
             for ip in ind.get("ip-dst", []) + ind.get("ipv4", []) + ind.get("ip-src", []):
                 if isinstance(ip, str) and _is_public_ip(ip):
-                    iocs.add(ip.strip())
+                    cleaned_ip = ip.strip()
+                    if text and cleaned_ip in text:
+                        m_pos = text.find(cleaned_ip)
+                        if m_pos != -1 and _is_version_context(text, m_pos, m_pos + len(cleaned_ip)):
+                            continue
+                    iocs.add(cleaned_ip)
             for dom in ind.get("domain", []) + ind.get("hostname", []):
                 if isinstance(dom, str) and _is_relevant_domain(dom):
                     iocs.add(dom.strip().lower())
 
         # Extract from text
         if text:
-            for ip in _IPV4_RE.findall(text):
-                if _is_public_ip(ip):
+            for m in _IPV4_RE.finditer(text):
+                ip = m.group(0)
+                if _is_public_ip(ip) and not _is_version_context(text, m.start(), m.end()):
                     iocs.add(ip.strip())
             for dom in _DOMAIN_RE.findall(text):
                 if _is_relevant_domain(dom):
@@ -497,14 +617,28 @@ class ThreatEntityCorrelator:
             matched_types: list[str] = []
             matched_items: list[str] = []
 
+            # Check temporal CVE disparity:
+            # If both the incoming item and hunt have CVEs, and the minimum publication
+            # year gap exceeds 3 years (e.g. 2001 vs 2026), suppress infrastructure/URL
+            # correlation to prevent reference link poisoning unless there is explicit
+            # CVE or actor overlap.
+            item_cve_years = _extract_cve_years(item_cves)
+            prof_cve_years = _extract_cve_years(prof.cves)
+            has_temporal_disparity = False
+            if item_cve_years and prof_cve_years:
+                min_year_gap = min(abs(y1 - y2) for y1 in item_cve_years for y2 in prof_cve_years)
+                if min_year_gap > 3:
+                    has_temporal_disparity = True
+
             # 0. Direct Source URL match (against extracted refs, not full body)
             url = (item.source_url or "").strip()
             if url and (
                 url in prof.source_refs or any(url in ref or ref in url for ref in prof.source_refs)
             ):
-                score += 1.0
-                matched_types.append("source_url")
-                matched_items.append(url)
+                if not (has_temporal_disparity and not (item_cves & prof.cves) and not (item_actors & prof.actors)):
+                    score += 1.0
+                    matched_types.append("source_url")
+                    matched_items.append(url)
 
             # 1. CVE overlap
             shared_cves = item_cves & prof.cves
@@ -526,7 +660,7 @@ class ThreatEntityCorrelator:
                 for ioc in (item_network_iocs & prof.network_iocs)
                 if _is_c2_correlation_candidate(ioc)
             }
-            if shared_net:
+            if shared_net and not (has_temporal_disparity and not shared_cves and not shared_actors):
                 score += 0.95
                 matched_types.append("shared_c2_ioc")
                 matched_items.extend(sorted(shared_net))

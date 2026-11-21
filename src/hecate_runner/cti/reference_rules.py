@@ -51,20 +51,35 @@ def shell_segments(command: str) -> list[str]:
     return [segment for segment in segments if segment]
 
 
+_REJECT_PROGRAM_NAMES = frozenset({
+    "cd", "export", "echo", "read", "source", "alias",
+    "security", "advisory", "advisories", "cve", "vulnerability", "vulnerabilities",
+    "reference", "references", "source", "sources", "http", "https", "see", "refer",
+    "note", "notes", "details", "link", "links", "url", "urls", "vendor", "patch",
+})
+
+
 def reference_candidates(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     output = []
     if metadata.get("evidence_profile") == "behavior_catalog":
         for artifact in metadata.get("source_artifacts", []):
             if artifact.get("kind", "command_line") != "command_line":
                 continue
-            for command in shell_segments(str(artifact.get("value", ""))):
+            raw_val = str(artifact.get("value", ""))
+            stripped_val = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw_val)
+            stripped_val = re.sub(r"https?://[^\s)\]]+", "", stripped_val)
+            for command in shell_segments(stripped_val):
                 prefix = re.split(r"\{|\$|%[A-Za-z_]+%|<", command, maxsplit=1)[0].strip()
+                if any(bad in prefix for bad in ("](", ") [", "<http", "http://", "https://", "href=", "<a ")):
+                    continue
                 match = re.match(r"^([\w.\\/+-]+)\s+(.+)", prefix)
                 if not match or "\n" in prefix:
                     continue
                 program = match[1].replace("\\", "/").rsplit("/", 1)[-1]
                 if (
-                    program in {"cd", "export", "echo", "read", "source", "alias"}
+                    program.lower() in _REJECT_PROGRAM_NAMES
+                    or "[" in program
+                    or "]" in program
                     or len(match[2]) < 3
                 ):
                     continue
