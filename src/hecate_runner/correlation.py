@@ -320,7 +320,7 @@ def _is_version_context(text: str, start: int, end: int) -> bool:
         return True
 
     # Non-host URL path segment (e.g. /advisories/2026-11-17/17.0.21.1/...)
-    # An IP is only a host in a URL if preceded by '://' or '://user:pass@'
+    # An IP is only a host in a URL if preceded by scheme delimiter '://'
     if start > 0 and text[start - 1] == "/":
         scheme_idx = prefix.rfind("://")
         if scheme_idx == -1 or ("/" in prefix[scheme_idx + 3 :]):
