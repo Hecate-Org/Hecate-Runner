@@ -3,11 +3,11 @@ and markdown command sanitization.
 """
 
 from pathlib import Path
+
 from hecate_runner.correlation import (
-    ThreatEntityExtractor,
     ThreatEntityCorrelator,
+    ThreatEntityExtractor,
     _is_relevant_domain,
-    _is_version_context,
 )
 from hecate_runner.cti.base import CTIItem
 from hecate_runner.cti.reference_rules import reference_candidates
@@ -19,7 +19,7 @@ def test_software_version_numbers_are_not_extracted_as_ips():
     Vulnerable versions: OpenJDK 17.0.21.1, 21.0.13.1, 25.0.5.1, and 27.0.1.1.
     Users should upgrade to version 17.0.21.2 or 21.0.13.2 immediately.
     See advisory at https://openjdk.org/groups/vulnerability/advisories/2026-11-17/17.0.21.1 for details.
-    
+
     The threat actor was observed connecting to 198.51.100.24 to fetch payloads.
     Another connection was made to http://45.33.32.156/stage2.sh.
     """
@@ -190,7 +190,7 @@ def test_markdown_table_version_columns_are_ignored():
     | Product | Baseline | Patch Version |
     | JDK 17 | 17.0.1.0 | 17.0.21.1 |
     | JDK 21 | 21.0.1.0 | 21.0.13.1 |
-    
+
     Attacker exfiltrated data to 198.51.100.99.
     """
     iocs = ThreatEntityExtractor.extract_network_iocs(table_text)
@@ -207,7 +207,7 @@ def test_multiline_version_bullet_points_are_ignored():
     - 17.0.21.1
     - 21.0.13.1
     - 25.0.5.1
-    
+
     C2 beacon target: 203.0.113.10
     """
     iocs = ThreatEntityExtractor.extract_network_iocs(bullet_text)

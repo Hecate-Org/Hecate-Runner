@@ -54,7 +54,7 @@ def shell_segments(command: str) -> list[str]:
 _REJECT_PROGRAM_NAMES = frozenset({
     "cd", "export", "echo", "read", "source", "alias",
     "security", "advisory", "advisories", "cve", "vulnerability", "vulnerabilities",
-    "reference", "references", "source", "sources", "http", "https", "see", "refer",
+    "reference", "references", "sources", "http", "https", "see", "refer",
     "note", "notes", "details", "link", "links", "url", "urls", "vendor", "patch",
 })
 

@@ -9,6 +9,7 @@ under ``queries/``.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import logging
 import re
@@ -288,10 +289,8 @@ def _extract_cve_years(cves: set[str]) -> set[int]:
     for c in cves:
         m = re.match(r"CVE-(\d{4})-", c, re.IGNORECASE)
         if m:
-            try:
+            with contextlib.suppress(ValueError):
                 years.add(int(m.group(1)))
-            except ValueError:
-                pass
     return years
 
 
@@ -632,13 +631,14 @@ class ThreatEntityCorrelator:
 
             # 0. Direct Source URL match (against extracted refs, not full body)
             url = (item.source_url or "").strip()
-            if url and (
-                url in prof.source_refs or any(url in ref or ref in url for ref in prof.source_refs)
+            if (
+                url
+                and (url in prof.source_refs or any(url in ref or ref in url for ref in prof.source_refs))
+                and not (has_temporal_disparity and not (item_cves & prof.cves) and not (item_actors & prof.actors))
             ):
-                if not (has_temporal_disparity and not (item_cves & prof.cves) and not (item_actors & prof.actors)):
-                    score += 1.0
-                    matched_types.append("source_url")
-                    matched_items.append(url)
+                score += 1.0
+                matched_types.append("source_url")
+                matched_items.append(url)
 
             # 1. CVE overlap
             shared_cves = item_cves & prof.cves
