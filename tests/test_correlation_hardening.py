@@ -113,7 +113,9 @@ References:
     )
 
     match = correlator.correlate(ancient_item)
-    assert match is None, f"Expected ancient 2001 CTI to NOT match 2026 hunt H-0033, but got {match}"
+    assert match is None, (
+        f"Expected ancient 2001 CTI to NOT match 2026 hunt H-0033, but got {match}"
+    )
 
 
 def test_contemporary_cves_and_shared_actors_still_correlate(tmp_path: Path):

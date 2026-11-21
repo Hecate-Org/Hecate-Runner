@@ -51,12 +51,38 @@ def shell_segments(command: str) -> list[str]:
     return [segment for segment in segments if segment]
 
 
-_REJECT_PROGRAM_NAMES = frozenset({
-    "cd", "export", "echo", "read", "source", "alias",
-    "security", "advisory", "advisories", "cve", "vulnerability", "vulnerabilities",
-    "reference", "references", "sources", "http", "https", "see", "refer",
-    "note", "notes", "details", "link", "links", "url", "urls", "vendor", "patch",
-})
+_REJECT_PROGRAM_NAMES = frozenset(
+    {
+        "cd",
+        "export",
+        "echo",
+        "read",
+        "source",
+        "alias",
+        "security",
+        "advisory",
+        "advisories",
+        "cve",
+        "vulnerability",
+        "vulnerabilities",
+        "reference",
+        "references",
+        "sources",
+        "http",
+        "https",
+        "see",
+        "refer",
+        "note",
+        "notes",
+        "details",
+        "link",
+        "links",
+        "url",
+        "urls",
+        "vendor",
+        "patch",
+    }
+)
 
 
 def reference_candidates(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -70,7 +96,10 @@ def reference_candidates(metadata: dict[str, Any]) -> list[dict[str, Any]]:
             stripped_val = re.sub(r"https?://[^\s)\]]+", "", stripped_val)
             for command in shell_segments(stripped_val):
                 prefix = re.split(r"\{|\$|%[A-Za-z_]+%|<", command, maxsplit=1)[0].strip()
-                if any(bad in prefix for bad in ("](", ") [", "<http", "http://", "https://", "href=", "<a ")):
+                if any(
+                    bad in prefix
+                    for bad in ("](", ") [", "<http", "http://", "https://", "href=", "<a ")
+                ):
                     continue
                 match = re.match(r"^([\w.\\/+-]+)\s+(.+)", prefix)
                 if not match or "\n" in prefix:

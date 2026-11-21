@@ -295,7 +295,7 @@ def _extract_cve_years(cves: set[str]) -> set[int]:
 
 
 _VERSION_CONTEXT_PREFIX_RE = re.compile(
-    r"(?i)(?:version|versions|ver|v\.?|jdk|openjdk|build|update|release|patch|rev|revision|glibc|kernel|openssl|python|node|ruby|go|curl|git|linux|apache|nginx|software|lib[\w-]*|fixed\s+in|affected(?:\s+versions?)?|upgrade\s+to|released\s+in)\s*[:=vV-]?\s*[-*]?\s*(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:[,\s\-*]+|and|or|\/)+)*$"
+    r"(?i)(?:version|versions|ver|v\.?|jdk|openjdk|build|update|release|patch|rev|revision|glibc|kernel|openssl|python|node|ruby|go|curl|git|linux|apache|nginx|tomcat|software|lib[\w-]*|fixed\s+in|affected(?:\s+versions?)?|upgrade\s+to|released\s+in)(?:\s+[\w.-]+){0,2}\s*[:=vV-]?\s*[-*]?\s*(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:[,\s\-*]+|and|or|\/)+)*$"
 )
 _VERSION_CONTEXT_SUFFIX_RE = re.compile(
     r"(?i)^(?:\.GA|\.Final|-ea|-rc\d*|-beta\d*|-alpha\d*|\.tar|\.zip|\.gz|\.deb|\.rpm|\+[\w.-]+)"
@@ -334,14 +334,29 @@ def _is_version_context(text: str, start: int, end: int) -> bool:
     line = text[line_start:line_end]
     if line.count("|") >= 2:
         window = text[max(0, start - 250) : min(len(text), end + 250)].lower()
-        if any(term in window for term in ("version", "baseline", "fixed", "patch", "build", "release", "openjdk", "jdk")):
+        if any(
+            term in window
+            for term in (
+                "version",
+                "baseline",
+                "fixed",
+                "patch",
+                "build",
+                "release",
+                "openjdk",
+                "jdk",
+            )
+        ):
             return True
 
     # Markdown table column or link header indicating version
     # e.g. "| 17.0.21.1 |" or "[17.0.21.1]"
     if start > 0 and text[start - 1] in "|[" and suffix.startswith((" |", "]", "|")):
         window = text[max(0, start - 200) : min(len(text), end + 200)].lower()
-        if any(term in window for term in ("version", "fixed in", "affected", "openjdk", "jdk", "release")):
+        if any(
+            term in window
+            for term in ("version", "fixed in", "affected", "openjdk", "jdk", "release")
+        ):
             return True
 
     return False
@@ -422,7 +437,9 @@ class ThreatEntityExtractor:
                     cleaned_ip = ip.strip()
                     if text and cleaned_ip in text:
                         m_pos = text.find(cleaned_ip)
-                        if m_pos != -1 and _is_version_context(text, m_pos, m_pos + len(cleaned_ip)):
+                        if m_pos != -1 and _is_version_context(
+                            text, m_pos, m_pos + len(cleaned_ip)
+                        ):
                             continue
                     iocs.add(cleaned_ip)
             for dom in ind.get("domain", []) + ind.get("hostname", []):
@@ -633,8 +650,15 @@ class ThreatEntityCorrelator:
             url = (item.source_url or "").strip()
             if (
                 url
-                and (url in prof.source_refs or any(url in ref or ref in url for ref in prof.source_refs))
-                and not (has_temporal_disparity and not (item_cves & prof.cves) and not (item_actors & prof.actors))
+                and (
+                    url in prof.source_refs
+                    or any(url in ref or ref in url for ref in prof.source_refs)
+                )
+                and not (
+                    has_temporal_disparity
+                    and not (item_cves & prof.cves)
+                    and not (item_actors & prof.actors)
+                )
             ):
                 score += 1.0
                 matched_types.append("source_url")
@@ -660,7 +684,9 @@ class ThreatEntityCorrelator:
                 for ioc in (item_network_iocs & prof.network_iocs)
                 if _is_c2_correlation_candidate(ioc)
             }
-            if shared_net and not (has_temporal_disparity and not shared_cves and not shared_actors):
+            if shared_net and not (
+                has_temporal_disparity and not shared_cves and not shared_actors
+            ):
                 score += 0.95
                 matched_types.append("shared_c2_ioc")
                 matched_items.extend(sorted(shared_net))
