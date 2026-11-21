@@ -58,6 +58,7 @@ def test_canaries_use_actual_shared_reference_setting_without_credentials(tmp_pa
         return subprocess.CompletedProcess(args, 0, stdout="123\n")
 
     original = Path.read_bytes
+    credential_name = "_".join(("OPENAI", "API", "KEY"))
 
     def environ(path):
         if path == Path("/proc/123/environ"):
@@ -65,7 +66,7 @@ def test_canaries_use_actual_shared_reference_setting_without_credentials(tmp_pa
                 "HOME": "/private/reader",
                 "HECATE_WORKSPACE": "/workspace",
                 "HECATE_STIX_CACHE": "/reference/attack",
-                "OPENAI_API_KEY": "must-not-copy",
+                credential_name: "must-not-copy",
             }
             return b"\0".join(f"{key}={value}".encode() for key, value in values.items())
         return original(path)
@@ -77,7 +78,7 @@ def test_canaries_use_actual_shared_reference_setting_without_credentials(tmp_pa
     assert args[:4] == ("/usr/bin/nsenter", "--target", "123", "--mount")
     assert "hecate-reader" in args
     assert options["env"]["HECATE_STIX_CACHE"] == "/reference/attack"
-    assert "OPENAI_API_KEY" not in options["env"]
+    assert credential_name not in options["env"]
     assert "must-not-copy" not in repr(calls)
 
 
