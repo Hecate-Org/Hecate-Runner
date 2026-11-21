@@ -181,9 +181,11 @@ of separately configured integrations, or Slack user/channel authorization.
 After building a new stage, use `sudo scripts/update-service-runtime.py
 --runtime-stage /path/to/stage`. It preserves installed identities, credential
 files, workspace permissions and unit profiles, validates the candidate, switches
-runtime releases atomically, and verifies local outbox access as the writer in
-its service mount namespace. It restores the previous runtime if activation or
-that access check fails. The check does not publish queued content remotely.
+runtime releases atomically, and checks worker startup/cancellation, configured
+read-only ATT&CK data and local writer outbox access in the service mount
+namespaces. It restores the previous runtime if activation or a check fails.
+The prepared stage records source commits, wheel hashes and exact dependencies
+in `release-manifest.json`; commit source changes before preparing a stage. The check does not publish queued content remotely.
 Mount-namespace probes do not inherit an existing service's syscall filters.
 Before relying on publication, exercise local outbox initialization through an
 actual hardened service as well. The Linux regression suite also applies a real

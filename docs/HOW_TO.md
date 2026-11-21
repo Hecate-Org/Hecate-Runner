@@ -211,7 +211,12 @@ In `logs/stage_metrics.jsonl`, the `source_evidence` stage's `details` field rec
 per-chunk/classification duration, retry depth, cache status, reported input/output
 tokens, and budget status. Cache hits do not repeat the original token usage or
 cost. The existing `HECATE_RUNNER_LLM_TIMEOUT_SEC` remains the shared hard deadline
-for fetching, extraction, and classification.
+for fetching, extraction, and classification. Research, hypothesis and Sigma
+generation also run in separate worker processes under their stage deadlines. A
+timeout or Python cancellation kills the worker process group on POSIX, closing
+provider connections and preventing late writes. Completed files written before
+cancellation remain for inspection; cancellation does not undo remote API charges.
+Explicit nonpositive stage timeouts disable the deadline.
 
 ### Catalog indexing
 

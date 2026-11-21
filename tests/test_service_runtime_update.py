@@ -46,3 +46,45 @@ def test_unprivileged_updates_stop_before_host_mutations(tmp_path, monkeypatch):
     monkeypatch.setattr(updater.os, "geteuid", lambda: 1000)
     with pytest.raises(PermissionError, match="sudo"):
         updater.update(tmp_path)
+
+
+def test_canaries_use_actual_shared_reference_setting_without_credentials(tmp_path, monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def command(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="123\n")
+
+    original = Path.read_bytes
+
+    def environ(path):
+        if path == Path("/proc/123/environ"):
+            return (
+                b"HOME=/private/reader\0HECATE_WORKSPACE=/workspace\0"
+                b"HECATE_STIX_CACHE=/reference/attack\0OPENAI_API_KEY=must-not-copy\0"
+            )
+        return original(path)
+
+    monkeypatch.setattr(updater.installer, "command", command)
+    monkeypatch.setattr(Path, "read_bytes", environ)
+    updater.check_service_canaries("hecate-runner-daemon", "reader", tmp_path)
+    args, options = calls[-1]
+    assert args[:4] == ("/usr/bin/nsenter", "--target", "123", "--mount")
+    assert "hecate-reader" in args
+    assert options["env"]["HECATE_STIX_CACHE"] == "/reference/attack"
+    assert "OPENAI_API_KEY" not in options["env"]
+    assert "must-not-copy" not in repr(calls)
+
+
+def test_canaries_reject_missing_live_service_before_entering_namespace(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        updater.installer,
+        "command",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="0\n"),
+    )
+    with pytest.raises(ValueError, match="No live process"):
+        updater.check_service_canaries("hecate-runner-daemon", "reader", tmp_path)

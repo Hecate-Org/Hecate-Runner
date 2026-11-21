@@ -134,7 +134,7 @@ def test_research_usage_keeps_context_metrics_across_client_boundary(tmp_path, m
     from hecate_runner.hecate_client import HecateClient
 
     client = HecateClient(hecate_bin=tmp_path / "hecate-agent", workspace=tmp_path)
-    result = client.research_new(topic="test")
+    result = client._research_new_local(topic="test")
     assert result.usage.input_tokens == 4000
     assert result.usage.max_input_tokens == 1800
     assert result.usage.input_token_samples == 4

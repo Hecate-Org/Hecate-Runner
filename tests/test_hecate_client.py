@@ -40,7 +40,7 @@ def test_source_context_is_forwarded(client: HecateClient, monkeypatch: pytest.M
         return _output(["process.cmd_line: shell"]), Path("r.md")
 
     monkeypatch.setattr(hecate_agent.api, "generate_research", generate_research)
-    client.research_new(topic="PolinRider", source_context="font-file payloads")
+    client._research_new_local(topic="PolinRider", source_context="font-file payloads")
     assert seen["source_context"] == "font-file payloads"
 
 
@@ -53,7 +53,7 @@ def test_a_hecate_without_source_context_still_researches(
         return _output([]), Path("r.md")
 
     monkeypatch.setattr(hecate_agent.api, "generate_research", generate_research)
-    assert client.research_new(topic="t", source_context="body").research_id == "R-0001"
+    assert client._research_new_local(topic="t", source_context="body").research_id == "R-0001"
 
 
 @pytest.mark.parametrize(
@@ -71,7 +71,7 @@ def test_describes_behavior_reads_the_telemetry_verdict(
     monkeypatch.setattr(
         hecate_agent.api, "generate_research", lambda **kw: (_output(findings), Path("r.md"))
     )
-    assert client.research_new(topic="t").describes_behavior is expected
+    assert client._research_new_local(topic="t").describes_behavior is expected
 
 
 # --- sigma_generator ---------------------------------------------------------
@@ -125,7 +125,7 @@ def test_sigma_paths_ignore_interleaved_native_query_files(
     else:
         monkeypatch.delattr(hecate_agent.api, "generate_sigma_with_metrics")
         monkeypatch.setattr(hecate_agent.api, "generate_sigma", lambda **kwargs: (output, paths))
-    result = client.sigma_generator({"hunt_id": "H-TEST"}, tmp_path)
+    result = client._sigma_generator_local({"hunt_id": "H-TEST"}, tmp_path)
     assert [r["path"] for r in result.rules] == [
         str(tmp_path / "dns.yml"),
         str(tmp_path / "file.yml"),
@@ -147,7 +147,7 @@ def test_every_rule_rejected_is_an_outcome_not_an_error(
     )
     client = HecateClient(hecate_bin=Path("hecate-agent"), workspace=tmp_path)
 
-    result = client.sigma_generator({"hunt_id": "H-0017"}, tmp_path / "q")
+    result = client._sigma_generator_local({"hunt_id": "H-0017"}, tmp_path / "q")
 
     assert result.success is False
     assert result.rules == []
@@ -169,7 +169,7 @@ def test_a_real_sigma_failure_is_reported_not_raised(
     )
     client = HecateClient(hecate_bin=Path("hecate-agent"), workspace=tmp_path)
 
-    result = client.sigma_generator({"hunt_id": "H-0017"}, tmp_path / "q")
+    result = client._sigma_generator_local({"hunt_id": "H-0017"}, tmp_path / "q")
 
     assert result.success is False
     assert result.error == "Sigma generation requires an LLM"
@@ -189,7 +189,7 @@ def test_fallback_every_rule_rejected_is_an_outcome_not_an_error(
     monkeypatch.setattr(hecate_agent.api, "generate_sigma", generate_sigma)
     client = HecateClient(hecate_bin=Path("hecate-agent"), workspace=tmp_path)
 
-    result = client.sigma_generator({"hunt_id": "H-0017"}, tmp_path / "q")
+    result = client._sigma_generator_local({"hunt_id": "H-0017"}, tmp_path / "q")
 
     assert result.success is False
     assert result.rules == []
@@ -210,4 +210,4 @@ def test_fallback_a_real_sigma_failure_still_raises(
     client = HecateClient(hecate_bin=Path("hecate-agent"), workspace=tmp_path)
 
     with pytest.raises(HecateError):
-        client.sigma_generator({"hunt_id": "H-0017"}, tmp_path / "q")
+        client._sigma_generator_local({"hunt_id": "H-0017"}, tmp_path / "q")

@@ -6,13 +6,14 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -166,50 +167,130 @@ class HecateClient:
             raise HecateError(f"Hecate API error: {exc}", usage=usage) from exc
 
     def _resolve_timeout(self, timeout_sec: int | float | None) -> float | None:
-        """Effective stage deadline; ``None``/``<=0`` disables enforcement."""
+        """Use the configured deadline for None; explicit nonpositive values disable it."""
         if timeout_sec is None:
             timeout_sec = self.default_timeout_sec
         try:
             value = float(timeout_sec)
         except (TypeError, ValueError):
-            return None
+            raise ValueError("Stage timeout must be a finite number") from None
+        if not math.isfinite(value):
+            raise ValueError("Stage timeout must be a finite number")
         return value if value > 0 else None
 
-    def _with_deadline(
-        self,
-        timeout_sec: int | float | None,
-        func: Callable[..., Any],
-        *args: Any,
-        stage: str = "hecate",
-        **kwargs: Any,
-    ) -> Any:
-        """Run an in-process Hecate API call under a wall-clock deadline.
+    def _run_stage(
+        self, stage: str, arguments: dict[str, Any], timeout_sec: int | float | None
+    ) -> dict[str, Any]:
+        """Run generation in a fresh interpreter, killing its group on cancellation.
 
-        Uses a worker thread so the orchestrator cycle can fail closed when a
-        provider hangs past ``timeout_sec``. The executor is shut down without
-        waiting so a timed-out cycle returns promptly; the abandoned worker may
-        still finish in the background until the provider's own timeout. Stages
-        that must hard-kill side effects should use a process worker instead.
+        A timed-out stage cannot continue provider calls or write late artifacts.
+        Files already written before cancellation are not rolled back.
         """
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import TimeoutError as FuturesTimeout
+        from hecate_runner.subprocess_utils import run_process_group
 
         deadline = self._resolve_timeout(timeout_sec)
-        if deadline is None:
-            return self._with_context(func, *args, **kwargs)
-
-        # Do not use ``with ThreadPoolExecutor``: its __exit__ waits for the
-        # worker, which turns a short deadline into a full hang (EVAL-08-002).
-        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"hecate-{stage}")
+        env = {**os.environ, **self.env_overrides}
+        env["HECATE_WORKSPACE"] = str(self.workspace.resolve())
         try:
-            future = pool.submit(self._with_context, func, *args, **kwargs)
-            try:
-                return future.result(timeout=deadline)
-            except FuturesTimeout as exc:
-                future.cancel()
-                raise TimeoutError(f"{stage} timed out after {deadline:g} seconds") from exc
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+            completed = run_process_group(
+                [sys.executable, "-m", "hecate_runner.api_worker"],
+                input=json.dumps({"stage": stage, "arguments": arguments}),
+                timeout=deadline,
+                cwd=self.workspace,
+                env=env,
+                check=True,
+            )
+        except subprocess.TimeoutExpired:
+            raise TimeoutError(f"{stage} timed out after {deadline:g} seconds") from None
+        except subprocess.CalledProcessError as exc:
+            # Never include provider output, inputs or credentials in service logs.
+            raise HecateError(f"{stage} worker exited with status {exc.returncode}") from None
+        try:
+            response = json.loads(completed.stdout)
+            if response.get("version") != 1 or not isinstance(response.get("ok"), bool):
+                raise ValueError("Invalid response envelope")
+            if not response["ok"]:
+                usage = response.get("usage")
+                raise HecateError(
+                    f"{stage} API call failed in isolated worker",
+                    usage=LLMUsage(**usage) if isinstance(usage, dict) else None,
+                )
+            result = response["result"]
+            if not isinstance(result, dict):
+                raise ValueError("Invalid result")
+            result_type = {
+                "research": ResearchResult,
+                "hypothesis": HypothesisResult,
+                "sigma": SigmaResult,
+            }[stage]
+            if set(result) != {item.name for item in fields(result_type)}:
+                raise ValueError("Incomplete result")
+            usage = result.get("usage")
+            result["usage"] = LLMUsage(**usage) if isinstance(usage, dict) else None
+            return result
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise HecateError(f"{stage} worker returned an invalid response") from None
+
+    def research_new(
+        self,
+        topic: str,
+        technique: str | None = None,
+        depth: str = "basic",
+        timeout_sec: int | float | None = None,
+        web_search_enabled: bool = True,
+        source_context: str | None = None,
+    ) -> ResearchResult:
+        result = self._run_stage(
+            "research",
+            dict(
+                topic=topic,
+                technique=technique,
+                depth=depth,
+                web_search_enabled=web_search_enabled,
+                source_context=source_context,
+            ),
+            timeout_sec,
+        )
+        try:
+            return ResearchResult(**result)
+        except TypeError:
+            raise HecateError("research worker returned an invalid result") from None
+
+    def hypothesis_generator(
+        self,
+        threat_intel: str,
+        research_id: str | None = None,
+        timeout_sec: int | float | None = None,
+        indicators_only: bool = False,
+    ) -> HypothesisResult:
+        result = self._run_stage(
+            "hypothesis",
+            dict(
+                threat_intel=threat_intel, research_id=research_id, indicators_only=indicators_only
+            ),
+            timeout_sec,
+        )
+        try:
+            return HypothesisResult(**result)
+        except TypeError:
+            raise HecateError("hypothesis worker returned an invalid result") from None
+
+    def sigma_generator(
+        self,
+        payload: dict[str, Any],
+        out_dir: Path,
+        timeout_sec: int | float | None = None,
+    ) -> SigmaResult:
+        result = self._run_stage(
+            "sigma",
+            dict(payload=payload, out_dir=str(out_dir)),
+            timeout_sec,
+        )
+        try:
+            result["files"] = [Path(path) for path in result["files"]]
+            return SigmaResult(**result)
+        except (KeyError, TypeError):
+            raise HecateError("sigma worker returned an invalid result") from None
 
     def source_evidence(self, url: str) -> Any:
         """Verified artifacts from the report at ``url`` (hecate_agent.core.source_evidence).
@@ -279,7 +360,7 @@ class HecateClient:
 
         return list(self._with_context(build_indicator_records, indicators, evidence))
 
-    def research_new(
+    def _research_new_local(
         self,
         topic: str,
         technique: str | None = None,
@@ -295,15 +376,13 @@ class HecateClient:
         # researches from the topic alone rather than failing the cycle.
         if source_context and "source_context" in inspect.signature(generate_research).parameters:
             kwargs["source_context"] = source_context
-        output, _ = self._with_deadline(
-            timeout_sec,
+        output, _ = self._with_context(
             generate_research,
             topic=topic,
             technique=technique,
             depth=depth,
             web_search_enabled=web_search_enabled,
             workspace=self.workspace,
-            stage="research",
             **kwargs,
         )
         related_hunts = []
@@ -339,7 +418,7 @@ class HecateClient:
             ),
         )
 
-    def hypothesis_generator(
+    def _hypothesis_generator_local(
         self,
         threat_intel: str,
         research_id: str | None = None,
@@ -356,15 +435,11 @@ class HecateClient:
             "workspace": self.workspace,
         }
         if generate_with_metrics is not None:
-            output, metadata = self._with_deadline(
-                timeout_sec, generate_with_metrics, stage="hypothesis", **kwargs
-            )
+            output, metadata = self._with_context(generate_with_metrics, **kwargs)
             usage = LLMUsage.from_metadata(metadata)
             fallback = bool(metadata.get("fallback", False))
         else:  # older Core releases still get wall latency from the Runner
-            output = self._with_deadline(
-                timeout_sec, api.generate_hypothesis, stage="hypothesis", **kwargs
-            )
+            output = self._with_context(api.generate_hypothesis, **kwargs)
             usage = None
             fallback = False
         return HypothesisResult(
@@ -393,7 +468,7 @@ class HecateClient:
             fallback=fallback,
         )
 
-    def sigma_generator(
+    def _sigma_generator_local(
         self,
         payload: dict[str, Any],
         out_dir: Path,
@@ -410,12 +485,7 @@ class HecateClient:
             }
             if "workspace" in inspect.signature(generate_with_metrics).parameters:
                 kwargs["workspace"] = self.workspace
-            output, files, metadata = self._with_deadline(
-                timeout_sec,
-                generate_with_metrics,
-                stage="sigma",
-                **kwargs,
-            )
+            output, files, metadata = self._with_context(generate_with_metrics, **kwargs)
             usage = LLMUsage.from_metadata(metadata)
             # Core interleaves each Sigma file with native query files. Only
             # Sigma paths correspond to output.rules; assigning a .kql/.cql
@@ -465,7 +535,7 @@ class HecateClient:
                     rejected=[r for r in reasons.group(1).split("; ") if r],
                 )
 
-        generated = self._with_deadline(timeout_sec, generate, stage="sigma")
+        generated = self._with_context(generate)
         if isinstance(generated, SigmaResult):
             return generated
         output, files = generated
