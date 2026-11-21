@@ -55,6 +55,72 @@ def select_runtime(current: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def check_service_canaries(unit: str, role: str, current: Path) -> None:
+    """Offline checks in the running role's mount namespace; no model calls."""
+    pid = installer.command(
+        "/usr/bin/systemctl", "show", unit, "--property=MainPID", "--value"
+    ).stdout.strip()
+    if not pid.isdigit() or int(pid) <= 1:
+        raise ValueError(f"No live process for {unit}")
+    # Carry only nonsecret configuration from the actual process, including
+    # shared reference settings supplied by systemd drop-ins.
+    allowed = {"HOME", "HECATE_WORKSPACE", "HECATE_STIX_CACHE"}
+    env = {}
+    for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if separator and key.decode() in allowed:
+            env[key.decode()] = value.decode()
+    if not {"HOME", "HECATE_WORKSPACE"} <= env.keys():
+        raise ValueError(f"Missing runtime environment for {unit}")
+    env.update(PATH="/usr/bin:/bin", HECATE_SERVICE_ISOLATED="1", PYTHON_DOTENV_DISABLED="1")
+    code = """
+import os
+import subprocess
+import sys
+from pathlib import Path
+from hecate_runner.hecate_client import HecateClient, HecateError
+from hecate_runner.subprocess_utils import run_process_group
+
+cache = os.environ.get("HECATE_STIX_CACHE")
+if cache:
+    from hecate_agent.api import lookup_technique
+    for tid, name in {"T1059.001": "PowerShell", "T1059.002": "AppleScript", "T1059.007": "JavaScript"}.items():
+        assert lookup_technique(tid).get("name") == name
+    for path in (Path(cache), Path(cache) / "enterprise-attack.json", Path(cache) / "enterprise-attack.sqlite3"):
+        assert os.access(path, os.R_OK) and not os.access(path, os.W_OK)
+client = HecateClient(Path(sys.executable), Path(os.environ["HECATE_WORKSPACE"]))
+try:
+    client._run_stage("readiness-probe", {}, 10)
+except HecateError as exc:
+    assert str(exc) == "readiness-probe API call failed in isolated worker"
+else:
+    raise RuntimeError("Worker accepted an unsupported operation")
+try:
+    run_process_group([sys.executable, "-I", "-c", "import time; time.sleep(30)"], timeout=0.1)
+except subprocess.TimeoutExpired:
+    pass
+else:
+    raise RuntimeError("Process deadline failed")
+"""
+    installer.command(
+        "/usr/bin/nsenter",
+        "--target",
+        pid,
+        "--mount",
+        "--",
+        "/usr/sbin/runuser",
+        "-u",
+        f"hecate-{role}",
+        "--",
+        str(current / "venv/bin/python"),
+        "-I",
+        "-c",
+        code,
+        env=env,
+        cwd=current,
+    )
+
+
 def update(stage: Path) -> None:
     if os.geteuid() != 0:
         raise PermissionError("Runtime replacement requires sudo")
@@ -102,6 +168,9 @@ def update(stage: Path) -> None:
         time.sleep(3)
         for unit in installer.UNITS:
             installer.command("/usr/bin/systemctl", "is-active", unit)
+        phase = "service-account worker and reference canaries"
+        for unit, role in zip(installer.UNITS[:-1], installer.ROLES, strict=True):
+            check_service_canaries(unit, role, current)
         phase = "publication outbox access verification"
         pid = installer.command(
             "/usr/bin/systemctl",
@@ -150,7 +219,9 @@ def update(stage: Path) -> None:
             env=env,
             cwd=current,
         )
-        print("Updated isolated runtime active; GitHub and MISP outbox access verified.")
+        print(
+            "Updated isolated runtime active; role worker/reference canaries and outbox access verified."
+        )
         print(f"Private recovery snapshot: {backup}")
     except Exception as failure:
         with suppress(OSError):
