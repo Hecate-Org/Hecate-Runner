@@ -268,3 +268,86 @@ def test_repeated_short_deadlines_do_not_accumulate_threads_or_fds(isolated_clie
     if descriptors is not None:
         assert len(list(Path("/proc/self/fd").iterdir())) <= descriptors + 1
     assert invoke(isolated_client, "research").research_id == "R-TEST"
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize("stage", ["research", "hypothesis", "sigma", "source"])
+def test_workers_inherit_interpreter_isolation(tmp_path, monkeypatch, isolated, stage):
+    import subprocess
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from hecate_runner import hecate_client
+    from hecate_runner.hecate_client import HypothesisResult, ResearchResult, SigmaResult
+
+    monkeypatch.setattr(
+        hecate_client,
+        "sys",
+        SimpleNamespace(executable=sys.executable, flags=SimpleNamespace(isolated=isolated)),
+    )
+    commands = []
+    result = {
+        "research": asdict(ResearchResult()),
+        "hypothesis": asdict(HypothesisResult()),
+        "sigma": asdict(SigmaResult(success=True)),
+    }
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if stage == "source":
+            from hecate_agent.core.source_evidence import SourceEvidence
+
+            response = {
+                "evidence": asdict(SourceEvidence(url="https://example.test")),
+                "records": [],
+            }
+        else:
+            response = {"version": 1, "ok": True, "result": result[stage]}
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(response))
+
+    monkeypatch.setattr("hecate_runner.subprocess_utils.run_process_group", run)
+    client = HecateClient(Path(sys.executable), tmp_path)
+    if stage == "source":
+        client.source_evidence_with_indicators("https://example.test", {}, timeout_sec=2)
+    else:
+        invoke(client, stage)
+    assert ("-I" in commands[0]) is isolated
+    assert commands[0][-2] == "-m"
+
+
+def test_isolated_service_worker_cannot_be_shadowed_by_workspace(tmp_path):
+    import subprocess
+    from dataclasses import asdict
+
+    from hecate_runner.hecate_client import ResearchResult
+
+    package = tmp_path / "hecate_runner"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    response = json.dumps({"version": 1, "ok": True, "result": asdict(ResearchResult())})
+    (package / "api_worker.py").write_text(
+        "from pathlib import Path\n"
+        "Path('workspace-code-ran').write_text('unexpected')\n"
+        f"print({response!r})\n"
+    )
+    script = """
+import sys
+from pathlib import Path
+from hecate_runner.hecate_client import HecateClient, HecateError
+assert sys.flags.isolated
+try:
+    HecateClient(Path(sys.executable), Path.cwd())._run_stage('readiness', {}, 10)
+except HecateError as error:
+    assert str(error) == 'readiness API call failed in isolated worker', str(error)
+else:
+    raise AssertionError('Worker accepted unsupported operation')
+"""
+    subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    assert not (tmp_path / "workspace-code-ran").exists()

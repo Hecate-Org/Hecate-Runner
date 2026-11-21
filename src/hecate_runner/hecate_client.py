@@ -193,7 +193,12 @@ class HecateClient:
         env["HECATE_WORKSPACE"] = str(self.workspace.resolve())
         try:
             completed = run_process_group(
-                [sys.executable, "-m", "hecate_runner.api_worker"],
+                [
+                    sys.executable,
+                    *(["-I"] if sys.flags.isolated else []),
+                    "-m",
+                    "hecate_runner.api_worker",
+                ],
                 input=json.dumps({"stage": stage, "arguments": arguments}),
                 timeout=deadline,
                 cwd=self.workspace,
@@ -325,7 +330,12 @@ class HecateClient:
         env["HECATE_WORKSPACE"] = str(self.workspace.resolve())
         try:
             result = run_process_group(
-                [sys.executable, "-m", "hecate_runner.source_evidence_worker"],
+                [
+                    sys.executable,
+                    *(["-I"] if sys.flags.isolated else []),
+                    "-m",
+                    "hecate_runner.source_evidence_worker",
+                ],
                 input=json.dumps({"url": url, "indicators": indicators}),
                 timeout=timeout_sec,
                 cwd=self.workspace,
