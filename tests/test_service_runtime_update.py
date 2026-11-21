@@ -61,10 +61,13 @@ def test_canaries_use_actual_shared_reference_setting_without_credentials(tmp_pa
 
     def environ(path):
         if path == Path("/proc/123/environ"):
-            return (
-                b"HOME=/private/reader\0HECATE_WORKSPACE=/workspace\0"
-                b"HECATE_STIX_CACHE=/reference/attack\0OPENAI_API_KEY=must-not-copy\0"
-            )
+            values = {
+                "HOME": "/private/reader",
+                "HECATE_WORKSPACE": "/workspace",
+                "HECATE_STIX_CACHE": "/reference/attack",
+                "OPENAI_API_KEY": "must-not-copy",
+            }
+            return b"\0".join(f"{key}={value}".encode() for key, value in values.items())
         return original(path)
 
     monkeypatch.setattr(updater.installer, "command", command)
